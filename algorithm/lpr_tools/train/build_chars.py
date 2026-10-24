@@ -16,7 +16,7 @@ import numpy as np
 from lpr.charnorm import normalize_char, unify_polarity
 from lpr.charset import CHAR_TO_INDEX, CHARSET
 from lpr.config import load_config
-from lpr.io_utils import imread, imwrite
+from lpr.io_utils import decode_image, imread, imwrite
 from lpr_tools.data.ccpd import read_index
 
 INDEX_FIELDS = ("path", "source_path", "split", "label", "char", "plate_no", "position")
@@ -115,9 +115,10 @@ def _preflight_one(item, config):
             return None, None, None
         return None, None, f"missing image: {source}"
     try:
-        digest = _hash_file(source)
+        source_bytes = source.read_bytes()
     except OSError as exc:
         return None, None, str(exc)
+    digest = hashlib.sha256(source_bytes).hexdigest()
     if split == "test":
         return digest, None, None
     try:
@@ -130,7 +131,9 @@ def _preflight_one(item, config):
             raise ValueError(f"unsupported plate label/layout: {plate!r}")
         if row.get("plate_color", "") not in {"blue", "yellow", "green", "white", "black"}:
             raise ValueError(f"invalid plate_color: {row.get('plate_color', '')!r}")
-        image = imread(source)
+        image = decode_image(source_bytes)
+        if image is None:
+            raise ValueError(f"无法解码图像：{source}")
         quad = _parse_quad(row.get("quad", ""), image.shape)
         centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
         char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
