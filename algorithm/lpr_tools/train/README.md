@@ -90,3 +90,23 @@ cap=1 优先 train。此规则避免索引中 train 在前时耗尽 val 额度�
 source_path 为原图绝对路径，position 从 0 开始。
 `chars_stats.json` 保存每类数量、split 总数、排除图数和每类截断数，
 同时向标准输出打印 65 类数量表。
+
+## 三种字符分类器对比
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.eval.ablation --chars algorithm/data/chars_synth/val --models cnn=algorithm/out/models/char_cnn_synth.pt template=algorithm/out/models/templates_synth.npz svm=algorithm/out/models/svm_synth.joblib --out algorithm/out/ablation
+```
+
+同一批字符在加载后分别交给三种分类器，支持只包含部分类别的目录。
+输出 `ablation.md`：总体、省份字、字母数字准确率（同时给出样本数）、
+单字符平均推理耗时、模型 MiB 和训练秒数。缺样本的分组显示 N/A。
+每个模型先做 5 次单字符预热，再逐字符计时；不计图像读取、模型加载和指标计算，
+Torch 固定为 2 线程。此处的单字符延迟和 8 字符批量延迟属于不同测量口径。
+
+训练耗时依次读取 manifest 的 `train_seconds` / `training_seconds`、
+模型同名 `.training.json` 的 `train_seconds`、同名 `.train.csv` 的
+`epoch_seconds` 之和。旧模型无记录时显示 N/A，不根据文件时间推测。
+整牌准确率保留独立章节；后续可调用
+`fill_plate_accuracy(report_path, {"clear": 0.95, "night": 0.8})`
+回填 `eval_accuracy` 的结果，数值必须有限且位于 [0,1]。
+字符准确率不能代替整牌准确率；合成字符对比只作工程冒烟。
