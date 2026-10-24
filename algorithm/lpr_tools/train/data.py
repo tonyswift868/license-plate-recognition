@@ -10,7 +10,7 @@ from lpr.io_utils import imread
 
 
 def load_split(root: Path, split: str, *, max_per_class: int | None = None,
-               seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+               seed: int = 42, require_all: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Read already-normalized chars/<split>/<label>/*.png in charset order.
 
     Require all classes to avoid silently producing an incomplete model.
@@ -20,7 +20,7 @@ def load_split(root: Path, split: str, *, max_per_class: int | None = None,
     images, labels = [], []
     for label in range(NUM_CLASSES):
         paths = sorted((Path(root) / split / str(label)).glob("*.png"))
-        if not paths:
+        if not paths and require_all:
             raise ValueError(f"missing samples for {split} class {label}")
         if max_per_class is not None and len(paths) > max_per_class:
             paths = [paths[i] for i in sorted(rng.choice(len(paths), max_per_class, replace=False))]
@@ -30,4 +30,6 @@ def load_split(root: Path, split: str, *, max_per_class: int | None = None,
                 raise ValueError(f"expected normalized 32 x 32 uint8: {path}")
             images.append(image)
             labels.append(label)
+    if not images:
+        return np.empty((0, 32, 32), dtype=np.uint8), np.empty((0,), dtype=np.int64)
     return np.stack(images), np.asarray(labels, dtype=np.int64)

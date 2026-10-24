@@ -32,9 +32,12 @@ class SvmClassifier:
 
     def __init__(self, version: str, model) -> None:
         self.version = version
-        if (not np.array_equal(model.classes_, np.arange(NUM_CLASSES))
-                or model.n_features_in_ != HOG_SIZE or not model.probability):
-            raise ValueError("expected probability SVC with all 65 classes and 324 HOG features")
+        if (not hasattr(model, "classes_") or not np.array_equal(model.classes_, np.arange(NUM_CLASSES))
+                or getattr(model, "n_features_in_", None) != HOG_SIZE
+                or not callable(getattr(model, "predict_proba", None))):
+            raise ValueError("expected probability SVC/calibrator with all 65 classes and 324 HOG features")
+        if hasattr(model, "probability") and not model.probability:
+            raise ValueError("SVC must have probability=True")
         self.model = model
 
     @classmethod
