@@ -30,7 +30,8 @@ def color_vote(hsv: np.ndarray, cfg: LocateConfig) -> tuple[str, float]:
 
 
 def detection_masks(pre: PreprocessOut, cfg: LocateConfig) -> dict[str, np.ndarray]:
-    masks = color_masks(pre.hsv, cfg)
+    # Suppress isolated hue noise before closing can join it to a plate.
+    masks = {name: cv2.medianBlur(mask, 5) for name, mask in color_masks(pre.hsv, cfg).items()}
     sobel = cv2.convertScaleAbs(cv2.Sobel(pre.gray, cv2.CV_16S, 1, 0, ksize=3))
     masks['edge'] = cv2.threshold(sobel, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
     kw, kh = [max(1, round(v*pre.work_bgr.shape[1])) for v in cfg.close_kernel_rel]
