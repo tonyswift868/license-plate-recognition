@@ -41,3 +41,25 @@ CPU Torch 线程数为 2，OpenCV 为 1；random / NumPy / Torch 均固定种子
 噪声概率 0.5、标准差 1–8；对比度 0.85–1.15、亮度偏移 ±15；
 半径 1 px 腐蚀/膨胀概率 0.2；2–5 px 遮挡概率 0.2。
 概率和未由文档固定的数值是合成冒烟初值，后续须用真实训练/验证集调节。
+
+## 基线
+
+`build_templates --data algorithm/data/chars_synth --out algorithm/out/models/templates_synth.npz --version templates_synth`
+按训练类别取 float32 均值图，用 OpenCV `TM_CCOEFF_NORMED` 匹配，
+温度 softmax 默认 `--temperature 0.1`（待真实验证集校准）。
+
+`train_svm --data algorithm/data/chars_synth --out algorithm/out/models/svm_synth.joblib --version svm_synth`
+使用 `cv2.HOGDescriptor((32,32),(16,16),(8,8),(8,8),9)` 的 324 维特征，
+`SVC(kernel="rbf", C=10, probability=True, random_state=42)`，gamma 使用
+scikit-learn 默认的 `scale`。默认每类最多 500 张，可用 `--max-per-class`
+调低但不可超出 500；抽样由 `--seed` 控制，默认 42。
+两种模型都在独立 val 目录计算概率 argmax 准确率并登记 manifest。
+运行时每次调用独立创建 HOGDescriptor，模型只读，支持并发推理。
+
+OpenCV 必须提供 `cv2.HOGDescriptor`。工位最初预装的 OpenCV 5.0.0
+不提供此 API；代码明确报错，不以其他 HOG 实现替代规定特征。
+已按用户明确授权，仅在工位 01 的 `.venv` 安装
+`opencv-python==4.14.0.94`，NumPy 保持 2.5.4，全量测试通过。
+不修改本分支 requirements；统一依赖约束由架构师维护。
+当前 scikit-learn 1.9.1 会提示 `SVC(probability=True)` 将在 1.11 移除；
+本批按派工采用此选项，未来升级时可切换文档允许的 `CalibratedClassifierCV`。
