@@ -13,7 +13,7 @@ from lpr.recognize.svm import hog_features
 from lpr_tools.train.build_templates import build
 from lpr_tools.train.data import load_split
 from lpr_tools.train.synth_chars import generate_dataset
-from lpr_tools.train.train_svm import train
+from lpr_tools.train.train_svm import train, validation_accuracy
 
 
 @pytest.fixture(scope="module")
@@ -128,3 +128,29 @@ def test_sparse_svm_requires_two_trainable_classes(tmp_path):
     _write_sparse_chars(data, "val", {0: 1})
     with pytest.raises(ValueError, match="at least two classes"):
         train(data, tmp_path / "unused.joblib", version="too-small", calibrated=True)
+
+
+def test_svm_validation_accuracy_uses_bounded_batches_and_global_count():
+    class PredictByBatch:
+        def __init__(self):
+            self.batch_sizes = []
+            self.offset = 0
+
+        def predict_proba(self, images):
+            self.batch_sizes.append(len(images))
+            probs = np.zeros((len(images), 65), dtype=np.float32)
+            # Only the final two samples are wrong; this catches unweighted means
+            # of batch accuracies when the last batch is much smaller.
+            predictions = np.zeros(len(images), dtype=np.int64)
+            global_indexes = np.arange(self.offset, self.offset + len(images))
+            predictions[global_indexes >= 2048] = 1
+            probs[np.arange(len(images)), predictions] = 1
+            self.offset += len(images)
+            return probs
+
+    classifier = PredictByBatch()
+    images = np.zeros((2050, 32, 32), dtype=np.uint8)
+    labels = np.zeros(2050, dtype=np.int64)
+    assert validation_accuracy(classifier, images, labels) == pytest.approx(2048 / 2050)
+    assert classifier.batch_sizes == [1024, 1024, 2]
+    assert max(classifier.batch_sizes) <= 1024

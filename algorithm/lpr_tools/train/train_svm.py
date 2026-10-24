@@ -15,6 +15,21 @@ from lpr.recognize.svm import SvmClassifier, hog_features
 from .data import load_split
 
 
+def validation_accuracy(classifier, images: np.ndarray, labels: np.ndarray,
+                        *, batch_size: int = 1024) -> float:
+    """Accumulate exact validation correctness with a bounded prediction batch."""
+    if batch_size < 1 or len(images) != len(labels) or not len(labels):
+        raise ValueError("validation requires matching nonempty images/labels and batch_size > 0")
+    correct = 0
+    for start in range(0, len(labels), batch_size):
+        stop = min(start + batch_size, len(labels))
+        probs = classifier.predict_proba(images[start:stop])
+        if probs.shape != (stop - start, 65):
+            raise ValueError(f"classifier returned unexpected validation shape: {probs.shape}")
+        correct += int((probs.argmax(axis=1) == labels[start:stop]).sum())
+    return correct / len(labels)
+
+
 def train(data: Path, out: Path, *, version: str, seed: int = 42,
           max_per_class: int = 500, calibrated: bool = False) -> float:
     if not 2 <= max_per_class <= 500:
@@ -50,7 +65,7 @@ def train(data: Path, out: Path, *, version: str, seed: int = 42,
     val_images, val_labels = load_split(data, "val", require_all=False)
     if not len(val_labels):
         raise ValueError("SVM validation split is empty")
-    accuracy = float(np.mean(SvmClassifier(version, model).predict_proba(val_images).argmax(axis=1) == val_labels))
+    accuracy = validation_accuracy(SvmClassifier(version, model), val_images, val_labels)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, out)
