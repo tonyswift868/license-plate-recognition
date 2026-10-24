@@ -92,3 +92,16 @@ def test_locate_empty_black_tiny(cfg):
     assert locate(preprocess(image, cfg.preprocess), cfg.locate) == []
     image[300:303, 300:310] = (180, 65, 15)
     assert locate(preprocess(image, cfg.preprocess), cfg.locate) == []
+
+
+def test_nms_merged_geometry_still_suppresses_overlaps(cfg):
+    from lpr.locate import _nms
+    from lpr.types import PlateCandidate
+    def candidate(x, width, score, source):
+        return PlateCandidate([(x, 0), (x+width, 0), (x+width, 40), (x, 40)],
+                              (x, 0, width, 40), 'blue', score, source)
+    proposals = [candidate(50, 100, .95, 'edge'), candidate(0, 60, .92, 'color'),
+                 candidate(0, 180, .90, 'color')]
+    result = _nms(proposals, cfg.locate, 3)
+    assert len(result) == 1 and result[0].bbox == (0, 0, 180, 40)
+    assert result[0].source == 'merged' and result[0].score == .95

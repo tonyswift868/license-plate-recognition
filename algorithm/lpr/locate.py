@@ -90,6 +90,10 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
             bbox = (int(xy0[0]), int(xy0[1]), int(xy1[0]-xy0[0]+1), int(xy1[1]-xy0[1]+1))
             candidates.append(PlateCandidate([tuple(map(float, p)) for p in original], bbox, color,
                                              float(np.clip(score, 0, 1)), 'edge' if branch == 'edge' else 'color'))
+    return _nms(candidates, cfg, max_candidates)
+
+
+def _nms(candidates: list[PlateCandidate], cfg: LocateConfig, max_candidates: int) -> list[PlateCandidate]:
     kept = []
     for candidate in sorted(candidates, key=lambda c: c.score, reverse=True):
         duplicate = next((c for c in kept if box_iou(c.bbox, candidate.bbox) > cfg.nms_iou), None)
@@ -104,4 +108,10 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
                 duplicate.source = 'merged'
         else:
             kept.append(candidate)
-    return kept[:max_candidates]
+    # Merging can enlarge a box enough to overlap an earlier independent
+    # proposal. Reapply suppression after geometry is final.
+    final = []
+    for candidate in kept:
+        if all(box_iou(candidate.bbox, other.bbox) <= cfg.nms_iou for other in final):
+            final.append(candidate)
+    return final[:max_candidates]
