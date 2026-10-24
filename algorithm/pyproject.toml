@@ -9,7 +9,7 @@ description = "停车场收费系统 M2 车牌识别模块（纯 Python 算法�
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
-    "opencv-python>=4.9",
+    "opencv-python>=4.9,<5",
     "torch>=2.2",
     "scikit-learn>=1.3",
     "pydantic>=2.6",
