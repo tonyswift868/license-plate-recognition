@@ -1,0 +1,60 @@
+# M2 车牌识别全部算法参数（见开发文档 5.7）。
+# 键名冻结；值可调，调整须在积分板（reports/scoreboard.md）备注。
+# 自定义配置文件只需写要改的键，其余键沿用本文件。
+
+[runtime]
+torch_threads = 2
+model_path = "models/char_cnn_v1.pt"     # 相对 algorithm/ 目录；指向 classifier 所选分类器的模型文件
+classifier = "cnn"                        # cnn | template | svm（对比实验用）
+max_candidates = 3
+
+[preprocess]
+min_side = 120
+work_width = 800                          # 定位工作宽度【待调】
+clahe_clip = 2.0
+clahe_grid = 8
+blur_ksize = 5
+
+[locate]
+aspect_min = 2.0
+aspect_max = 5.5
+area_ratio_min = 0.001                    # 候选面积 / 工作图面积【待调】
+area_ratio_max = 0.08
+max_tilt_deg = 30
+close_kernel_rel = [0.022, 0.006]         # 闭运算核（相对工作宽度）【待调】
+min_row_transitions = 12
+nms_iou = 0.3
+blue_hsv   = [[100, 70, 40], [124, 255, 255]]   # OpenCV HSV，H 取值 0~179【待调】
+yellow_hsv = [[15, 70, 70],  [35, 255, 255]]
+green_hsv  = [[35, 30, 60],  [90, 255, 255]]
+
+[rectify]
+size_7 = [252, 80]                        # 冻结
+size_8 = [276, 80]                        # 冻结
+expand_ratio = 0.10
+deskew_max_deg = 10
+
+[segment]
+binarize = "otsu"                         # otsu | adaptive
+layout7_centers = [0.086, 0.216, 0.395, 0.525, 0.655, 0.784, 0.914]  # 相对板宽【待核实，员工 B 用数据校准】
+layout7_char_w = 0.102
+layout8_centers = []                      # 【待填：员工 B，由 CCPD2020 统计，截止 10-29】
+layout8_char_w = 0.0
+char_size = 32                            # 冻结
+
+[postprocess]
+min_confidence = 0.80                     # E1 阈值【待调】
+topk = 3
+province_prior = {}                       # 例如 {"陕" = 1.5}，默认关闭
+
+[voting]
+min_frames = 2
+agree_frames = 3
+window_s = 2.0
+
+[dedup]
+window_s = 30                             # 【待调】
+dhash_max_hamming = 10
+
+[lanes]                                   # 车道 ROI（原图坐标 x, y, w, h），不配置则用全图
+# "1" = [320, 200, 640, 400]
