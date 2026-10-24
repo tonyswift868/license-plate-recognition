@@ -97,6 +97,51 @@ def test_build_chars_rejects_train_test_duplicate_before_writing(tmp_path):
     assert not out.exists()
 
 
+@pytest.mark.parametrize("manifest_relative_base", ["manifest", "raw"])
+def test_build_chars_rejects_train_copy_of_excluded_manifest_image(tmp_path, manifest_relative_base):
+    raw = tmp_path / "raw"
+    manifest_dir = tmp_path / "manifests"
+    raw.mkdir()
+    manifest_dir.mkdir()
+    excluded = (manifest_dir if manifest_relative_base == "manifest" else raw) / "heldout.jpg"
+    train_copy = raw / "renamed-train-copy.jpg"
+    _image(excluded)
+    shutil.copyfile(excluded, train_copy)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(train_copy, "train"), _row(excluded, "val", "沪B12345")])
+    manifest = manifest_dir / "testset.csv"
+    manifest.write_text("path\nheldout.jpg\n", encoding="utf-8")
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="image content matches exclude manifest"):
+        build_chars(index, raw, out, exclude_manifest=manifest,
+                    skip_invalid=True, workers=2)
+    assert not out.exists()
+
+
+def test_build_chars_allows_test_candidate_matching_exclude_manifest_content(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    test_image = raw / "test.jpg"
+    train_copy = raw / "train-copy.jpg"
+    _image(test_image)
+    shutil.copyfile(test_image, train_copy)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(train_copy, "train"), _row(test_image, "test")])
+    manifest = tmp_path / "testset.csv"
+    manifest.write_text("path\n" + str(test_image) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="image content matches exclude manifest"):
+        build_chars(index, raw, tmp_path / "out", exclude_manifest=manifest)
+
+    # The manifest's own test-split row is allowed to share its content hash;
+    # with no train/val alias, this build completes and emits only train data.
+    index = tmp_path / "test-only-index.csv"
+    _write_index(index, [_row(test_image, "test")])
+    counts = build_chars(index, raw, tmp_path / "test-only-out", exclude_manifest=manifest)
+    assert sum(counts.values()) == 0
+
+
 def test_build_chars_class_cap_reserves_validation_quota(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()

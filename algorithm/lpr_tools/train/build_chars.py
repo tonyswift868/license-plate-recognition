@@ -45,25 +45,28 @@ def _parse_quad(value: str, image_shape: tuple[int, ...]) -> np.ndarray:
     return points
 
 
-def _excluded_paths(manifest: str | Path | None, raw_root: Path) -> set[str]:
+def _excluded_paths(manifest: str | Path | None, raw_root: Path) -> tuple[set[str], set[str]]:
     if manifest is None:
-        return set()
+        return set(), set()
     manifest = Path(manifest)
     with manifest.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or "path" not in reader.fieldnames:
             raise ValueError("exclude manifest must contain a path column")
-        result = set()
+        result, content_hashes = set(), set()
         for row in reader:
             p = Path(row["path"])
             if not p.is_absolute():
-                beside_manifest = manifest.resolve().parent / p
-                raw_relative = raw_root / p
-                result.add(_canonical(beside_manifest))
-                result.add(_canonical(raw_relative))
+                candidates = (manifest.resolve().parent / p, raw_root / p)
             else:
-                result.add(_canonical(p))
-        return result
+                candidates = (p,)
+            for candidate in candidates:
+                result.add(_canonical(candidate))
+                # Keep the manifest's content identity as well as its paths so
+                # renamed copies cannot bypass the train/val exclusion.
+                if candidate.is_file():
+                    content_hashes.add(_hash_file(candidate.resolve()))
+        return result, content_hashes
 
 
 def _split_quotas(available: dict[str, int], cap: int) -> dict[str, int]:
@@ -150,7 +153,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
     rows = read_index(index)
-    excluded = _excluded_paths(exclude_manifest, raw_root)
+    excluded, excluded_hashes = _excluded_paths(exclude_manifest, raw_root)
     config = load_config()
     seen_paths: dict[str, tuple[str, int]] = {}
     seen_content: dict[str, str] = {}
@@ -202,6 +205,8 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 row_no, row, source = item
                 split = row["split"]
                 if digest is not None:
+                    if split != "test" and digest in excluded_hashes:
+                        raise ValueError(f"image content matches exclude manifest: {source}")
                     old_split = seen_content.get(digest)
                     if old_split is not None and old_split != split:
                         raise ValueError(f"image leakage across splits: {old_split} and {split}: {source}")
