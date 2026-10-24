@@ -37,8 +37,25 @@ def detection_masks(pre: PreprocessOut, cfg: LocateConfig) -> dict[str, np.ndarr
     kw, kh = [max(1, round(v*pre.work_bgr.shape[1])) for v in cfg.close_kernel_rel]
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
     opening = np.ones((3, 3), np.uint8)
-    return {name: cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel), cv2.MORPH_OPEN, opening)
-            for name, mask in masks.items()}
+    result = {name: cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel), cv2.MORPH_OPEN, opening)
+              for name, mask in masks.items()}
+    # Preserve a tighter green proposal scale alongside the standard close.
+    # Green plates often have weaker/less continuous boundaries, while the
+    # smaller kernel avoids joining nearby vehicle paint into one large box.
+    small_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(1, round(cfg.close_kernel_rel[0]*.73*pre.work_bgr.shape[1])),
+         max(1, round(cfg.close_kernel_rel[1]*.73*pre.work_bgr.shape[1]))),
+    )
+    result['green_tight'] = cv2.morphologyEx(
+        cv2.morphologyEx(masks['green'], cv2.MORPH_CLOSE, small_kernel),
+        cv2.MORPH_OPEN, opening,
+    )
+    result['edge_tight'] = cv2.morphologyEx(
+        cv2.morphologyEx(masks['edge'], cv2.MORPH_CLOSE, small_kernel),
+        cv2.MORPH_OPEN, opening,
+    )
+    return result
 
 
 def box_iou(a: tuple, b: tuple) -> float:
@@ -79,7 +96,11 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
             transitions = np.count_nonzero(binary[9:27, 1:] != binary[9:27, :-1], axis=1).mean()
             aspect_score = max(0., 1-min(abs(aspect-v)/v for v in (3.14, 3.43)))
             transition_score = min(1., transitions/max(1, cfg.min_row_transitions))
-            score = .35*aspect_score + .35*ratio + .30*transition_score
+            # Plate geometry and horizontal glyph structure are stronger
+            # ranking signals than the fraction of pixels inside a color mask.
+            # This reduces oversized/background color blobs outranking a
+            # plate-shaped proposal with clear character edges.
+            score = .30*aspect_score + .20*ratio + .50*transition_score
             original = quad/pre.scale + np.array(pre.offset)
             # Clamp to the ROI's extent; image dimensions outside the ROI are not available here.
             lower = np.array(pre.offset)
@@ -89,7 +110,7 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
             xy1 = np.ceil(original.max(axis=0)).astype(int)
             bbox = (int(xy0[0]), int(xy0[1]), int(xy1[0]-xy0[0]+1), int(xy1[1]-xy0[1]+1))
             candidates.append(PlateCandidate([tuple(map(float, p)) for p in original], bbox, color,
-                                             float(np.clip(score, 0, 1)), 'edge' if branch == 'edge' else 'color'))
+                                             float(np.clip(score, 0, 1)), 'edge' if branch.startswith('edge') else 'color'))
     return _nms(candidates, cfg, max_candidates)
 
 
@@ -99,12 +120,9 @@ def _nms(candidates: list[PlateCandidate], cfg: LocateConfig, max_candidates: in
         duplicate = next((c for c in kept if box_iou(c.bbox, candidate.bbox) > cfg.nms_iou), None)
         if duplicate is not None:
             if duplicate.source != candidate.source:
-                # Edge closures can cover only the serial-number group. Retain
-                # the enclosing colour proposal's geometry when merging evidence.
-                if (candidate.source == 'color' and candidate.color == duplicate.color
-                        and candidate.color != 'unknown'
-                        and candidate.bbox[2]*candidate.bbox[3] > duplicate.bbox[2]*duplicate.bbox[3]):
-                    duplicate.corners, duplicate.bbox = candidate.corners, candidate.bbox
+                # Keep the higher-ranked proposal's geometry. Replacing an
+                # edge proposal with a larger color box often pulls in vehicle
+                # body pixels and lowers overlap with the actual plate.
                 duplicate.source = 'merged'
         else:
             kept.append(candidate)

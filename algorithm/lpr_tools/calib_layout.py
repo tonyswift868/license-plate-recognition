@@ -17,7 +17,7 @@ import numpy as np
 
 from lpr.config import load_config
 from lpr.io_utils import imread
-from lpr.segment import binary_plate, segment
+from lpr.segment import _fallback_binary_from_gray, fallback_binary_plate, segment
 from lpr.types import PlateCandidate, RectifiedPlate
 from lpr_tools.data.ccpd import read_index
 
@@ -153,28 +153,39 @@ def calibrate(index: str | Path, raw: str | Path, n: int = 2000, seed: int = 42)
                                    color, 1., "ground_truth")
         counts["readable_rectified"] += 1
         rect = RectifiedPlate(plate, layout, color, matrix, candidate)
-        # Uses only the configured binarizer and shared polarity/edge cleanup.
-        # The center/width values in cfg are not read by this measurement path.
-        binary = binary_plate(rect, cfg.segment)[1]
+        # Re-threshold unified gray independently of segment's success path;
+        # calibration must not inherit its CC deletions or sample selection.
+        gray, binary = fallback_binary_plate(rect, cfg.segment)
         result = segment(rect, layout, cfg.segment)
         correct = bool(result.ok and len(result.boxes) == layout)
         for group in (key, overall_key, "overall"):
             metrics[group]["correct"] += int(correct)
-        if not np.count_nonzero(binary):
+        projection = None
+        method = "otsu"
+        if np.count_nonzero(binary):
+            try:
+                projection = _measure_slots(binary, layout)
+            except ValueError:
+                pass
+        if projection is None:
+            adaptive_cfg = cfg.segment.model_copy(update={"binarize": "adaptive"})
+            adaptive = _fallback_binary_from_gray(gray, adaptive_cfg)
+            if np.count_nonzero(adaptive):
+                try:
+                    projection = _measure_slots(adaptive, layout)
+                    method = "adaptive"
+                except ValueError:
+                    pass
+        if projection is None:
             counts["no_observation"] += 1
             if row.get("split") == "val":
                 counts["no_observation_val"] += 1
         else:
-            try:
-                projection = _measure_slots(binary, layout)
-                counts["observed"] += 1
-                if row.get("split") == "val":
-                    measurements[layout].append(projection)
-                    counts["observed_val"] += 1
-            except ValueError:
-                counts["no_observation"] += 1
-                if row.get("split") == "val":
-                    counts["no_observation_val"] += 1
+            counts["observed"] += 1
+            counts[f"observed_{method}"] += 1
+            if row.get("split") == "val":
+                measurements[layout].append(projection)
+                counts["observed_val"] += 1
 
     stats = {}
     for layout, samples in measurements.items():
@@ -185,8 +196,10 @@ def calibrate(index: str | Path, raw: str | Path, n: int = 2000, seed: int = 42)
         centers, widths = arr[:, :, 0], arr[:, :, 1]
         stats[str(layout)] = {
             "n": len(samples), "centers": centers.mean(axis=0).round(6).tolist(),
+            "center_median": np.median(centers, axis=0).round(6).tolist(),
             "center_std": centers.std(axis=0).round(6).tolist(),
             "char_w": round(float(widths.mean()), 6), "char_w_std": round(float(widths.std()), 6),
+            "char_w_median": round(float(np.median(widths)), 6),
             "char_w_by_position": widths.mean(axis=0).round(6).tolist(),
             "char_w_std_by_position": widths.std(axis=0).round(6).tolist(),
         }
@@ -197,15 +210,17 @@ def calibrate(index: str | Path, raw: str | Path, n: int = 2000, seed: int = 42)
 
 def _markdown(result: dict) -> str:
     lines = ["# CCPD 版式校准报告", "", f"抽样：{result['selected']} / requested {result['n_requested']}，seed={result['seed']}；split={result['split_counts']}",
-             "", "几何建议只统计 split=val 的真值四角点透视校正图；中心、宽度来自共享清理后的二值竖直投影，不读取 segment 槽位参数。相对板宽，标准差为总体标准差。",
-             "每个位数的 char_w 是逐位宽度均值的总均值；char_w_by_position 提供各位结果。建议值仅供评审，不自动修改配置。", "",
+             "", "几何只统计 split=val 的真值四角点透视校正图；对统一灰度的独立 raw mask 做投影，不读取 segment 槽位参数，也不按 segment 是否成功筛样。先尝试 Otsu；投影不能形成版式对应的字符组时，再尝试 adaptive。观测计数按阈值来源拆分。相对板宽，标准差为总体标准差。",
+             "每个位数的 char_w 是逐位宽度均值的总均值；char_w_by_position 提供各位结果。报告同时给出均值和中位数候选；建议值仅供评审，不自动修改配置。", "",
              "仿 CCPD 数据只用于验证流程，不能作为正式指标；正式指标需在 CCPD 原始数据上复算。", "",
              "## 建议参数", ""]
     for layout in (7, 8):
         g = result["geometry"][str(layout)]
         lines += [f"### Layout {layout}（val n={g['n']}）", "", f"- `layout{layout}_centers`: `{g['centers']}`",
+                  f"- `layout{layout}_centers_median`: `{g.get('center_median', [])}`",
                   f"- `layout{layout}_centers_std`: `{g['center_std']}`",
                   f"- `layout{layout}_char_w`: `{g['char_w']}`（std `{g['char_w_std']}`）",
+                  f"- `layout{layout}_char_w_median`: `{g.get('char_w_median')}`",
                   f"- `layout{layout}_char_w_by_position`: `{g.get('char_w_by_position', [])}`",
                   f"- `layout{layout}_char_w_std_by_position`: `{g.get('char_w_std_by_position', [])}`", "",
                   f"建议 TOML 键：`layout{layout}_centers`、`layout{layout}_char_w`（无 val 观测时不输出建议值）", ""]
@@ -234,12 +249,12 @@ def main(argv: list[str] | None = None) -> int:
     report = out / "calib_layout.md"
     report.write_text(_markdown(result), encoding="utf-8")
     (out / "calib_layout.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    suggestion = ["# Suggestions from validation observations; review before use.", "[segment]", ""]
+    suggestion = ["# Median candidates from independent validation projections; review against end-to-end accuracy before use.", "[segment]", ""]
     for layout in (7, 8):
         g = result["geometry"][str(layout)]
         if g["n"]:
-            suggestion += [f"layout{layout}_centers = {json.dumps(g['centers'])}",
-                           f"layout{layout}_char_w = {json.dumps(g['char_w'])}", ""]
+            suggestion += [f"layout{layout}_centers = {json.dumps(g['center_median'])}",
+                           f"layout{layout}_char_w = {json.dumps(g['char_w_median'])}", ""]
         else:
             suggestion += [f"# layout{layout}_centers unavailable: no validation observations",
                            f"# layout{layout}_char_w unavailable: no validation observations", ""]
