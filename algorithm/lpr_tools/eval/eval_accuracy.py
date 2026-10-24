@@ -1,4 +1,4 @@
-"""G2 evaluation v0, including explicit fake mode and ground-truth oracle.
+"""G2 evaluation v1, including explicit fake mode and ground-truth oracle.
 
 Whole-plate equality includes rejected guesses; automatic acceptance requires OK.
 Character accuracy is positional matches / sum(max(truth length, predicted length)).
@@ -17,14 +17,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from lpr.config import ALGORITHM_DIR
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.errors import DEFAULT_MESSAGES, ERROR_CODES, failure_result
 from lpr.io_utils import imread, imwrite
 from lpr.postprocess import decode
 from lpr.segment import segment
 from lpr.types import PlateCandidate, RectifiedPlate, RecognitionResult, RecogStatus as S
-from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest
+from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
 from .common import add_backend_args, make_recognizer, mode_name
+from .index_samples import DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples, sample_validation
+from .locate_recall import locate_match, summarize as summarize_location
 
 
 class OracleRecognizer:
@@ -108,15 +110,26 @@ def failure_cause(row, result):
     return None
 
 
-def evaluate(manifest, recognizer, out, *, oracle=False):
+def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
+             locate_recall=False, sampling=None):
     rows = read_manifest(manifest, check_files=True)
     if not rows:
         raise ValueError("manifest is empty")
     if oracle and any(r.category != "np" and r.quad is None for r in rows):
         raise ValueError("oracle needs quad ground truth on every plated row")
+    lookup = {path_key(s.row.path): s for s in read_samples(index)} if index is not None else {}
+    if locate_recall:
+        if index is None:
+            raise ValueError("--locate-recall needs ccpd_index.csv via --index")
+        for row in rows:
+            truth = lookup.get(path_key(image_path(row, manifest)))
+            if row.category != "np" and (truth is None or truth.bbox is None):
+                raise ValueError(f"missing index bbox ground truth: {row.path}")
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    samples, failures = [], []
+    samples, failures, locations = [], [], []
+    subset_samples = {}
+    locator_cfg = (getattr(recognizer, "config", None) or load_config()) if locate_recall else None
     causes = Counter({key:0 for key in ("localization","segmentation","recognition","rejection")})
     oracle_recognizer = OracleRecognizer(recognizer)
     for i,row in enumerate(rows):
@@ -126,6 +139,13 @@ def evaluate(manifest, recognizer, out, *, oracle=False):
         else:
             result = recognizer.recognize(image)
         samples.append((row,result))
+        truth = lookup.get(path_key(image_path(row, manifest)))
+        if truth is not None:
+            subset_samples.setdefault(truth.stratum, []).append((row, result))
+        if locate_recall and row.category != "np":
+            if truth.bbox is None:
+                raise ValueError(f"plated row has no index bbox: {row.path}")
+            locations.append((truth.stratum, locate_match(image, truth.bbox, locator_cfg)))
         cause = failure_cause(row,result)
         if cause:
             causes[cause] += 1
@@ -140,7 +160,12 @@ def evaluate(manifest, recognizer, out, *, oracle=False):
     report = {"mode":recognizer.version, "oracle":oracle,
               "oracle_scope":"ground truth quad, color and length; np runs normally" if oracle else None,
               "character_metric":"positional matches / max(true length, predicted length)",
-              "attribution":"status-based proxy; not measured localization recall",
+              "attribution":("failure causes are status-based proxies; Top-3 recall measured independently"
+                             if locate_recall else "status-based proxy; not measured localization recall"),
+              "sampling": sampling,
+              "subsets": {key: metrics(value) for key, value in sorted(subset_samples.items())},
+              "locate_recall": (summarize_location(locations, excluded_np=sum(row.category == "np" for row in rows))
+                                if locate_recall else None),
               "overall_g2":metrics([(r,s) for r,s in samples if r.category in {"clear","night","tilt","dirty"}]),
               "categories":{category:metrics([(r,s) for r,s in samples if r.category == category]) for category in CATEGORIES},
               "failure_causes":dict(causes),"failures":failures}
@@ -164,55 +189,87 @@ def print_report(report):
     print("attribution=" + report["attribution"])
     print("character_metric=" + report["character_metric"])
     print(f"failure_examples={len(report['failures'])}")
+    if report.get("sampling"):
+        print("sampling=" + json.dumps({k:v for k,v in report["sampling"].items() if k != "paths"},
+                                       ensure_ascii=False, sort_keys=True))
+    if report.get("subsets"):
+        print("subset n plate_accuracy auto_pass_precision")
+        for subset, m in report["subsets"].items():
+            print(f"{subset} {m['n']} {_percent(m['plate_accuracy'])} {_percent(m['auto_pass_precision'])}")
+    if report.get("locate_recall"):
+        location = report["locate_recall"]
+        print(f"Top-{location['topk']} locate recall (IoU >= {location['iou_threshold']}; np excluded)")
+        for subset, values in [("overall", location["overall"]), *location["subsets"].items()]:
+            print(f"{subset} {values['hits']}/{values['total']} {_percent(values['recall'])}")
 
 
 def append_scoreboard(path, report, *, split, classifier):
     path = Path(path)
     if path.resolve() == (ALGORITHM_DIR/"reports"/"scoreboard.md").resolve():
         raise ValueError("本批禁止修改正式 scoreboard.md；请传临时副本路径")
-    if split != "val":
+    if split not in {"val", "manifest-val"}:
         raise ValueError("积分板只追加验证集结果；演示请用 --split manifest-val")
     try:
-        commit = subprocess.run(["git","rev-parse","--short","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
+        commit = subprocess.run(["git","rev-parse","--short","HEAD"],capture_output=True,text=True,
+                                check=True,cwd=ALGORITHM_DIR.parent).stdout.strip()
     except (OSError,subprocess.CalledProcessError):
         commit = "unknown"
     categories = report["categories"]
     values = [_percent(categories[c]["plate_accuracy"]) for c in ("clear","night","tilt","dirty")]
     m=report["overall_g2"]
+    location = report.get("locate_recall")
+    recall = location["overall"]["recall"] if location else None
+    sample_note = (f"; seed={report['sampling']['seed']}; n={report['sampling']['selected_n']}"
+                   if report.get("sampling") else "")
     line = "| " + " | ".join([datetime.now(timezone(timedelta(hours=9))).date().isoformat(),commit,classifier,*values,
-        _percent(m["character_accuracy"]),"N/A",_percent(m["auto_pass_precision"]),"N/A",
-        f"{report['mode']}; oracle={report['oracle']}; validation; status-based attribution"]) + " |\n"
+        _percent(m["character_accuracy"]),_percent(recall),_percent(m["auto_pass_precision"]),"N/A",
+        f"{report['mode']}; oracle={report['oracle']}; validation; status-based attribution{sample_note}"]) + " |\n"
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.open("a",encoding="utf-8") as handle:
         handle.write(line)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="G2 evaluator v0; fake output is integration validation only")
+    parser = argparse.ArgumentParser(description="G2 evaluator v1: indexed validation sampling and Top-3 localization recall")
     parser.add_argument("--manifest", default="algorithm/testset/manifest.csv")
-    parser.add_argument("--split",choices=("test","val","manifest-val"),default="test",
-                        help="val needs ccpd_index.csv; manifest-val explicitly evaluates a supplied validation manifest")
+    parser.add_argument("--index", default="algorithm/data/index/ccpd_index.csv", help="CCPD index; relative images resolve beside CSV")
+    parser.add_argument("--split", choices=("test", "val", "manifest-val"), default="test",
+                        help="val samples only the index val split; manifest-val uses a supplied validation manifest")
+    parser.add_argument("--n", type=int, default=DEFAULT_VALIDATION_N, help="total validation sample upper bound (default 300)")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--locate-recall", action="store_true", help="Top-3 original-space bbox IoU >= 0.5; requires --index")
     add_backend_args(parser)
-    parser.add_argument("--out",default="algorithm/out/eval")
-    parser.add_argument("--scoreboard",metavar="TEMP_COPY",help="append validation row to a temporary scoreboard copy")
-    parser.add_argument("--oracle",action="store_true",help="use quad, true color and length; skip locate/rectify")
+    parser.add_argument("--out", default="algorithm/out/eval")
+    parser.add_argument("--scoreboard", metavar="TEMP_COPY", help="append validation row to a temporary scoreboard copy")
+    parser.add_argument("--oracle", action="store_true", help="use quad, true color and length; skip locate/rectify")
     args = parser.parse_args(argv)
-    if args.split == "val":
-        parser.error("--split val 抽样需要 ccpd_index.csv；本批请用构造验证清单 + --split manifest-val")
     if args.scoreboard:
         if Path(args.scoreboard).resolve() == (ALGORITHM_DIR/"reports"/"scoreboard.md").resolve():
             parser.error("本批禁止修改正式 scoreboard.md；请传临时副本路径")
-        if args.split != "manifest-val":
-            parser.error("--scoreboard 只允许验证清单：--split manifest-val")
+        if args.split not in {"val", "manifest-val"}:
+            parser.error("--scoreboard 只允许验证清单：--split val 或 manifest-val")
+    if (args.split == "val" or args.locate_recall) and not Path(args.index).is_file():
+        parser.error("需要 ccpd_index.csv；请用 --index 指定已有索引")
+    if args.n < 1:
+        parser.error("--n must be positive")
     try:
-        recognizer = make_recognizer(args,samples_dir=Path(args.manifest).resolve().parent)
-        report = evaluate(args.manifest,recognizer,args.out,oracle=args.oracle)
+        manifest, sampling = args.manifest, None
+        if args.split == "val":
+            selected, sampling = sample_validation(args.index, n=args.n, seed=args.seed)
+            manifest = Path(args.out)/"validation_manifest.csv"
+            write_manifest(manifest, [sample.row for sample in selected], check_files=True)
+        recognizer = make_recognizer(args, samples_dir=Path(manifest).resolve().parent)
+        report = evaluate(manifest, recognizer, args.out, oracle=args.oracle,
+                          index=args.index if args.split == "val" or args.locate_recall else None,
+                          locate_recall=args.locate_recall, sampling=sampling)
         print_report(report)
+        if args.split == "val":
+            print(f"validation_manifest={manifest}")
         print(f"report={Path(args.out)/'report.json'}")
         if args.scoreboard:
-            append_scoreboard(args.scoreboard,report,split="val",classifier=mode_name(args))
+            append_scoreboard(args.scoreboard, report, split="val", classifier=mode_name(args))
             print(f"scoreboard={args.scoreboard}")
-    except (ValueError,OSError) as exc:
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     return 0
 
