@@ -77,3 +77,16 @@ def test_zero_allowed_mass(cfg):
     p[0, IDX["1"]] = 1
     r = decode(p, 7, "blue", cfg.postprocess)
     assert r.confidence == 0 and r.status == S.LOW_CONFIDENCE
+
+
+def test_uniform_ties_and_prior_candidates(cfg):
+    p=np.full((7,65),1/65)
+    result=decode(p,7,"blue",cfg.postprocess)
+    assert result.candidates[0][0]==result.plate_no
+    p=probabilities("皖A12345")
+    p[0]=0;p[0,IDX["皖"]]=.6;p[0,IDX["陕"]]=.4
+    config=cfg.postprocess.model_copy(update={"province_prior":{"陕":2}})
+    result=decode(p,7,"blue",config)
+    assert result.candidates[0][0]==result.plate_no
+    assert [score for _,score in result.candidates]==sorted([score for _,score in result.candidates],reverse=True)
+    assert sum(score for _,score in result.candidates)==pytest.approx(1.)

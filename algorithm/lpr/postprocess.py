@@ -21,15 +21,15 @@ def _beam(probs: np.ndarray, weights: np.ndarray, hyp: PlateLayout, k: int):
         expanded = [(s + CHARSET[j], score + _log(float(weights[i, j])),
                      raw + _log(float(probs[i, j])))
                     for s, score, raw in beam for j in choices]
-        beam = sorted(expanded, key=lambda item: (-item[1], item[0]))[:k]
+        beam = sorted(expanded, key=lambda item: -item[1])[:k]
     return beam
 
 
 def decode(probs: np.ndarray, layout: int, color: PlateColor, cfg: PostprocessConfig) -> DecodeResult:
     """Choose a layout by sum(log p), then beam-search its Top-k alternatives.
 
-    Candidate scores are geometric means of raw probabilities, ranked by the
-    selection likelihood (including province prior). They are not confidence.
+    Candidate scores normalize selection likelihood over the returned beam
+    (including province prior). They are not the whole-plate confidence.
     Malformed probability matrices are programming errors and raise ValueError.
     """
     probs = np.asarray(probs, dtype=np.float64)
@@ -59,6 +59,9 @@ def decode(probs: np.ndarray, layout: int, color: PlateColor, cfg: PostprocessCo
     else:
         status = RecogStatus.OK if confidence >= cfg.min_confidence else RecogStatus.LOW_CONFIDENCE
     beam = _beam(probs, weights, hyp, cfg.topk)
-    candidates = [(s, math.exp(raw / layout)) for s, _, raw in beam]
+    maximum = beam[0][1]
+    masses = [math.exp(score-maximum) if math.isfinite(maximum) else 0. for _,score,_ in beam]
+    total = sum(masses)
+    candidates = [(entry[0], mass/total if total else 0.) for entry,mass in zip(beam,masses)]
     return DecodeResult(status, plate, layout, hyp.name, confidence, char_conf,
                         candidates, vehicle_type_hint(color, hyp.name))
