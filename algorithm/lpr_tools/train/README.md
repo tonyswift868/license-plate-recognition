@@ -63,3 +63,30 @@ OpenCV 必须提供 `cv2.HOGDescriptor`。工位最初预装的 OpenCV 5.0.0
 不修改本分支 requirements；统一依赖约束由架构师维护。
 当前 scikit-learn 1.9.1 会提示 `SVC(probability=True)` 将在 1.11 移除；
 本批按派工采用此选项，未来升级时可切换文档允许的 `CalibratedClassifierCV`。
+
+## CCPD 字符样本生成
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.build_chars --index algorithm/data/index/ccpd_index.csv --raw algorithm/data/raw --out algorithm/data/chars --exclude-manifest algorithm/testset/manifest.csv
+```
+
+输入采用 `lpr_tools.data.ccpd.read_index` 的 CSV 契约。仅使用
+`has_plate=1`、`skip_reason` 为空且 split 为 train/val 的记录，
+原图 split 保持不变；GT quad 已为 LT、RT、RB、LB，不再交换点序。
+按配置透视到 252×80 或 276×80，再按对应版式中心和槽宽切位，
+共享 `unify_polarity` 与 `normalize_char`，输出灰度 32×32 PNG。
+所有图片读写经 `lpr.io_utils`，支持中文路径。
+
+`--max-per-class` 默认 8000，限制每类 train+val 合计数量；
+按两个 split 的可用数量分配额度，预算至少 2 且两边均有样本时各保留至少 1。
+cap=1 优先 train。此规则避免索引中 train 在前时耗尽 val 额度。
+测试清单 path 支持绝对路径及清单相对路径，也兼容 raw 相对路径。
+跨 split 的重复路径或相同文件内容会在写出字符前报错；不自动重分 split。
+输出目录须为空，避免旧样本混入新索引；文件名包含原图名、路径短哈希和字符位置，
+防止不同目录下同名图片覆盖。
+
+输出 `chars_index.csv` 字段为
+`path,source_path,split,label,char,plate_no,position`；字符 path 相对输出目录，
+source_path 为原图绝对路径，position 从 0 开始。
+`chars_stats.json` 保存每类数量、split 总数、排除图数和每类截断数，
+同时向标准输出打印 65 类数量表。
