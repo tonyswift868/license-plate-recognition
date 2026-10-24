@@ -22,9 +22,9 @@ def make_index(path, *, short=False):
                        quad="1 2 3 2 3 4 1 4")
             row.update(kw)
             rows.append(row)
-    add("ccpd2019", "ccpd_base", 119 if short else 121)
+    add("ccpd2019", "ccpd_base", 119 if short else 121, split="val")
     add("ccpd2020", "ccpd_green", 30)
-    add("ccpd2019", "ccpd_db", 50, brightness="20")
+    add("ccpd2019", "ccpd_db", 50, brightness="10")
     add("ccpd2019", "ccpd_tilt", 25)
     add("ccpd2019", "ccpd_rotate", 25)
     add("ccpd2019", "ccpd_blur", 25)
@@ -45,7 +45,10 @@ def test_quota_seed_leakage_and_skip_rules(tmp_path):
     assert rows == read_manifest(out2)
     assert {cat: sum(r.category == cat for r in rows) for cat in ("clear", "night", "tilt", "dirty", "np")} == {
         "clear": 150, "night": 50, "tilt": 50, "dirty": 50, "np": 20}
-    assert all("/train-" not in r.path and "/val-" not in r.path for r in rows)
+    assert all(not Path(r.path).name.startswith('train-') for r in rows)
+    assert sum(Path(r.path).name.startswith('val-') for r in rows) == 120
+    assert all(r.category == 'clear' and r.source == 'ccpd_base'
+               for r in rows if Path(r.path).name.startswith('val-'))
     assert all(r.note == "待人工确认" for r in rows if r.category == "dirty")
     assert all(not r.plate_no for r in rows if r.category == "np")
 
@@ -102,7 +105,7 @@ def test_file_column_override_and_threshold(tmp_path):
 def test_duplicate_local_path_rejected_before_write(tmp_path):
     index = tmp_path / "ccpd_index.csv"; make_index(index)
     labels = tmp_path / "labels.csv"
-    labels.write_text("file,plate_no,plate_color\n/data/ccpd2019/ccpd_base/test-0.jpg,陕A12345,blue\n", encoding="utf-8")
+    labels.write_text("file,plate_no,plate_color\n/data/ccpd2020/ccpd_green/test-0.jpg,陕A12345,blue\n", encoding="utf-8")
     out = tmp_path / "manifest.csv"
     with pytest.raises(ValueError, match="duplicate"):
         build_testset(index, out, local_labels=labels)
@@ -138,8 +141,52 @@ def test_same_image_assigned_to_test_and_train_is_rejected(tmp_path):
     index = tmp_path / "ccpd_index.csv"; make_index(index)
     rows = list(csv.DictReader(index.open(encoding="utf-8", newline="")))
     train = next(r for r in rows if r["split"] == "train")
-    train["path"] = next(r["path"] for r in rows if r["split"] == "test" and r["subset"] == "ccpd_base")
+    train["path"] = next(r["path"] for r in rows if r["split"] == "val" and r["subset"] == "ccpd_base")
     with index.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=INDEX_FIELDS); writer.writeheader(); writer.writerows(rows)
     with pytest.raises(ValueError, match="multiple splits"):
         build_testset(index, tmp_path / "manifest.csv")
+
+
+def review_csv(index, path):
+    with index.open(encoding='utf-8', newline='') as handle:
+        dirty = [r for r in csv.DictReader(handle) if r['subset'] in {'ccpd_blur', 'ccpd_weather'}]
+    with path.open('w', encoding='utf-8', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['path', 'note'])
+        writer.writeheader()
+        writer.writerows({'path': r['path'], 'note': 'AI 目检，待tonyswift868复核；测试用遮挡标注'} for r in dirty)
+
+
+def test_reviewed_dirty_exact_selection_and_note(tmp_path):
+    index = tmp_path/'index.csv'; make_index(index)
+    review = tmp_path/'review.csv'; review_csv(index, review)
+    result = build_testset(index, tmp_path/'manifest.csv', dirty_review=review)
+    dirty = [r for r in result if r.category == 'dirty']
+    assert len(dirty) == 50
+    assert all('AI 目检，待tonyswift868复核' in r.note for r in dirty)
+    assert {Path(r.path).parent.name for r in dirty} == {'ccpd_blur', 'ccpd_weather'}
+
+
+@pytest.mark.parametrize('problem', ['duplicate', 'outside', 'note', 'shortfall'])
+def test_bad_review_does_not_write(tmp_path, problem):
+    index = tmp_path/'index.csv'; make_index(index)
+    review = tmp_path/'review.csv'; review_csv(index, review)
+    with review.open(encoding='utf-8', newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    if problem == 'duplicate': rows[1] = rows[0].copy()
+    elif problem == 'outside': rows[0]['path'] = '/data/not-reviewed.jpg'
+    elif problem == 'note': rows[0]['note'] = 'random choice'
+    else: rows.pop()
+    with review.open('w', encoding='utf-8', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['path','note']); writer.writeheader(); writer.writerows(rows)
+    out = tmp_path/'manifest.csv'
+    with pytest.raises(ValueError): build_testset(index, out, dirty_review=review)
+    assert not out.exists()
+
+
+def test_formal_cli_requires_review(tmp_path):
+    from lpr_tools.data.sample_testset import main
+    with pytest.raises(SystemExit) as exc:
+        main(['--index',str(tmp_path/'absent.csv'),'--out',str(tmp_path/'manifest.csv')])
+    assert exc.value.code == 2
+    assert not (tmp_path/'manifest.csv').exists()

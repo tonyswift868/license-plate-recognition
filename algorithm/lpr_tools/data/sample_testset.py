@@ -11,9 +11,9 @@ from lpr_tools.data.ccpd import read_index
 from lpr_tools.data.manifest import ManifestRow, validate_manifest, write_manifest
 
 SEED = 42
-# CCPD brightness is the raw integer filename field (Appendix B); <40 is a
-# conservative dark-tail cutoff pending calibration against delivered data.
-DEFAULT_BRIGHTNESS_THRESHOLD = 40
+# Delivered ccpd_db (10,132 rows): Q10=17, Q25=22, median=28.
+# <20 selects its dark tail (1,678 rows), excluding the bright/overexposed mode.
+DEFAULT_BRIGHTNESS_THRESHOLD = 20
 QUOTAS = {"clear_base": 120, "clear_2020": 30, "night": 50,
           "tilt": 50, "dirty": 50, "np": 20}
 DIRTY_SUBSETS = {"ccpd_blur", "ccpd_weather", "ccpd_challenge"}
@@ -88,30 +88,61 @@ def _local_rows(index_path: Path, local_labels: Path | None,
     return output
 
 
+def _reviewed_dirty(review_path: Path, candidates: list[dict[str, str]],
+                    index_path: Path) -> list[tuple[dict[str, str], str]]:
+    pool = {_path_key(_index_image_path(r['path'], index_path)): r for r in candidates}
+    selected, seen = [], set()
+    with review_path.open(encoding='utf-8-sig', newline='') as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames != ['path', 'note']:
+            raise ValueError('dirty review CSV must contain path,note columns')
+        for raw in reader:
+            if None in raw or any(v is None for v in raw.values()):
+                raise ValueError('invalid dirty review row width')
+            image = Path(raw['path'])
+            key = _path_key(image if image.is_absolute() else review_path.resolve().parent / image)
+            if key in seen:
+                raise ValueError('duplicate dirty review image')
+            seen.add(key)
+            if key not in pool:
+                raise ValueError('dirty review image must be a supported dirty-subset test image')
+            if 'AI 目检，待tonyswift868复核' not in raw['note']:
+                raise ValueError('dirty review note must state AI 目检，待tonyswift868复核')
+            selected.append((pool[key], raw['note']))
+    if len(selected) != QUOTAS['dirty']:
+        raise ValueError(f'dirty review needs exactly {QUOTAS["dirty"]} images, got {len(selected)}')
+    return selected
+
+
 def build_testset(index_path: str | Path, out_path: str | Path, *,
                   brightness_threshold: int = DEFAULT_BRIGHTNESS_THRESHOLD,
                   seed: int = SEED, local_labels: str | Path | None = None,
-                  allow_shortfall: bool = False) -> list[ManifestRow]:
+                  allow_shortfall: bool = False,
+                  dirty_review: str | Path | None = None) -> list[ManifestRow]:
     index_path, out_path = Path(index_path), Path(out_path)
     records = read_index(index_path)
     path_splits: dict[str, set[str]] = {}
     for record in records:
-        key = _path_key(_index_image_path(record["path"], index_path))
+        # Canonicalize once per index row; selected manifest rows are checked
+        # again when written. Re-resolving all 366k rows for each lookup is costly.
+        record['path'] = _index_image_path(record['path'], index_path)
+        key = record['path'].casefold()
         path_splits.setdefault(key, set()).add(record.get("split", ""))
     leaked = [path for path, splits in path_splits.items() if len(splits) > 1]
     if leaked:
         raise ValueError(f"index path appears in multiple splits: {leaked[0]}")
     if len(path_splits) != len(records):
         raise ValueError("duplicate image path in CCPD index")
-    index_splits = {_path_key(_index_image_path(r["path"], index_path)): r.get("split", "") for r in records}
+    index_splits = {path: next(iter(splits)) for path, splits in path_splits.items()}
     rng, shortfalls = random.Random(seed), {}
-    # CCPD selections are strictly official/index test rows; no fallback to
-    # train or val is permitted, even when a quota is short.
+    # The delivered base has no test split. Its only authorized holdout is
+    # 120 val images; every other CCPD category stays on official test rows.
     test = [r for r in records if r.get("split") == "test"]
     usable = [r for r in test if r.get("has_plate") == "1" and not r.get("skip_reason")]
     selected: list[ManifestRow] = []
 
-    base = [r for r in usable if r.get("dataset") == "ccpd2019" and r.get("subset") == "ccpd_base"]
+    base = [r for r in records if r.get("split") == "val" and r.get("has_plate") == "1"
+            and not r.get("skip_reason") and r.get("dataset") == "ccpd2019" and r.get("subset") == "ccpd_base"]
     green = [r for r in usable if r.get("dataset") == "ccpd2020" and r.get("subset") == "ccpd_green"]
     night = [r for r in usable if r.get("dataset") == "ccpd2019" and r.get("subset") == "ccpd_db"
              and r.get("brightness", "").isdigit() and int(r["brightness"]) < brightness_threshold]
@@ -128,8 +159,14 @@ def build_testset(index_path: str | Path, out_path: str | Path, *,
         ("dirty", dirty, QUOTAS["dirty"], "dirty"),
         ("np", np_rows, QUOTAS["np"], "np"),
     ):
+        if category == 'dirty' and dirty_review is not None:
+            selected.extend(_manifest_row(r, category, index_path, note)
+                            for r, note in _reviewed_dirty(Path(dirty_review), candidates, index_path))
+            continue
         chosen = _choose(candidates, count, rng, label, allow_shortfall, shortfalls)
-        selected.extend(_manifest_row(r, category, index_path, "待人工确认" if category == "dirty" else "")
+        note = ('待人工确认' if category == 'dirty' else
+                'base val holdout; seed=42; exclude from training/validation' if label == 'clear_base' else '')
+        selected.extend(_manifest_row(r, category, index_path, note)
                         if category != "np" else ManifestRow(_index_image_path(r["path"], index_path), "", "unknown", "np", r.get("subset", ""), None,
                                                                "no_plate") for r in chosen)
 
@@ -146,7 +183,7 @@ def build_testset(index_path: str | Path, out_path: str | Path, *,
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Build deterministic G2 testset manifest (test split only)")
+    parser = argparse.ArgumentParser(description="Build G2 v1: base val holdout plus official test images")
     parser.add_argument("--index", required=True, help="ccpd_index.csv")
     parser.add_argument("--out", required=True, help="output manifest CSV")
     parser.add_argument("--brightness-threshold", type=int, default=DEFAULT_BRIGHTNESS_THRESHOLD,
@@ -154,10 +191,14 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--local-labels", help="optional labels.csv; by default infer raw/local/labels.csv from index path")
     parser.add_argument("--allow-shortfall", action="store_true", help="demo only: write available rows and report quota shortfalls")
+    parser.add_argument('--dirty-review', help='CSV path,note of 50 visually reviewed dirty test images; required for formal output')
     args = parser.parse_args(argv)
+    if not args.allow_shortfall and not args.dirty_review:
+        parser.error('formal testset requires --dirty-review; unreviewed random dirty images are demo-only')
     try:
         build_testset(args.index, args.out, brightness_threshold=args.brightness_threshold,
-                      seed=args.seed, local_labels=args.local_labels, allow_shortfall=args.allow_shortfall)
+                      seed=args.seed, local_labels=args.local_labels, allow_shortfall=args.allow_shortfall,
+                      dirty_review=args.dirty_review)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     return 0
