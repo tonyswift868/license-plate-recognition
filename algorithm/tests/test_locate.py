@@ -37,3 +37,58 @@ def test_synth_csv_chinese_path(tmp_path):
     assert generate(out / 'empty', 0) == []
     with pytest.raises(ValueError):
         generate(out, -1)
+
+from lpr.locate import box_iou, locate
+from lpr.preprocess import preprocess
+from lpr.types import PreprocessOut
+
+
+def truth_bbox(row):
+    q = np.array(row['quad'])
+    lo, hi = q.min(axis=0), q.max(axis=0)
+    return (*lo, *(hi-lo))
+
+
+@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 6, 8, 11])
+def test_locate_synthetic_color_tilt_and_noise(cfg, index):
+    image, row = make_scene(index)
+    candidates = locate(preprocess(image, cfg.preprocess), cfg.locate)
+    hits = [c for c in candidates if box_iou(c.bbox, truth_bbox(row)) >= .5]
+    assert hits, (index, [(c.bbox, c.color) for c in candidates])
+    assert hits[0].color == row['color']
+    assert len(candidates) <= 3
+    assert [c.score for c in candidates] == sorted((c.score for c in candidates), reverse=True)
+    for c in candidates:
+        q = np.array(c.corners)
+        assert q[0, 0] < q[1, 0] and q[3, 0] < q[2, 0]
+        assert q[0, 1] < q[3, 1] and q[1, 1] < q[2, 1]
+        assert 0 <= c.score <= 1
+    assert all(box_iou(a.bbox, b.bbox) <= cfg.locate.nms_iou for i, a in enumerate(candidates) for b in candidates[i+1:])
+
+
+def test_locate_roi_coordinates(cfg):
+    image, row = make_scene(2)
+    pre = preprocess(image, cfg.preprocess, (200, 250, 900, 450))
+    assert pre.scale < 1 and pre.offset == (200, 250)
+    assert any(box_iou(c.bbox, truth_bbox(row)) >= .5 for c in locate(pre, cfg.locate))
+
+
+def test_locate_edge_fallback_and_limit(cfg):
+    image = np.full((400, 800, 3), 80, np.uint8)
+    cv2 = __import__('cv2')
+    cv2.rectangle(image, (200, 200), (500, 295), (180, 180, 180), -1)
+    cv2.putText(image, 'AB12345', (205, 270), cv2.FONT_HERSHEY_SIMPLEX, 1.7, (0, 0, 0), 4)
+    cs = locate(preprocess(image, cfg.preprocess), cfg.locate, 1)
+    assert len(cs) == 1 and cs[0].source == 'edge' and cs[0].color == 'unknown'
+    assert box_iou(cs[0].bbox, (200, 200, 300, 95)) > .5
+    assert locate(preprocess(image, cfg.preprocess), cfg.locate, 0) == []
+
+
+def test_locate_empty_black_tiny(cfg):
+    assert locate(None, cfg.locate) == []
+    empty = np.empty((0, 0, 3), np.uint8)
+    assert locate(PreprocessOut(empty, empty[..., 0], empty, 1, (0, 0)), cfg.locate) == []
+    image = np.zeros((720, 1280, 3), np.uint8)
+    assert locate(preprocess(image, cfg.preprocess), cfg.locate) == []
+    image[300:303, 300:310] = (180, 65, 15)
+    assert locate(preprocess(image, cfg.preprocess), cfg.locate) == []
