@@ -181,10 +181,12 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
         if not source.is_absolute():
             source = raw_root / source
         source = source.resolve()
-        if split in {"train", "val"} and _canonical(source) in excluded:
+        # source is resolved once here; retain _canonical's casefold semantics
+        # without repeating filesystem resolution in the hot path.
+        key = str(source).casefold()
+        if split in {"train", "val"} and key in excluded:
             skipped_excluded += 1
             continue
-        key = _canonical(source)
         old_path = seen_paths.get(key)
         if old_path is not None:
             old_split, old_row = old_path
@@ -259,7 +261,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
         if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
             raise ValueError(f"row {row_no}: invalid slot configuration for layout {layout}")
         base = source.stem
-        path_token = hashlib.sha256(_canonical(source).encode("utf-8")).hexdigest()[:10]
+        path_token = hashlib.sha256(str(source).casefold().encode("utf-8")).hexdigest()[:10]
         safe_base = f"{base}_{path_token}"
         for position, char in enumerate(plate):
             label = CHAR_TO_INDEX[char]
