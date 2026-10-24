@@ -71,3 +71,29 @@ def test_batch_latency(classifier):
 def test_invalid_input(classifier, chars):
     with pytest.raises(ValueError):
         classifier.predict_proba(chars)
+
+
+def test_training_logs_state_dict_and_manifest(tmp_path, classifier):
+    import csv
+    import json
+
+    from lpr_tools.train.synth_chars import generate_dataset
+    from lpr_tools.train.train_cnn import train
+
+    data = tmp_path / "chars"
+    generate_dataset(data, per_class=2)
+    out = tmp_path / "trained.pt"
+    history = train(data, out, version="smoke_test", epochs=2, batch_size=65)
+    assert len(history) == 2 and all(np.isfinite(row["loss"]) for row in history)
+    assert history[1]["lr"] < history[0]["lr"]
+    with out.with_suffix(".train.csv").open(encoding="utf-8", newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 2
+    entry = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))[out.name]
+    assert entry["val_char_acc"] == history[-1]["val_char_acc"]
+    state = torch.load(out, weights_only=True)
+    assert state and all(isinstance(value, torch.Tensor) for value in state.values())
+    assert load_classifier("cnn", out).predict_proba(np.zeros((1, 32, 32), np.uint8)).shape == (1, 65)
+    repeated = tmp_path / "repeat.pt"
+    assert train(data, repeated, version="repeat", epochs=2, batch_size=65) == history
+    for key, value in torch.load(repeated, weights_only=True).items():
+        torch.testing.assert_close(value, state[key], rtol=0, atol=0)
