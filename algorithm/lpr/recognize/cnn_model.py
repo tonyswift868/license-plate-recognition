@@ -13,7 +13,18 @@ class CharCNN(nn.Module):
 
     def __init__(self, num_classes: int = NUM_CLASSES) -> None:
         super().__init__()
-        raise NotImplementedError("CharCNN 尚未实现（员工 A，任务 A2）")
+        def block(in_channels: int, out_channels: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True))
+
+        self.features = nn.Sequential(
+            block(1, 32), block(32, 32), nn.MaxPool2d(2),
+            block(32, 64), block(64, 64), nn.MaxPool2d(2),
+            block(64, 128), nn.MaxPool2d(2))
+        self.classifier = nn.Sequential(
+            nn.Flatten(), nn.Dropout(0.3), nn.Linear(2048, 256),
+            nn.ReLU(inplace=True), nn.Dropout(0.3), nn.Linear(256, num_classes))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("CharCNN 尚未实现（员工 A，任务 A2）")
+        return self.classifier(self.features(x))
