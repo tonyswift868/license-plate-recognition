@@ -25,8 +25,8 @@ close_kernel_rel = [0.022, 0.006]         # 闭运算核（相对工作宽度）
 min_row_transitions = 12
 nms_iou = 0.3
 blue_hsv   = [[100, 70, 40], [124, 255, 255]]   # OpenCV HSV，H 取值 0~179【待调】
-yellow_hsv = [[15, 70, 70],  [35, 255, 255]]
-green_hsv  = [[35, 30, 60],  [90, 255, 255]]
+yellow_hsv = [[15, 90, 70],  [35, 255, 255]]
+green_hsv  = [[35, 50, 60],  [90, 255, 255]]
 
 [rectify]
 size_7 = [252, 80]                        # 冻结
@@ -38,8 +38,11 @@ deskew_max_deg = 10
 binarize = "otsu"                         # otsu | adaptive
 layout7_centers = [0.086, 0.216, 0.395, 0.525, 0.655, 0.784, 0.914]  # 相对板宽【待核实，员工 B 用数据校准】
 layout7_char_w = 0.102
-layout8_centers = []                      # 【待填：员工 B，由 CCPD2020 统计，截止 10-29】
-layout8_char_w = 0.0
+# GA 36-2018 图7/8，480x140 mm；中心 mm = [38,90,182,234,286,338,390,442] / 480。
+# 首字宽45，其余43；槽统一用45/480覆盖省份字。间距9，第二/三位间距49，左右边距15.5。
+# 来源：https://upload.wikimedia.org/wikipedia/commons/0/00/GA_36-2018.pdf (printed p.7)
+layout8_centers = [0.079167, 0.187500, 0.379167, 0.487500, 0.595833, 0.704167, 0.812500, 0.920833] # 【临时值，待 CCPD2020 校准】
+layout8_char_w = 0.09375                   # 45/480【临时值，待 CCPD2020 校准】
 char_size = 32                            # 冻结
 
 [postprocess]
