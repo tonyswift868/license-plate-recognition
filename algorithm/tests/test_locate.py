@@ -49,7 +49,7 @@ def truth_bbox(row):
     return (*lo, *(hi-lo))
 
 
-@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 6, 8, 11])
+@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 6, 8, 11, 14, 25, 32])
 def test_locate_synthetic_color_tilt_and_noise(cfg, index):
     image, row = make_scene(index)
     candidates = locate(preprocess(image, cfg.preprocess), cfg.locate)

@@ -11,8 +11,8 @@ from .types import PlateCandidate, RectifiedPlate
 
 # OpenCV hue intervals; these are colour classification rules, not proposal thresholds.
 _COLOR_RANGES = {'blue': ((100, 70, 40), (124, 255, 255)),
-                 'yellow': ((15, 70, 70), (35, 255, 255)),
-                 'green': ((35, 30, 60), (90, 255, 255))}
+                 'yellow': ((15, 90, 70), (35, 255, 255)),
+                 'green': ((35, 50, 60), (90, 255, 255))}
 
 
 def classify_color(image: np.ndarray) -> str:
@@ -48,7 +48,6 @@ def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.nd
     for lo, hi in ranges:
         mask |= cv2.inRange(hsv, np.uint8(lo), np.uint8(hi))
     mask = cv2.medianBlur(mask, 3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 5), np.uint8))
     edge = cv2.Canny(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), 50, 150)
     edge = cv2.morphologyEx(edge, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
@@ -61,10 +60,14 @@ def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.nd
             if not .40*expected <= area <= 1.8*expected:
                 continue
             cx, cy, cw, ch = cv2.boundingRect(contour)
+            # A crop boundary is not evidence of a plate boundary.
+            if cx <= 0 or cy <= 0 or cx+cw >= crop.shape[1] or cy+ch >= crop.shape[0]:
+                continue
             if box_iou((cx+x0, cy+y0, cw, ch), cand.bbox) < .45:
                 continue
-            for epsilon in (.02, .035, .05):
-                poly = cv2.approxPolyDP(contour, epsilon*cv2.arcLength(contour, True), True)
+            hull = cv2.convexHull(contour)
+            for epsilon in (.01, .02, .035, .05):
+                poly = cv2.approxPolyDP(hull, epsilon*cv2.arcLength(hull, True), True)
                 if len(poly) == 4 and cv2.isContourConvex(poly) and cv2.contourArea(poly) > .75*area:
                     quad = order_points(poly.reshape(4, 2) + [x0, y0])
                     sides = np.linalg.norm(np.roll(quad, -1, axis=0)-quad, axis=1)

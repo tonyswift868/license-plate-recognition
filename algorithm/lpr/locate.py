@@ -57,7 +57,7 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
     image_area = pre.gray.size
     candidates = []
     for branch, mask in detection_masks(pre, cfg).items():
-        contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+        contours = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[0]
         for contour in contours:
             r = cv2.minAreaRect(contour)
             rw, rh = r[1]
@@ -95,6 +95,12 @@ def locate(pre: PreprocessOut, cfg: LocateConfig, max_candidates: int = 3) -> li
         duplicate = next((c for c in kept if box_iou(c.bbox, candidate.bbox) > cfg.nms_iou), None)
         if duplicate is not None:
             if duplicate.source != candidate.source:
+                # Edge closures can cover only the serial-number group. Retain
+                # the enclosing colour proposal's geometry when merging evidence.
+                if (candidate.source == 'color' and candidate.color == duplicate.color
+                        and candidate.color != 'unknown'
+                        and candidate.bbox[2]*candidate.bbox[3] > duplicate.bbox[2]*duplicate.bbox[3]):
+                    duplicate.corners, duplicate.bbox = candidate.corners, candidate.bbox
                 duplicate.source = 'merged'
         else:
             kept.append(candidate)
