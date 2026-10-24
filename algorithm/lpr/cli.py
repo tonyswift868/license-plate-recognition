@@ -72,8 +72,9 @@ def _dump_debug(result: RecognitionResult, out_dir: Path, stem: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     logger.remove()
     logger.add(sys.stderr, level="DEBUG" if args.verbose else "WARNING")
 
