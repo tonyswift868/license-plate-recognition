@@ -14,7 +14,8 @@
 结构为 `{train,val}/<类下标>/*.png`，所有图都是已经过共享
 `unify_polarity`、`normalize_char` 和合成增广的 32×32 uint8 灰度图。
 训练器不再次归一化缓存图片；CNN 训练阶段再在线增广，验证阶段不在线增广。
-共享读取器要求 train、val 均包含全部 65 类并检查图片规格。
+共享读取器默认要求全部 65 类并检查图片规格；CNN 的混合来源模式允许单个来源缺类，
+但合并训练集必须覆盖全部 65 类，合并验证集只要求非空。
 
 `chars_index.csv` 为 UTF-8，字段：
 `path,split,label,char,plate_color,source,font,seed`。
@@ -28,12 +29,13 @@ path 相对数据根目录；label 是冻结字符表下标；source 为 font_sy
 默认 epochs=15、batch-size=256、lr=0.001、weight-decay=0.0001、seed=42、
 num-workers=0（可选 0–2）。结构、Dropout 0.3、AdamW、余弦退火、
 label smoothing 0.05 来自开发文档 8.1–8.2。
-类别权重为 `N / (65 * class_count)`，每轮全部训练样本遍历一次。
+类别损失权重为 `N / (65 * class_count)`，按合并训练集原始计数计算。
+每轮有放回抽样 N 次，来源采样比例由来源权重决定，来源内均匀。
 CPU Torch 线程数为 2，OpenCV 为 1；random / NumPy / Torch 均固定种子，
 在线增广由 seed、epoch、index 确定，多进程通过 main guard 支持 Windows。
 
 默认日志为模型同名 `.train.csv`（可用 `--log` 指定），字段为
-`epoch,loss,val_char_acc,lr`，每轮立即刷新。
+`epoch,loss,val_char_acc,lr,epoch_seconds,train_seconds`，每轮立即刷新。
 最终模型只保存 CPU state_dict；manifest 的 val_char_acc 对应最终模型，
 不把优化器或整模型 pickle 写入 CNN 文件。
 
@@ -62,7 +64,7 @@ OpenCV 必须提供 `cv2.HOGDescriptor`。工位最初预装的 OpenCV 5.0.0
 `opencv-python==4.14.0.94`，NumPy 保持 2.5.4，全量测试通过。
 不修改本分支 requirements；统一依赖约束由架构师维护。
 当前 scikit-learn 1.9.1 会提示 `SVC(probability=True)` 将在 1.11 移除；
-本批按派工采用此选项，未来升级时可切换文档允许的 `CalibratedClassifierCV`。
+旧路径继续兼容此选项，第二批已增加 `--calibrated` 切换到文档允许的校准器。
 
 ## CCPD 字符样本生成
 
@@ -110,3 +112,41 @@ Torch 固定为 2 线程。此处的单字符延迟和 8 字符批量延迟属�
 `fill_plate_accuracy(report_path, {"clear": 0.95, "night": 0.8})`
 回填 `eval_accuracy` 的结果，数值必须有限且位于 [0,1]。
 字符准确率不能代替整牌准确率；合成字符对比只作工程冒烟。
+
+## 混合来源和断点续训
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_cnn --data algorithm/data/chars --data algorithm/data/provinces_synth --data-weight 3 --data-weight 1 --epochs 15 --out algorithm/out/models/char_cnn_mixed.pt --version char_cnn_mixed
+```
+
+重复 `--data` 添加来源；重复 `--data-weight` 时必须与目录数一一对应，
+每个权重为正有限数，省略时全部为 1。上例来源总采样概率为 3:1，
+不随两个目录的图片数量变化。类别损失加权与来源采样分别作用。
+补充来源可只有 train；验证只汇总实际有 val 的来源，且不做在线增广。
+正式训练时请让字体合成来源只提供 train，避免把字体合成准确率混作实景验证。
+
+推理模型仍只保存 state_dict；独立的训练断点默认为同名 `.checkpoint.pt`，
+可用 `--checkpoint` 自定义。断点保存模型、优化器、余弦调度器、完成轮数、
+Python/NumPy/Torch 随机状态及抽样生成器状态，读取采用 `weights_only=True`。
+
+`--epochs` 是最初规划的总轮数；如需中途停止，可在上例加 `--stop-after 2`，
+先运行本次最多 2 轮，再以相同来源、权重和超参数加
+`--resume algorithm/out/models/char_cnn_mixed.checkpoint.pt` 续训到总计 15 轮。
+断点按 epoch 边界保存，不支持恢复到 batch 中途。
+续训会校验数据绝对路径、文件清单、大小和修改时间，以及原计划轮数和超参数；
+数据改变或训练计划改变会明确拒绝。文件指纹不是内容哈希。
+换用新的日志路径时会创建带表头的日志，只记录该路径实际执行的轮次。
+
+manifest 的 `train_data` 是包含所有来源 path/weight 的 JSON 字符串。
+CNN 和 SVM 额外生成同名 `.training.json`，其中 `train_seconds` 为明确计时记录：
+CNN 累计每轮训练及验证时间（跨断点累计），SVM 记录 fit/校准时间；
+不包含数据加载和模型文件保存。旧模型不追补未测量的训练时间。
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_svm --data algorithm/data/chars --out algorithm/out/models/svm_calibrated.joblib --version svm_calibrated --calibrated
+```
+
+`--calibrated` 使用 `CalibratedClassifierCV(SVC(kernel="rbf", C=10), ensemble=False)`，
+sigmoid 校准，折数为 `min(5, 每类最少训练样本数)`，每类不足 2 个样本时报错。
+此路径不启用 SVC 的 `probability` 参数，消除 sklearn 1.9 的对应弃用提示；
+运行时可加载旧概率 SVC 与新校准器。

@@ -208,4 +208,3 @@ def test_ground_truth_quad_extracts_plate_from_offset_scene(tmp_path):
         expected = normalize_char(plate[:, left:right])
         actual = imread(out / rows[position]["path"], cv2.IMREAD_GRAYSCALE)
         np.testing.assert_array_equal(actual, expected)
-
