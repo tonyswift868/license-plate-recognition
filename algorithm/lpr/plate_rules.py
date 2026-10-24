@@ -1,20 +1,51 @@
-"""车牌版式、位置约束集合、正则、车型映射（员工 C，任务 C3；规则见开发文档附录 A、5.8）。
-
-建议内容（具体结构由员工 C 设计，只要 postprocess.decode 与 voting 用得上即可）：
-- 位置约束集合 PROV / LETTER / ALNUM / DIGIT / DF（字符下标集合，基于 charset 的分组）；
-- 版式 L7、L8S、L8L 各位的约束与正则；
-- match_layout(plate) → "L7" | "L8S" | "L8L" | None；
-- vehicle_type_hint(color, layout_name) → "small" | "large" | "unknown"。
-"""
-
+"""Frozen plate layouts and character-index constraints (appendix A)."""
 from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from .charset import CHAR_TO_INDEX, DIGIT_IDX, LETTER_IDX, PROVINCES, PROVINCE_IDX
+from .types import VehicleTypeHint
+
+PROV = PROVINCE_IDX
+LETTER = LETTER_IDX
+ALNUM = tuple(sorted(DIGIT_IDX + LETTER_IDX))
+DIGIT = DIGIT_IDX
+DF = tuple(CHAR_TO_INDEX[c] for c in "DF")
+
+
+@dataclass(frozen=True)
+class PlateLayout:
+    name: str
+    slots: tuple[tuple[int, ...], ...]
+    regex: re.Pattern[str]
+
+
+_PREFIX = "[" + "".join(PROVINCES) + "][A-HJ-NP-Z]"
+L7 = PlateLayout("L7", (PROV, LETTER) + (ALNUM,) * 5,
+                 re.compile(_PREFIX + "[A-HJ-NP-Z0-9]{5}"))
+L8S = PlateLayout("L8S", (PROV, LETTER, DF, ALNUM) + (DIGIT,) * 4,
+                  re.compile(_PREFIX + "[DF][A-HJ-NP-Z0-9][0-9]{4}"))
+L8L = PlateLayout("L8L", (PROV, LETTER) + (DIGIT,) * 5 + (DF,),
+                  re.compile(_PREFIX + "[0-9]{5}[DF]"))
+LAYOUTS = {7: (L7,), 8: (L8S, L8L)}
 
 
 def match_layout(plate: str) -> str | None:
-    """车牌号符合哪个版式的正则，都不符合返回 None。"""
-    raise NotImplementedError("plate_rules 尚未实现（员工 C，任务 C3）")
+    for layout in (L7, L8S, L8L):
+        if layout.regex.fullmatch(plate):
+            return layout.name
+    return None
 
 
-def vehicle_type_hint(color: str, layout_name: str | None) -> str:
-    """按 5.8 的表由底色与版式给出车型提示。"""
-    raise NotImplementedError("plate_rules 尚未实现（员工 C，任务 C3）")
+def vehicle_type_hint(color: str, layout_name: str | None) -> VehicleTypeHint:
+    # The special/unknown-color row in 5.8 takes precedence.
+    if color not in {"blue", "yellow", "green"}:
+        return "unknown"
+    if layout_name == "L8S":
+        return "small"
+    if layout_name == "L8L":
+        return "large"
+    if layout_name == "L7":
+        return {"blue": "small", "yellow": "large"}.get(color, "unknown")
+    return "unknown"
