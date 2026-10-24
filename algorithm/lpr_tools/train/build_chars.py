@@ -17,7 +17,7 @@ from lpr.charnorm import normalize_char, unify_polarity
 from lpr.charset import CHAR_TO_INDEX, CHARSET
 from lpr.config import load_config
 from lpr.io_utils import decode_image, imread, imwrite
-from lpr_tools.data.ccpd import read_index
+from lpr_tools.data.ccpd import INDEX_FIELDS as CCPD_INDEX_FIELDS
 
 INDEX_FIELDS = ("path", "source_path", "split", "label", "char", "plate_no", "position")
 REJECTION_FIELDS = ("row", "split", "path", "reason")
@@ -27,6 +27,18 @@ PROGRESS_INTERVAL = 5000
 
 def _canonical(path: Path) -> str:
     return str(path.resolve()).casefold()
+
+
+def _iter_index(path: str | Path):
+    """Yield one strictly shaped CCPD index row at a time."""
+    with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != list(CCPD_INDEX_FIELDS):
+            raise ValueError("invalid CCPD index columns")
+        for row_no, row in enumerate(reader, 2):
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"invalid CCPD index row width at row {row_no}")
+            yield row
 
 
 def _parse_quad(value: str, image_shape: tuple[int, ...]) -> np.ndarray:
@@ -155,7 +167,6 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     raw_root, out = Path(raw).resolve(), Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
-    rows = read_index(index)
     excluded, excluded_hashes = _excluded_paths(exclude_manifest, raw_root)
     config = load_config()
     seen_paths: dict[str, tuple[str, int]] = {}
@@ -163,7 +174,6 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     counts: Counter[int] = Counter()
     truncated: Counter[int] = Counter()
     split_counts: Counter[str] = Counter()
-    out_rows: list[dict[str, str]] = []
     rejected: list[dict[str, str]] = []
     skipped_excluded = 0
 
@@ -171,7 +181,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     # when their files exist, but missing test files do not block character building.
     candidates = []
     preflight_counts: dict[str, Counter[int]] = {"train": Counter(), "val": Counter()}
-    for row_no, row in enumerate(rows, 2):
+    for row_no, row in enumerate(_iter_index(index), 2):
         split = row.get("split")
         if row.get("has_plate") != "1" or split not in {"train", "val", "test"} or row.get("skip_reason", "").strip():
             continue
@@ -197,7 +207,12 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 raise ValueError(f"image leakage across splits: {old_split} and {split}: {source}")
             raise ValueError(f"duplicate source path in index rows {old_row} and {row_no}: {source}")
         seen_paths[key] = (split, row_no)
-        candidates.append((row_no, row, source))
+        if split == "test":
+            compact_row = {"split": "test"}
+        else:
+            compact_row = {key: row[key] for key in
+                           ("split", "plate_no", "layout", "plate_color", "quad")}
+        candidates.append((row_no, compact_row, source))
 
     # Only submit bounded batches; executor.map preserves the source index order.
     valid = []
@@ -227,81 +242,82 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 if split in {"train", "val"}:
                     for char in row["plate_no"]:
                         preflight_counts[split][CHAR_TO_INDEX[char]] += 1
-                    valid.append((row_no, row, source, digest, quad))
+                    valid.append((row_no, row, source, quad))
             processed = min(start + len(batch), len(candidates))
             while processed >= next_preflight_progress:
                 print(f"preflight: {next_preflight_progress}/{len(candidates)}", flush=True)
                 next_preflight_progress += PROGRESS_INTERVAL
 
+    # Leak checks are complete; keep only accepted train/val records for output.
+    del candidates, seen_paths, seen_content
     quotas = {label: _split_quotas({split: preflight_counts[split][label] for split in ("train", "val")}, max_per_class)
               for label in range(len(CHARSET))}
     split_class_counts: dict[str, Counter[int]] = {"train": Counter(), "val": Counter()}
-
-    next_output_progress = PROGRESS_INTERVAL
-    for source_no, (row_no, row, source, digest, quad) in enumerate(valid, 1):
-        plate = row.get("plate_no", "")
-        layout = int(row["layout"])
-        color = row.get("plate_color", "")
-        split = row["split"]
-        available = [CHAR_TO_INDEX[ch] for ch in plate
-                     if split_class_counts[split][CHAR_TO_INDEX[ch]] < quotas[CHAR_TO_INDEX[ch]][split]]
-        if not available:
-            truncated.update(CHAR_TO_INDEX[ch] for ch in plate)
-            if source_no >= next_output_progress:
-                print(f"output: {source_no}/{len(valid)}", flush=True)
-                while source_no >= next_output_progress:
-                    next_output_progress += PROGRESS_INTERVAL
-            continue
-        image = imread(source)
-        width, height = config.rectify.size_7 if layout == 7 else config.rectify.size_8
-        destination = np.asarray([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]], dtype=np.float32)
-        matrix = cv2.getPerspectiveTransform(quad, destination)
-        rectified = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR)
-        gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
-        gray = unify_polarity(gray, color)
-        centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
-        char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
-        if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
-            raise ValueError(f"row {row_no}: invalid slot configuration for layout {layout}")
-        base = source.stem
-        path_token = hashlib.sha256(str(source).casefold().encode("utf-8")).hexdigest()[:10]
-        safe_base = f"{base}_{path_token}"
-        for position, char in enumerate(plate):
-            label = CHAR_TO_INDEX[char]
-            if split_class_counts[split][label] >= quotas[label][split]:
-                truncated[label] += 1
-                continue
-            center = centers[position] * width
-            half = char_w * width / 2
-            left, right = max(0, math.floor(center-half)), min(width, math.ceil(center+half))
-            if right <= left:
-                raise ValueError(f"row {row_no}: empty character slot {position}")
-            normalized = normalize_char(gray[:, left:right])
-            rel = Path(split) / str(label) / f"{safe_base}_{position}.png"
-            target = out / rel
-            if target.exists():
-                raise ValueError(f"output path collision: {target}")
-            imwrite(target, normalized)
-            counts[label] += 1
-            split_class_counts[split][label] += 1
-            split_counts[split] += 1
-            out_rows.append({"path": rel.as_posix(), "source_path": str(source), "split": split,
-                             "label": str(label), "char": char, "plate_no": plate, "position": str(position)})
-        if source_no >= next_output_progress:
-            print(f"output: {source_no}/{len(valid)}", flush=True)
-            while source_no >= next_output_progress:
-                next_output_progress += PROGRESS_INTERVAL
 
     out.mkdir(parents=True, exist_ok=True)
     with (out / "chars_index.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
         writer.writeheader()
-        writer.writerows(out_rows)
+        next_output_progress = PROGRESS_INTERVAL
+        for source_no, (row_no, row, source, quad) in enumerate(valid, 1):
+            plate = row["plate_no"]
+            layout = int(row["layout"])
+            color = row["plate_color"]
+            split = row["split"]
+            available = [CHAR_TO_INDEX[ch] for ch in plate
+                         if split_class_counts[split][CHAR_TO_INDEX[ch]] < quotas[CHAR_TO_INDEX[ch]][split]]
+            if not available:
+                truncated.update(CHAR_TO_INDEX[ch] for ch in plate)
+                if source_no >= next_output_progress:
+                    print(f"output: {source_no}/{len(valid)}", flush=True)
+                    while source_no >= next_output_progress:
+                        next_output_progress += PROGRESS_INTERVAL
+                continue
+            image = imread(source)
+            width, height = config.rectify.size_7 if layout == 7 else config.rectify.size_8
+            destination = np.asarray([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]], dtype=np.float32)
+            matrix = cv2.getPerspectiveTransform(quad, destination)
+            rectified = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR)
+            gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
+            gray = unify_polarity(gray, color)
+            centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
+            char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
+            if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
+                raise ValueError(f"row {row_no}: invalid slot configuration for layout {layout}")
+            base = source.stem
+            path_token = hashlib.sha256(str(source).casefold().encode("utf-8")).hexdigest()[:10]
+            safe_base = f"{base}_{path_token}"
+            for position, char in enumerate(plate):
+                label = CHAR_TO_INDEX[char]
+                if split_class_counts[split][label] >= quotas[label][split]:
+                    truncated[label] += 1
+                    continue
+                center = centers[position] * width
+                half = char_w * width / 2
+                left, right = max(0, math.floor(center-half)), min(width, math.ceil(center+half))
+                if right <= left:
+                    raise ValueError(f"row {row_no}: empty character slot {position}")
+                normalized = normalize_char(gray[:, left:right])
+                rel = Path(split) / str(label) / f"{safe_base}_{position}.png"
+                target = out / rel
+                if target.exists():
+                    raise ValueError(f"output path collision: {target}")
+                imwrite(target, normalized)
+                counts[label] += 1
+                split_class_counts[split][label] += 1
+                split_counts[split] += 1
+                writer.writerow({"path": rel.as_posix(), "source_path": str(source), "split": split,
+                                 "label": str(label), "char": char, "plate_no": plate, "position": str(position)})
+            if source_no >= next_output_progress:
+                print(f"output: {source_no}/{len(valid)}", flush=True)
+                while source_no >= next_output_progress:
+                    next_output_progress += PROGRESS_INTERVAL
     with (out / "chars_rejected.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=REJECTION_FIELDS)
         writer.writeheader()
         writer.writerows(rejected)
-    stats = {"total": len(out_rows), "skipped_excluded_images": skipped_excluded,
+    total_chars = sum(counts.values())
+    stats = {"total": total_chars, "skipped_excluded_images": skipped_excluded,
              "skip_invalid": skip_invalid, "rejected_count": len(rejected), "rejected": rejected,
              "per_split": dict(sorted(split_counts.items())),
              "per_class": {str(i): counts[i] for i in range(len(CHARSET))},
@@ -310,7 +326,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     print("class char count")
     for i, char in enumerate(CHARSET):
         print(f"{i:2d} {char} {counts[i]}")
-    print(f"TOTAL chars={len(out_rows)} excluded_images={skipped_excluded}")
+    print(f"TOTAL chars={total_chars} excluded_images={skipped_excluded}")
     print("split_counts " + json.dumps(stats["per_split"], ensure_ascii=False))
     print("truncated " + json.dumps({CHARSET[i]: n for i, n in truncated.items() if n}, ensure_ascii=False))
     return counts

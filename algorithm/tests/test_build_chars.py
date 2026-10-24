@@ -1,6 +1,7 @@
 import csv
 import json
 import shutil
+import tracemalloc
 from pathlib import Path
 
 import cv2
@@ -9,7 +10,7 @@ import pytest
 
 from lpr.io_utils import imread, imwrite
 from lpr_tools.data.ccpd import INDEX_FIELDS, parse_ccpd_name
-from lpr_tools.train.build_chars import build_chars
+from lpr_tools.train.build_chars import _iter_index, build_chars
 
 
 def _name(plate_indices="0_0_22_27_27_33_16"):
@@ -273,6 +274,34 @@ def test_preflight_workers_produce_identical_outputs(tmp_path):
     build_chars(index, raw, out_two, workers=2)
     assert (out_one / "chars_index.csv").read_bytes() == (out_two / "chars_index.csv").read_bytes()
     assert (out_one / "chars_stats.json").read_bytes() == (out_two / "chars_stats.json").read_bytes()
+
+
+def test_index_reader_is_strict_and_streams_large_csv(tmp_path):
+    index = tmp_path / "large-index.csv"
+    row = dict.fromkeys(INDEX_FIELDS, "")
+    row.update(path="x.jpg", dataset="ccpd2019", subset="ccpd_base", split="train",
+               has_plate="1", plate_no="皖AY339S", layout="7", plate_color="blue",
+               quad="0 0 251 0 251 79 0 79", bbox="0 0 252 80", skip_reason="")
+    with index.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
+        writer.writeheader()
+        writer.writerows([row] * 12000)
+    tracemalloc.start()
+    count = sum(1 for _ in _iter_index(index))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert count == 12000
+    assert peak < 2_000_000
+
+    bad_header = tmp_path / "bad-header.csv"
+    bad_header.write_text("split,path\ntrain,x.jpg\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid CCPD index columns"):
+        next(_iter_index(bad_header))
+    short_row = tmp_path / "short-row.csv"
+    short_row.write_text(",".join(INDEX_FIELDS) + "\n" + ",".join([""] * (len(INDEX_FIELDS)-1)) + "\n",
+                         encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid CCPD index row width"):
+        next(_iter_index(short_row))
 
 
 def test_ground_truth_quad_extracts_plate_from_offset_scene(tmp_path):
