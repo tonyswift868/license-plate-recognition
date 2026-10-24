@@ -1,6 +1,7 @@
 """A-7 multi-source, resumable CNN and calibrated SVM checks."""
 
 import json
+import csv
 
 import numpy as np
 import pytest
@@ -103,7 +104,24 @@ def test_rejects_checkpoint_output_path_collision(tmp_path):
         train_cnn(data, out, version="bad", epochs=1, checkpoint_path=out)
 
 
-def test_calibrated_svm_roundtrip_and_minimum_sample_check(tmp_path):
+def test_validation_group_metrics_and_best_publish_artifact(tmp_path):
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=51)
+    out = tmp_path / "publish.pt"
+    history = train_cnn(data, out, version="publish", epochs=1, batch_size=130)
+    with out.with_suffix(".train.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {"val_province_acc", "val_alnum_acc"}.issubset(rows[0])
+    best_path = out.with_name(f"{out.stem}.best{out.suffix}")
+    for key, value in torch.load(best_path, weights_only=True).items():
+        torch.testing.assert_close(torch.load(out, weights_only=True)[key], value, rtol=0, atol=0)
+    sidecar = json.loads(out.with_suffix(".training.json").read_text(encoding="utf-8"))
+    assert sidecar["best_epoch"] == 1 and sidecar["val_province_acc"] is not None
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))[out.name]
+    assert manifest["val_char_acc"] == sidecar["val_char_acc"] == history[-1]["val_char_acc"]
+
+
+def test_calibrated_svm_roundtrip_and_excludes_uncalibratable_class(tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=4, seed=42)
     out = tmp_path / "calibrated.joblib"
@@ -115,5 +133,11 @@ def test_calibrated_svm_roundtrip_and_minimum_sample_check(tmp_path):
     train_one = data / "train" / "0"
     for sample in list(train_one.glob("*.png"))[:2]:
         sample.unlink()
-    with pytest.raises(ValueError, match="at least two"):
-        train_svm(data, tmp_path / "bad.joblib", version="bad", calibrated=True, max_per_class=2)
+    sparse_out = tmp_path / "sparse.joblib"
+    train_svm(data, sparse_out, version="sparse", calibrated=True, max_per_class=2)
+    metadata = json.loads(sparse_out.with_suffix(".training.json").read_text(encoding="utf-8"))
+    assert metadata["excluded_classes"] == [{"label": 0, "samples": 1}]
+    sparse = SvmClassifier.from_file(sparse_out, version="sparse")
+    probabilities = sparse.predict_proba(np.zeros((2, 32, 32), dtype=np.uint8))
+    assert (probabilities[:, 0] == 0).all()
+    np.testing.assert_allclose(probabilities.sum(axis=1), 1, atol=1e-6)

@@ -39,3 +39,25 @@ def test_generation_rejects_bad_parameters_and_missing_font(tmp_path):
         generate_dataset(tmp_path / "missing", font_path=tmp_path / "missing.ttf")
     assert not (tmp_path / "missing").exists()
     assert DEFAULT_FONT.is_file()
+
+
+def test_province_train_only_and_per_label_counts(tmp_path):
+    out = tmp_path / "province_train"
+    rows = generate_dataset(out, per_class=2, provinces_only=True, train_only=True,
+                            class_counts={"陕": 5})
+    assert len(rows) == 30 * 2 + 5
+    assert {row["split"] for row in rows} == {"train"}
+    assert {row["label"] for row in rows} == set(range(31))
+    assert sum(row["char"] == "陕" for row in rows) == 5
+    assert sum(row["char"] == "皖" for row in rows) == 2
+    assert not (out / "val").exists()
+    with (out / "chars_index.csv").open(encoding="utf-8", newline="") as handle:
+        saved = list(csv.DictReader(handle))
+    assert len(saved) == len(rows)
+
+
+def test_selected_labels_default_validation_remains_split(tmp_path):
+    rows = generate_dataset(tmp_path / "selected", labels=["陕", "31"], per_class=4)
+    assert {row["char"] for row in rows} == {"陕", "0"}
+    assert {row["split"] for row in rows} == {"train", "val"}
+    assert sum(row["split"] == "val" for row in rows) == 2

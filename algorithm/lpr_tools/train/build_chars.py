@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from lpr.io_utils import imread, imwrite
 from lpr_tools.data.ccpd import read_index
 
 INDEX_FIELDS = ("path", "source_path", "split", "label", "char", "plate_no", "position")
+REJECTION_FIELDS = ("row", "split", "path", "reason")
+PREFLIGHT_BATCH_SIZE = 256
+PROGRESS_INTERVAL = 5000
 
 
 def _canonical(path: Path) -> str:
@@ -92,10 +96,56 @@ def _split_quotas(available: dict[str, int], cap: int) -> dict[str, int]:
     return quotas
 
 
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _preflight_one(item, config):
+    row_no, row, source = item
+    split = row["split"]
+    if not source.is_file():
+        if split == "test":
+            return None, None, None
+        return None, None, f"missing image: {source}"
+    try:
+        digest = _hash_file(source)
+    except OSError as exc:
+        return None, None, str(exc)
+    if split == "test":
+        return digest, None, None
+    try:
+        plate = row.get("plate_no", "")
+        try:
+            layout = int(row.get("layout", ""))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid layout") from exc
+        if layout not in (7, 8) or len(plate) != layout or any(ch not in CHAR_TO_INDEX for ch in plate):
+            raise ValueError(f"unsupported plate label/layout: {plate!r}")
+        if row.get("plate_color", "") not in {"blue", "yellow", "green", "white", "black"}:
+            raise ValueError(f"invalid plate_color: {row.get('plate_color', '')!r}")
+        image = imread(source)
+        quad = _parse_quad(row.get("quad", ""), image.shape)
+        centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
+        char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
+        if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
+            raise ValueError(f"invalid slot configuration for layout {layout}")
+        return digest, quad, None
+    except (OSError, ValueError, cv2.error, TypeError) as exc:
+        return digest, None, str(exc)
+
+
 def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
-                exclude_manifest: str | Path | None = None, max_per_class: int = 8000) -> dict[str, int]:
+                exclude_manifest: str | Path | None = None, max_per_class: int = 8000,
+                skip_invalid: bool = False, workers: int = 1) -> dict[str, int]:
     if max_per_class < 1:
         raise ValueError("max_per_class must be positive")
+    if workers not in (1, 2, 3, 4):
+        raise ValueError("workers must be between 1 and 4")
+    cv2.setNumThreads(1)
     raw_root, out = Path(raw).resolve(), Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
@@ -108,11 +158,12 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     truncated: Counter[int] = Counter()
     split_counts: Counter[str] = Counter()
     out_rows: list[dict[str, str]] = []
+    rejected: list[dict[str, str]] = []
     skipped_excluded = 0
 
     # Validate train/val sources fully. Test rows contribute path/content identities
     # when their files exist, but missing test files do not block character building.
-    eligible = []
+    candidates = []
     preflight_counts: dict[str, Counter[int]] = {"train": Counter(), "val": Counter()}
     for row_no, row in enumerate(rows, 2):
         split = row.get("split")
@@ -138,50 +189,60 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 raise ValueError(f"image leakage across splits: {old_split} and {split}: {source}")
             raise ValueError(f"duplicate source path in index rows {old_row} and {row_no}: {source}")
         seen_paths[key] = (split, row_no)
-        if not source.is_file():
-            if split == "test":
-                continue
-            raise ValueError(f"row {row_no}: missing image: {source}")
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        old_content = seen_content.get(digest)
-        if old_content is not None and old_content != split:
-            raise ValueError(f"image leakage across splits: {old_content} and {split}: {source}")
-        seen_content[digest] = split
-        if split in {"train", "val"}:
-            plate = row.get("plate_no", "")
-            try:
-                layout = int(row.get("layout", ""))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"row {row_no}: invalid layout") from exc
-            if layout not in (7, 8) or len(plate) != layout or any(ch not in CHAR_TO_INDEX for ch in plate):
-                raise ValueError(f"row {row_no}: unsupported plate label/layout: {plate!r}")
-            if row.get("plate_color", "") not in {"blue", "yellow", "green", "white", "black"}:
-                raise ValueError(f"row {row_no}: invalid plate_color: {row.get('plate_color', '')!r}")
-            image = imread(source)
-            quad = _parse_quad(row.get("quad", ""), image.shape)
-            del image, quad
-            for char in plate:
-                preflight_counts[split][CHAR_TO_INDEX[char]] += 1
-            eligible.append((row_no, row, source, digest))
+        candidates.append((row_no, row, source))
+
+    # Only submit bounded batches; executor.map preserves the source index order.
+    valid = []
+    next_preflight_progress = PROGRESS_INTERVAL
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0, len(candidates), PREFLIGHT_BATCH_SIZE):
+            batch = candidates[start:start + PREFLIGHT_BATCH_SIZE]
+            results = list(pool.map(lambda item: _preflight_one(item, config), batch))
+            for item, (digest, quad, error) in zip(batch, results):
+                row_no, row, source = item
+                split = row["split"]
+                if digest is not None:
+                    old_split = seen_content.get(digest)
+                    if old_split is not None and old_split != split:
+                        raise ValueError(f"image leakage across splits: {old_split} and {split}: {source}")
+                    seen_content[digest] = split
+                if error:
+                    if not skip_invalid:
+                        raise ValueError(f"row {row_no} ({split}): {error}")
+                    rejected.append({"row": str(row_no), "split": split,
+                                     "path": str(source), "reason": error})
+                    continue
+                if digest is None:
+                    continue  # Missing test images are not training inputs.
+                if split in {"train", "val"}:
+                    for char in row["plate_no"]:
+                        preflight_counts[split][CHAR_TO_INDEX[char]] += 1
+                    valid.append((row_no, row, source, digest, quad))
+            processed = min(start + len(batch), len(candidates))
+            while processed >= next_preflight_progress:
+                print(f"preflight: {next_preflight_progress}/{len(candidates)}", flush=True)
+                next_preflight_progress += PROGRESS_INTERVAL
 
     quotas = {label: _split_quotas({split: preflight_counts[split][label] for split in ("train", "val")}, max_per_class)
               for label in range(len(CHARSET))}
     split_class_counts: dict[str, Counter[int]] = {"train": Counter(), "val": Counter()}
 
-    for row_no, row, source, digest in eligible:
+    next_output_progress = PROGRESS_INTERVAL
+    for source_no, (row_no, row, source, digest, quad) in enumerate(valid, 1):
         plate = row.get("plate_no", "")
-        layout_text = row.get("layout", "")
-        try:
-            layout = int(layout_text)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"row {row_no}: invalid layout") from exc
-        if layout not in (7, 8) or len(plate) != layout or any(ch not in CHAR_TO_INDEX for ch in plate):
-            raise ValueError(f"row {row_no}: unsupported plate label/layout: {plate!r}")
+        layout = int(row["layout"])
         color = row.get("plate_color", "")
-        if color not in {"blue", "yellow", "green", "white", "black"}:
-            raise ValueError(f"row {row_no}: invalid plate_color: {color!r}")
+        split = row["split"]
+        available = [CHAR_TO_INDEX[ch] for ch in plate
+                     if split_class_counts[split][CHAR_TO_INDEX[ch]] < quotas[CHAR_TO_INDEX[ch]][split]]
+        if not available:
+            truncated.update(CHAR_TO_INDEX[ch] for ch in plate)
+            if source_no >= next_output_progress:
+                print(f"output: {source_no}/{len(valid)}", flush=True)
+                while source_no >= next_output_progress:
+                    next_output_progress += PROGRESS_INTERVAL
+            continue
         image = imread(source)
-        quad = _parse_quad(row.get("quad", ""), image.shape)
         width, height = config.rectify.size_7 if layout == 7 else config.rectify.size_8
         destination = np.asarray([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]], dtype=np.float32)
         matrix = cv2.getPerspectiveTransform(quad, destination)
@@ -197,7 +258,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
         safe_base = f"{base}_{path_token}"
         for position, char in enumerate(plate):
             label = CHAR_TO_INDEX[char]
-            if split_class_counts[row["split"]][label] >= quotas[label][row["split"]]:
+            if split_class_counts[split][label] >= quotas[label][split]:
                 truncated[label] += 1
                 continue
             center = centers[position] * width
@@ -206,23 +267,32 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
             if right <= left:
                 raise ValueError(f"row {row_no}: empty character slot {position}")
             normalized = normalize_char(gray[:, left:right])
-            rel = Path(row["split"]) / str(label) / f"{safe_base}_{position}.png"
+            rel = Path(split) / str(label) / f"{safe_base}_{position}.png"
             target = out / rel
             if target.exists():
                 raise ValueError(f"output path collision: {target}")
             imwrite(target, normalized)
             counts[label] += 1
-            split_class_counts[row["split"]][label] += 1
-            split_counts[row["split"]] += 1
-            out_rows.append({"path": rel.as_posix(), "source_path": str(source), "split": row["split"],
+            split_class_counts[split][label] += 1
+            split_counts[split] += 1
+            out_rows.append({"path": rel.as_posix(), "source_path": str(source), "split": split,
                              "label": str(label), "char": char, "plate_no": plate, "position": str(position)})
+        if source_no >= next_output_progress:
+            print(f"output: {source_no}/{len(valid)}", flush=True)
+            while source_no >= next_output_progress:
+                next_output_progress += PROGRESS_INTERVAL
 
     out.mkdir(parents=True, exist_ok=True)
     with (out / "chars_index.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
         writer.writeheader()
         writer.writerows(out_rows)
+    with (out / "chars_rejected.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REJECTION_FIELDS)
+        writer.writeheader()
+        writer.writerows(rejected)
     stats = {"total": len(out_rows), "skipped_excluded_images": skipped_excluded,
+             "skip_invalid": skip_invalid, "rejected_count": len(rejected), "rejected": rejected,
              "per_split": dict(sorted(split_counts.items())),
              "per_class": {str(i): counts[i] for i in range(len(CHARSET))},
              "truncated_per_class": {str(i): truncated[i] for i in range(len(CHARSET))}}
@@ -243,10 +313,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="output character directory")
     parser.add_argument("--exclude-manifest", help="test manifest; matching images are excluded")
     parser.add_argument("--max-per-class", type=int, default=8000)
+    parser.add_argument("--skip-invalid", action="store_true", help="record and skip invalid train/val images")
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=1,
+                        help="bounded preflight workers (1-4; default 1)")
     args = parser.parse_args(argv)
     try:
         build_chars(args.index, args.raw, args.out, exclude_manifest=args.exclude_manifest,
-                    max_per_class=args.max_per_class)
+                    max_per_class=args.max_per_class, skip_invalid=args.skip_invalid, workers=args.workers)
     except (OSError, ValueError, cv2.error) as exc:
         parser.error(str(exc))
     return 0

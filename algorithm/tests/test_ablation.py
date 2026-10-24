@@ -40,6 +40,7 @@ def trained_models(tmp_path_factory):
     svm_path.with_suffix(".training.json").write_text(
         json.dumps({"train_seconds": 7.75}), encoding="utf-8")
     # Exercise CSV fallback for the template model.
+    template_path.with_suffix(".training.json").unlink(missing_ok=True)
     template_path.with_suffix(".train.csv").write_text(
         "epoch,epoch_seconds\n1,1.25\n2,2.75\n", encoding="utf-8")
     return data, {"cnn": cnn_path, "template": template_path, "svm": svm_path}

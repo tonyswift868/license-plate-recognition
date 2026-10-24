@@ -1,11 +1,14 @@
 """Train tiny font baselines and exercise their manifest-backed runtime contract."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 import numpy as np
 import pytest
 
+from lpr.io_utils import imwrite
 from lpr.recognize import load_classifier, read_manifest
+from lpr.recognize.template import TemplateClassifier
 from lpr.recognize.svm import hog_features
 from lpr_tools.train.build_templates import build
 from lpr_tools.train.data import load_split
@@ -63,3 +66,65 @@ def test_reader_rejects_incomplete_dataset(tmp_path):
 def test_svm_rejects_invalid_cap(tmp_path, cap):
     with pytest.raises(ValueError, match="2..500"):
         train(tmp_path, tmp_path / "unused.joblib", version="invalid", max_per_class=cap)
+
+
+def _write_sparse_chars(root, split, counts):
+    for label, count in counts.items():
+        for sample in range(count):
+            rng = np.random.default_rng(label * 100 + sample)
+            image = rng.integers(0, 256, size=(32, 32), dtype=np.uint8)
+            # Give each class a stable spatial signal while retaining sample variation.
+            image[:, label % 24:(label % 24) + 4] = 255
+            imwrite(root / split / str(label) / f"{sample}.png", image)
+
+
+def test_sparse_template_train_mask_and_legacy_npz(tmp_path):
+    data = tmp_path / "chars"
+    _write_sparse_chars(data, "train", {0: 2, 31: 3})
+    _write_sparse_chars(data, "val", {0: 1, 31: 1})
+    path = tmp_path / "sparse.npz"
+    build(data, path, version="sparse-template")
+    classifier = load_classifier("template", path)
+    images, _ = load_split(data, "val", require_all=False)
+    probs = classifier.predict_proba(images)
+    assert probs.shape == (2, 65) and probs.dtype == np.float32
+    np.testing.assert_allclose(probs.sum(axis=1), 1, atol=1e-6)
+    assert np.all(probs[:, 0] > 0) and np.all(probs[:, 31] > 0)
+    assert np.all(probs[:, 1:31] == 0) and np.all(probs[:, 32:] == 0)
+    assert classifier.predict_proba(images[:0]).shape == (0, 65)
+
+    # Old archives have no class mask and therefore retain the historic all-class behavior.
+    legacy = tmp_path / "legacy.npz"
+    with legacy.open("wb") as handle:
+        np.savez_compressed(handle, templates=np.zeros((65, 32, 32), np.float32),
+                            temperature=np.float32(0.1))
+    old = TemplateClassifier.from_file(legacy, version="legacy")
+    assert old.present_classes.all()
+
+
+def test_sparse_calibrated_svm_maps_classes_and_records_exclusions(tmp_path):
+    data = tmp_path / "chars"
+    _write_sparse_chars(data, "train", {0: 3, 31: 1, 41: 3})
+    _write_sparse_chars(data, "val", {0: 1, 31: 1, 41: 1})
+    path = tmp_path / "sparse.joblib"
+    accuracy = train(data, path, version="sparse-svm", calibrated=True)
+    assert 0 <= accuracy <= 1
+    details = json.loads(path.with_suffix(".training.json").read_text(encoding="utf-8"))
+    assert details["trained_classes"] == [0, 41]
+    assert details["excluded_classes"] == [{"label": 31, "samples": 1}]
+    classifier = load_classifier("svm", path)
+    images, _ = load_split(data, "val", require_all=False)
+    probs = classifier.predict_proba(images)
+    assert probs.shape == (3, 65) and probs.dtype == np.float32
+    np.testing.assert_allclose(probs.sum(axis=1), 1, atol=1e-6)
+    assert np.all(probs[:, 1:41] == 0) and np.all(probs[:, 42:] == 0)
+    assert np.all(probs[:, [0, 41]] >= 0)
+    assert classifier.predict_proba(images[:0]).shape == (0, 65)
+
+
+def test_sparse_svm_requires_two_trainable_classes(tmp_path):
+    data = tmp_path / "chars"
+    _write_sparse_chars(data, "train", {0: 2, 31: 1})
+    _write_sparse_chars(data, "val", {0: 1})
+    with pytest.raises(ValueError, match="at least two classes"):
+        train(data, tmp_path / "unused.joblib", version="too-small", calibrated=True)
