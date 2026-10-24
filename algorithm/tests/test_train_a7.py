@@ -2,6 +2,9 @@
 
 import json
 import csv
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import time
 
 import numpy as np
 import pytest
@@ -11,6 +14,7 @@ from lpr.recognize.svm import SvmClassifier
 from lpr_tools.train.synth_chars import generate_dataset
 from lpr_tools.train.train_cnn import _load_sources, train as train_cnn
 from lpr_tools.train.train_svm import train as train_svm
+from lpr_tools.train import data as train_data
 
 
 def test_mixed_data_directory_sampling_and_partial_classes(tmp_path):
@@ -30,6 +34,22 @@ def test_mixed_data_directory_sampling_and_partial_classes(tmp_path):
     assert weights[0] == pytest.approx(3 / partial_count)
     first_source_count = partial_count
     assert weights[:first_source_count].sum() / weights.sum() == pytest.approx(0.75)
+
+
+def test_parallel_reader_keeps_order_across_bounded_batches(tmp_path, monkeypatch):
+    paths = [tmp_path / f"{index:04d}.png" for index in range(1031)]
+
+    def fake_imread(path, _flags):
+        value = int(Path(path).stem)
+        # Vary completion order so test covers ordered map results rather than timing.
+        time.sleep((value % 5) * 0.0001)
+        return np.full((32, 32), value % 256, dtype=np.uint8)
+
+    monkeypatch.setattr(train_data, "imread", fake_imread)
+    with ThreadPoolExecutor(max_workers=train_data.READ_WORKERS) as executor:
+        images = list(train_data._read_batched(paths, executor))
+    assert len(images) == len(paths)
+    assert [int(image[0, 0]) for image in images] == [index % 256 for index in range(len(paths))]
 
 
 def test_resume_matches_uninterrupted_and_keeps_inference_state_dict(tmp_path):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 import json
 import math
 import time
@@ -17,30 +19,51 @@ from lpr.io_utils import imread
 from lpr.recognize import load_classifier
 
 WARMUP_CALLS = 5
+CHAR_READ_WORKERS = 4
+CHAR_READ_WINDOW = 512
 
 
 def load_chars(root: Path) -> tuple[np.ndarray, np.ndarray]:
     """Read sparse <class-index>/*.png input; labels stay in frozen charset order."""
-    images: list[np.ndarray] = []
-    labels: list[int] = []
     root = Path(root)
     if not root.is_dir():
         raise ValueError(f"character directory does not exist: {root}")
-    for class_dir in sorted(root.iterdir(), key=lambda p: p.name):
-        if not class_dir.is_dir():
-            continue
-        try:
-            label = int(class_dir.name)
-        except ValueError:
-            continue
-        if not 0 <= label < len(CHARSET):
-            raise ValueError(f"class index out of range: {class_dir}")
-        for path in sorted(class_dir.glob("*.png")):
-            image = imread(path, 0)
+    def samples():
+        for class_dir in sorted(root.iterdir(), key=lambda p: p.name):
+            if not class_dir.is_dir():
+                continue
+            try:
+                label = int(class_dir.name)
+            except ValueError:
+                continue
+            if not 0 <= label < len(CHARSET):
+                raise ValueError(f"class index out of range: {class_dir}")
+            for path in sorted(class_dir.glob("*.png")):
+                yield label, path
+
+    images: list[np.ndarray] = []
+    labels: list[int] = []
+    sample_iter = iter(samples())
+    with ThreadPoolExecutor(max_workers=CHAR_READ_WORKERS) as pool:
+        pending = deque()
+        for _ in range(CHAR_READ_WINDOW):
+            try:
+                label, path = next(sample_iter)
+            except StopIteration:
+                break
+            pending.append((label, path, pool.submit(imread, path, 0)))
+        while pending:
+            label, path, future = pending.popleft()
+            image = future.result()
             if image is None or image.shape != (32, 32) or image.dtype != np.uint8:
                 raise ValueError(f"expected 32 x 32 uint8 character: {path}")
             images.append(image)
             labels.append(label)
+            try:
+                next_label, next_path = next(sample_iter)
+            except StopIteration:
+                continue
+            pending.append((next_label, next_path, pool.submit(imread, next_path, 0)))
     if not images:
         raise ValueError(f"no character PNG samples found in {root}")
     return np.stack(images), np.asarray(labels, dtype=np.int64)
