@@ -1,0 +1,4 @@
+# G7 覆盖率口径：只统计运行时包 lpr，不含 lpr_tools 与 cli.py（开发文档 13.1）
+[run]
+omit =
+    */lpr/cli.py

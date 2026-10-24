@@ -1,0 +1,163 @@
+"""流水线编排测试（架构师）：用替身阶段验证候选回退、多版式尝试、状态优先级与特种车牌（4.4）。"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import lpr.pipeline as pl
+from lpr.errors import BadInputError
+from lpr.types import (DecodeResult, PlateCandidate, PreprocessOut, RecogStatus, RectifiedPlate,
+                       SegmentResult)
+
+S = RecogStatus
+
+
+def _cand(i: int, color: str = "blue") -> PlateCandidate:
+    return PlateCandidate(corners=[(i, 0), (i + 10, 0), (i + 10, 3), (i, 3)], bbox=(i, 0, 10, 3),
+                          color=color, score=1.0 - i / 10, source="color")
+
+
+def _dec(status: RecogStatus, conf: float, plate: str = "陕A12345", layout: int = 7) -> DecodeResult:
+    return DecodeResult(status=status, plate_no=plate, layout=layout, layout_name="L7", confidence=conf,
+                        char_confidences=[conf] * layout, candidates=[(plate, conf)], vehicle_type_hint="small")
+
+
+@pytest.fixture
+def stages(monkeypatch):
+    """可配置的替身阶段：plan 控制候选、版式、分割成败与依次返回的解码结果，calls 记录调用顺序。"""
+    plan = {"cands": [], "layout": {}, "seg_ok": {}, "decode": []}
+    calls: list[tuple] = []
+
+    def fake_pre(image, cfg, roi=None):
+        if image.shape[0] < 20:
+            raise BadInputError("短边过小")
+        return PreprocessOut(image, image[..., 0], image, 1.0, (0, 0))
+
+    def fake_locate(pre, cfg, max_candidates=3):
+        return plan["cands"][:max_candidates]
+
+    def fake_rectify(image, cand, cfg):
+        calls.append(("rectify", cand.bbox[0]))
+        layout = plan["layout"].get(cand.bbox[0], 7)
+        return RectifiedPlate(np.zeros((80, 252, 3), np.uint8), layout, cand.color, np.eye(3), cand)
+
+    def fake_segment(rect, layout, cfg):
+        calls.append(("segment", rect.candidate.bbox[0], layout))
+        ok = plan["seg_ok"].get((rect.candidate.bbox[0], layout), True)
+        n = layout if ok else 0
+        return SegmentResult(ok, layout, [(0, 0, 1, 1)] * n, np.zeros((n, 32, 32), np.uint8), 1.0)
+
+    def fake_decode(probs, layout, color, cfg):
+        return plan["decode"].pop(0) if plan["decode"] else _dec(S.LOW_CONFIDENCE, 0.1)
+
+    monkeypatch.setattr(pl, "preprocess", fake_pre)
+    monkeypatch.setattr(pl, "locate", fake_locate)
+    monkeypatch.setattr(pl, "rectify", fake_rectify)
+    monkeypatch.setattr(pl, "segment", fake_segment)
+    monkeypatch.setattr(pl, "decode", fake_decode)
+    return plan, calls
+
+
+IMG = np.zeros((100, 200, 3), np.uint8)
+
+
+def test_no_candidates_is_no_plate(recognizer, stages):
+    r = recognizer.recognize(IMG)
+    assert r.status is S.NO_PLATE and r.error_code == 3001
+
+
+def test_preprocess_bad_input(recognizer, stages):
+    assert recognizer.recognize(np.zeros((10, 200, 3), np.uint8)).status is S.BAD_INPUT
+
+
+def test_ok_stops_early(recognizer, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0), _cand(1), _cand(2)]
+    plan["decode"] = [_dec(S.OK, 0.95)]
+    r = recognizer.recognize(IMG, debug=True)
+    assert r.status is S.OK and r.plate_no == "陕A12345" and r.error_code == 0
+    assert calls == [("rectify", 0), ("segment", 0, 7)]
+    assert r.bbox == (0, 0, 10, 3) and r.plate_image is not None
+    assert {"work", "plate_0", "chars"} <= set(r.debug)
+    assert set(r.stage_ms) >= {"preprocess", "locate", "rectify", "segment", "recognize", "postprocess"}
+
+
+def test_fallback_to_next_candidate(recognizer, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0), _cand(1)]
+    plan["seg_ok"] = {(0, 7): False}
+    plan["decode"] = [_dec(S.OK, 0.9, "陕B11111")]
+    r = recognizer.recognize(IMG)
+    assert r.status is S.OK and r.plate_no == "陕B11111" and r.bbox[0] == 1
+    assert ("segment", 1, 7) in calls
+
+
+def test_best_kept_by_status_then_confidence(recognizer, stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0), _cand(1), _cand(2)]
+    plan["decode"] = [_dec(S.INVALID_FORMAT, 0.99, "X"), _dec(S.LOW_CONFIDENCE, 0.5, "陕A11111"),
+                      _dec(S.LOW_CONFIDENCE, 0.7, "陕A22222")]
+    r = recognizer.recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.plate_no == "陕A22222" and r.error_code == 3002
+
+
+def test_all_segment_failed(recognizer, stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["seg_ok"] = {(0, 7): False}
+    assert recognizer.recognize(IMG).status is S.SEG_FAILED
+
+
+def test_unknown_layout_tries_both(recognizer, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0, "unknown")]
+    plan["layout"] = {0: 0}
+    recognizer.recognize(IMG)
+    assert [c for c in calls if c[0] == "segment"] == [("segment", 0, 7), ("segment", 0, 8)]
+
+
+def test_yellow_tries_other_layout(recognizer, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0, "yellow")]
+    recognizer.recognize(IMG)
+    assert [c for c in calls if c[0] == "segment"] == [("segment", 0, 7), ("segment", 0, 8)]
+
+
+def test_blue_tries_single_layout(recognizer, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0, "blue")]
+    recognizer.recognize(IMG)
+    assert [c for c in calls if c[0] == "segment"] == [("segment", 0, 7)]
+
+
+@pytest.mark.parametrize("color", ["white", "black"])
+def test_special_plate_unsupported(recognizer, stages, color):
+    plan, _ = stages
+    plan["cands"] = [_cand(0, color)]
+    r = recognizer.recognize(IMG)
+    assert r.status is S.UNSUPPORTED and r.error_code == 3006
+
+
+def test_stage_exception_becomes_internal_error(recognizer, stages, monkeypatch):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    monkeypatch.setattr(pl, "rectify", lambda *a: 1 / 0)
+    r = recognizer.recognize(IMG)
+    assert r.status is S.INTERNAL_ERROR and r.error_code == 3099
+
+
+def test_recognize_many_uses_vote(recognizer, stages, monkeypatch):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    seen = {}
+
+    def fake_vote(results, *, min_frames, min_confidence):
+        seen["n"] = len(results)
+        out = results[0]
+        out.frames_used = len(results)
+        return out
+
+    monkeypatch.setattr(pl, "vote", fake_vote)
+    r = recognizer.recognize_many([IMG, IMG, IMG])
+    assert seen["n"] == 3 and r.frames_used == 3 and r.elapsed_ms > 0
