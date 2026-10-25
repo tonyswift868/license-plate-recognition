@@ -253,3 +253,14 @@ def test_identity_comparison_does_not_treat_missing_legacy_metadata_as_unchanged
         {"models": {"corner": {"path": "corner.pt", "sha256": "old"}}},
         {"models": {"corner": {"path": "corner.pt", "sha256": "new"}}})
     assert result["available"] and result["models"]["corner"]["changed"]
+
+
+@pytest.mark.parametrize("phase", ["--recover-hard", "--g1-only"])
+def test_resuming_cannot_silently_ignore_a_different_explicit_config(tmp_path, phase):
+    saved = tmp_path / "saved.toml"
+    other = tmp_path / "other.toml"
+    (tmp_path / "pre-g1.json").write_text(json.dumps({
+        "effective_config": {"config_path": str(saved)}}), encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        daily_module.main([phase, str(tmp_path), "--config", str(other)])
+    assert caught.value.code == 2

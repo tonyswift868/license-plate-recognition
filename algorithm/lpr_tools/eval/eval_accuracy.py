@@ -175,9 +175,9 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
             result = oracle_recognizer.recognize(image,row)
         else:
             result = recognizer.recognize(image)
-        # Oracle rows bypass the final pipeline attempt; never attribute a previous
+        # Oracle plated rows bypass the final pipeline attempt; never attribute a previous
         # per-instance selection to an oracle result.
-        selection = getattr(recognizer, "last_selection", None) if not oracle else None
+        selection = getattr(recognizer, "last_selection", None) if not oracle or row.category == "np" else None
         if selection is not None:
             source_counts["selected_result_count"] += 1
             if selection["crnn_selected"]:

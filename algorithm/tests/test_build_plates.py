@@ -11,6 +11,7 @@ from lpr.io_utils import imwrite
 import lpr_tools.data.build_plates as builder
 from lpr.config import load_config
 from lpr_tools.data.ccpd import INDEX_FIELDS
+from lpr_tools.data.manifest import ManifestRow, write_manifest
 
 
 def _image(path: Path, seed: int) -> None:
@@ -62,10 +63,7 @@ def test_build_plates_hash_splits_layouts_and_resume(tmp_path: Path) -> None:
         writer.writeheader()
         writer.writerows(rows)
     frozen_manifest = tmp_path / "frozen.csv"
-    with frozen_manifest.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("path",))
-        writer.writeheader()
-        writer.writerow({"path": str(frozen.resolve())})
+    write_manifest(frozen_manifest, [ManifestRow(str(frozen.resolve()), "浙C23456", "blue", "clear", "fixture")])
     golden = tmp_path / "golden"
     golden.mkdir()
     out, receipts = tmp_path / "out", tmp_path / "receipts"
@@ -90,6 +88,9 @@ def test_build_plates_hash_splits_layouts_and_resume(tmp_path: Path) -> None:
                   frozen_manifests=[frozen_manifest], golden_dir=golden)
     with (out / "labels.csv").open(encoding="utf-8", newline="") as handle:
         assert len(list(csv.DictReader(handle))) == len(first)
+    state = json.loads((out / "build_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "complete"
+    assert state["processed_this_run"] == state["selected_remaining_at_start"] == 0
 
 
 def test_missing_frozen_manifest_fails_closed(tmp_path: Path) -> None:
@@ -114,3 +115,42 @@ def test_pipeline_failure_keeps_only_labeled_gt_crop(tmp_path: Path, monkeypatch
     assert result["pipeline_error"].startswith("RuntimeError")
     assert len(result["labels"]) == 1
     assert (out / result["labels"][0][0]).is_file()
+
+
+def test_malformed_frozen_manifest_is_rejected_before_any_crop_write(tmp_path):
+    import pytest
+    from lpr_tools.data.build_plates import _frozen_paths_and_hashes
+    invalid = tmp_path / "invalid.csv"
+    invalid.write_text("file,plate_no\nimage.jpg,京A12345\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid manifest columns"):
+        _frozen_paths_and_hashes([invalid], tmp_path / "no-golden")
+
+
+def test_pipeline_version_filters_iou_and_matches_true_layout_size(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import lpr_tools.data.build_plates as module
+    from lpr.config import load_config
+    from lpr.io_utils import imread
+    original = tmp_path / 'original.jpg'
+    _image(original, 72)
+    good = SimpleNamespace(bbox=(80, 55, 151, 61))
+    bad = SimpleNamespace(bbox=(0, 0, 20, 10))
+    calls = []
+    monkeypatch.setattr(module, 'WORKER_CONFIG', load_config())
+    monkeypatch.setattr(module, 'preprocess', lambda *_: None)
+    monkeypatch.setattr(module, 'locate', lambda *args, **kwargs: [good, bad])
+    def rects(image, candidate, cfg):
+        calls.append(candidate)
+        return [SimpleNamespace(image=np.full((80, 252, 3), 100, np.uint8), layout=7)]
+    monkeypatch.setattr(module, 'rectify_candidates', rects)
+    raw = {'path': str(original), 'split': 'train', 'plate_no': '沪BD12345',
+           'layout': '8', 'plate_color': 'green', 'quad': '80 55 230 55 230 115 80 115',
+           'bbox': '80 55 151 61'}
+    out = tmp_path / 'dataset'
+    result = module._process_one((raw, str(out), None))
+    assert result['status'] == 'ok' and len(result['labels']) == 2
+    assert calls == [good]
+    assert result['labels'][1][4] == 'pipeline_candidate:0:0'
+    candidate_crop = imread(out / result['labels'][1][0])
+    assert candidate_crop.shape == (80, 276, 3)
+    assert candidate_crop.min() == candidate_crop.max() == 100

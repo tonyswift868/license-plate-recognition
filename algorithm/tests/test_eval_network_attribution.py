@@ -128,8 +128,15 @@ def test_oracle_row_does_not_recount_previous_np_network_calls(tmp_path, monkeyp
             self.reader_invoked_calls = self.corner_invoked_calls = 0
         def recognize(self, _image):
             self.reader_invoked_calls = self.corner_invoked_calls = 1
-            return failure_result(S.NO_PLATE, stage_ms={"reader": 1., "corner": 1.})
+            self.last_selection = {"source": "net", "crnn_selected": True}
+            result = failure_result(S.LOW_CONFIDENCE, stage_ms={"reader": 1., "corner": 1.})
+            result.plate_no = "京A12345"  # actual pipeline result for this np row is a false positive
+            return result
     report = eval_accuracy.evaluate(manifest, StubRecognizer(), tmp_path / "out", oracle=True)
     attribution = report["network_attribution"]
     assert attribution["reader_invoked_images"] == attribution["corner_invoked_images"] == 1
     assert attribution["reader_invoked_calls"] == attribution["corner_invoked_calls"] == 1
+
+    assert attribution["selected_result_count"] == 1
+    assert attribution["network_candidate_selected_count"] == attribution["crnn_selected_count"] == 1
+    assert attribution["crnn_selected_correct"] == 0 and attribution["crnn_selected_accuracy"] == 0.

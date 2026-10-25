@@ -560,6 +560,12 @@ def main(argv=None):
     parser.add_argument("--recover-hard", type=Path, help="retry hard evaluations using the saved 7x300 selection")
     args = parser.parse_args(argv)
     try:
+        resume_dir = args.recover_hard or args.g1_only
+        if resume_dir and args.config:
+            marker = _read_json(resume_dir / "pre-g1.json")
+            saved_config = marker.get("effective_config", {}).get("config_path")
+            if not saved_config or args.config.resolve() != Path(saved_config).resolve():
+                raise ValueError("resumed runs must keep their saved --config; start a new daily run to change models")
         if args.recover_hard:
             summary = recover_hard(args.recover_hard)
         elif args.g1_only:

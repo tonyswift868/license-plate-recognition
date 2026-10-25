@@ -27,6 +27,7 @@ from lpr.plate_rules import match_layout
 from lpr.preprocess import preprocess
 from lpr.rectify import rectify_candidates
 from lpr_tools.data.ccpd import read_index
+from lpr_tools.data.manifest import read_manifest, image_path
 
 FIELDS = ("file", "plate_no", "layout", "color", "source", "orig_path")
 WORKER_CONFIG = None
@@ -120,16 +121,11 @@ def _frozen_paths_and_hashes(manifests: list[Path], golden_dir: Path) -> tuple[s
     for manifest in manifests:
         if not manifest.is_file():
             raise FileNotFoundError(f"required frozen manifest does not exist: {manifest}")
-        with manifest.open(encoding="utf-8", newline="") as f:
-            for row in csv.DictReader(f):
-                p = Path(row.get("path", ""))
-                if not p.is_absolute():
-                    p = manifest.parent / p
-                p = p.resolve()
-                paths.add(os.path.normcase(os.path.normpath(str(p))))
-                if p.is_file():
-                    blob = p.read_bytes()
-                    hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
+        for row in read_manifest(manifest, check_files=True):
+            p = image_path(row, manifest).resolve()
+            paths.add(os.path.normcase(os.path.normpath(str(p))))
+            blob = p.read_bytes()
+            hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
     if golden_dir.is_dir():
         for p in golden_dir.rglob("*"):
             if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
@@ -330,6 +326,13 @@ def build(index: Path, target: Path, receipt_dir: Path, *, workers: int = 4,
     (receipt_dir / "stats.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (target / "provenance.json").write_text(json.dumps({"builder": "lpr_tools.data.build_plates", "python": sys.version, "cv2": cv2.__version__, "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(), "official_split_preserved": True, "hash_policy": "SHA-256 of original bytes; exact length and digest checked against frozen union; train/val source hashes are disjoint; same-split duplicate originals may remain", "rectification": "GT quad direct perspective; pipeline preprocess->locate->rectify_candidates with bbox IoU>=0.5; pipeline crops resized to GT label layout dimensions where predicted layout differs", "label_fields": FIELDS, "created": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=2), encoding="utf-8")
     (receipt_dir / "audit.json").write_text(json.dumps({"frozen_manifests": [str(p) for p in frozen_manifests], "frozen_paths": len(frozen_paths), "frozen_hashes": len(frozen_hashes), "cross_split_checked": True, "counts": dict(stats)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Persist completion even when a resume has zero pending sources.
+    final_state = {"status": "complete", "processed_this_run": len(selected),
+                   "selected_remaining_at_start": len(selected), "stats": dict(stats),
+                   "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
+    final_state_path = target / "build_state.json.tmp"
+    final_state_path.write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    final_state_path.replace(target / "build_state.json")
     return summary
 
 
