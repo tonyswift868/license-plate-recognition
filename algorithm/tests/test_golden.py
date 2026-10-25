@@ -9,12 +9,13 @@ import csv
 
 import pytest
 
+from lpr.errors import ModelLoadError
 from lpr.io_utils import imread
-from lpr.types import RecogStatus
+from lpr.pipeline import PlateRecognizer
 
 from .conftest import GOLDEN_DIR
 
-MIN_CORRECT = 0                                          # Phase 0 各阶段为桩；v0 打通后提高
+MIN_CORRECT = 2                                          # 10-25 cnn v0：仅 2 张无牌图正确；端到端修好后提高
 
 LABELS = GOLDEN_DIR / "labels.csv"
 pytestmark = [pytest.mark.golden,
@@ -26,11 +27,21 @@ def _rows() -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def test_golden_end_to_end(recognizer):
+@pytest.fixture(scope="module")
+def real_recognizer() -> PlateRecognizer:
+    """用 default.toml 指向的真实模型；模型不可用时跳过。"""
+    try:
+        return PlateRecognizer.from_config()
+    except ModelLoadError as e:
+        pytest.skip(f"真实模型不可用：{e}")
+
+
+def test_golden_end_to_end(real_recognizer):
     correct = 0
     for row in _rows():
-        r = recognizer.recognize(imread(GOLDEN_DIR / row["file"]))
-        expected_none = row["category"] == "np"
-        if (expected_none and r.status is RecogStatus.NO_PLATE) or (r.plate_no == row["plate_no"]):
-            correct += 1
+        r = real_recognizer.recognize(imread(GOLDEN_DIR / row["file"]))
+        if row["category"] == "np":
+            correct += r.plate_no is None                # 无牌图只要不报出车牌就算对（NO_PLATE 或 SEG_FAILED）
+        else:
+            correct += r.plate_no == row["plate_no"]
     assert correct >= MIN_CORRECT
