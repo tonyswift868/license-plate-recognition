@@ -19,11 +19,12 @@ import numpy as np
 
 from lpr.config import ALGORITHM_DIR, load_config
 from lpr.errors import DEFAULT_MESSAGES, ERROR_CODES, failure_result
-from lpr.io_utils import imread, imwrite
+from lpr.io_utils import imwrite
 from lpr.postprocess import decode
 from lpr.segment import segment
 from lpr.types import PlateCandidate, RectifiedPlate, RecognitionResult, RecogStatus as S
 from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
+from lpr_tools.data.image_health import decode_image
 from .common import add_backend_args, make_recognizer, mode_name
 from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples,
                            sample_dev_hard, sample_validation)
@@ -112,13 +113,29 @@ def failure_cause(row, result):
 
 
 def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
-             locate_recall=False, sampling=None):
-    rows = read_manifest(manifest, check_files=True)
+             locate_recall=False, sampling=None, stage_trace=None, reuse_stage_trace=None,
+             truth_samples=None):
+    # Keep rows with missing or corrupt files in the denominator accounting;
+    # they are explicitly recorded as decode errors and skipped below.
+    rows = read_manifest(manifest, check_files=False)
     if not rows:
         raise ValueError("manifest is empty")
     if oracle and any(r.category != "np" and r.quad is None for r in rows):
         raise ValueError("oracle needs quad ground truth on every plated row")
-    lookup = {path_key(s.row.path): s for s in read_samples(index)} if index is not None else {}
+    inherited_locations = None
+    if reuse_stage_trace:
+        inherited = {}
+        with Path(reuse_stage_trace).open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    item = json.loads(line)
+                    inherited[item["path"]] = item
+        expected_paths = [row.path for row in rows]
+        if list(inherited) != expected_paths:
+            raise ValueError("reused stage trace paths/order do not match manifest")
+        inherited_locations = inherited
+    source_samples = truth_samples if truth_samples is not None else (read_samples(index) if index is not None else [])
+    lookup = {path_key(s.row.path): s for s in source_samples}
     if locate_recall:
         if index is None:
             raise ValueError("--locate-recall needs ccpd_index.csv via --index")
@@ -128,13 +145,18 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
                 raise ValueError(f"missing index bbox ground truth: {row.path}")
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    samples, failures, locations = [], [], []
+    samples, failures, locations, decode_errors, traces = [], [], [], [], []
     subset_samples = {}
     locator_cfg = (getattr(recognizer, "config", None) or load_config()) if locate_recall else None
     causes = Counter({key:0 for key in ("localization","segmentation","recognition","rejection")})
     oracle_recognizer = OracleRecognizer(recognizer)
     for i,row in enumerate(rows):
-        image = imread(image_path(row, manifest))
+        image, decode_error = decode_image(image_path(row, manifest))
+        if decode_error:
+            decode_errors.append({"path": row.path, "error": decode_error})
+            traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
+                           "decode_error": decode_error})
+            continue
         if oracle and row.category != "np":
             result = oracle_recognizer.recognize(image,row)
         else:
@@ -146,7 +168,19 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
         if locate_recall and row.category != "np":
             if truth.bbox is None:
                 raise ValueError(f"plated row has no index bbox: {row.path}")
-            locations.append((truth.stratum, locate_match(image, truth.bbox, locator_cfg)))
+            location = locate_match(image, truth.bbox, locator_cfg)
+            locations.append((truth.stratum, location))
+        else:
+            location = None
+        if location is None and inherited_locations is not None:
+            inherited_row = inherited_locations[row.path]
+            location = ({"hit": inherited_row["top3_hit"]}
+                        if inherited_row.get("top3_hit") is not None else None)
+        traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
+                       "prediction": result.plate_no or "", "status": result.status.value,
+                       "failure_cause": failure_cause(row, result),
+                       "segmentation_failed": result.status == S.SEG_FAILED,
+                       "top3_hit": location["hit"] if location is not None else None})
         cause = failure_cause(row,result)
         if cause:
             causes[cause] += 1
@@ -159,6 +193,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
             failures.append({"path":row.path, "truth":row.plate_no, "category":row.category,
                              "cause":cause, "image":filename, "result":result.to_dict()})
     report = {"mode":recognizer.version, "oracle":oracle,
+              "manifest_rows": len(rows), "decoded_rows": len(samples),
+              "decode_error_count": len(decode_errors), "decode_errors": decode_errors,
               "oracle_scope":"ground truth quad, color and length; np runs normally" if oracle else None,
               "character_metric":"positional matches / max(true length, predicted length)",
               "attribution":("failure causes are status-based proxies; Top-3 recall measured independently"
@@ -171,12 +207,17 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
               "categories":{category:metrics([(r,s) for r,s in samples if r.category == category]) for category in CATEGORIES},
               "failure_causes":dict(causes),"failures":failures}
     (out/"report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+    if stage_trace:
+        trace_path = Path(stage_trace)
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in traces),
+                              encoding="utf-8")
     return report
 
 
 def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=None):
     """Measure Top-3 localization directly from CCPD bbox labels, without a model."""
-    rows = read_manifest(manifest, check_files=True)
+    rows = read_manifest(manifest, check_files=False)
     if not rows:
         raise ValueError("manifest is empty")
     if index is None:
@@ -184,7 +225,7 @@ def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=N
     lookup = ({path_key(sample.row.path): sample for sample in truth_samples}
               if truth_samples is not None else
               {path_key(sample.row.path): sample for sample in read_samples(index)})
-    locations = []
+    locations, decode_errors = [], []
     excluded_np = 0
     cfg = load_config()
     for row in rows:
@@ -194,13 +235,17 @@ def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=N
         sample = lookup.get(path_key(image_path(row, manifest)))
         if sample is None or sample.bbox is None:
             raise ValueError(f"missing index bbox ground truth: {row.path}")
-        image = imread(image_path(row, manifest))
+        image, decode_error = decode_image(image_path(row, manifest))
+        if decode_error:
+            decode_errors.append({"path": row.path, "error": decode_error})
+            continue
         locations.append((sample.stratum, locate_match(image, sample.bbox, cfg)))
     report = {"mode": "locate-only", "oracle": False,
               "attribution": "Top-3 localization recall measured independently; no recognizer loaded",
               "sampling": sampling,
               "locate_recall": summarize_location(locations, excluded_np=excluded_np),
-              "sample_count": len(rows)}
+              "manifest_rows": len(rows), "decoded_rows": len(locations),
+              "decode_error_count": len(decode_errors), "decode_errors": decode_errors}
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -219,6 +264,8 @@ def print_report(report):
         for subset, values in [("overall", location["overall"]), *location["subsets"].items()]:
             print(f"{subset} {values['hits']}/{values['total']} {_percent(values['recall'])}")
         print(f"excluded_np={location['excluded_np']}")
+        if "decode_error_count" in report:
+            print(f"decoded_rows={report['decoded_rows']}/{report['manifest_rows']} decode_errors={report['decode_error_count']}")
         if report.get("sampling"):
             print("sampling=" + json.dumps({k:v for k,v in report["sampling"].items() if k != "paths"},
                                            ensure_ascii=False, sort_keys=True))
@@ -234,6 +281,8 @@ def print_report(report):
     print("attribution=" + report["attribution"])
     print("character_metric=" + report["character_metric"])
     print(f"failure_examples={len(report['failures'])}")
+    if "decode_error_count" in report:
+        print(f"decoded_rows={report['decoded_rows']}/{report['manifest_rows']} decode_errors={report['decode_error_count']}")
     if report.get("sampling"):
         print("sampling=" + json.dumps({k:v for k,v in report["sampling"].items() if k != "paths"},
                                        ensure_ascii=False, sort_keys=True))
@@ -292,6 +341,8 @@ def main(argv=None):
     parser.add_argument("--out", default="algorithm/out/eval")
     parser.add_argument("--scoreboard", metavar="TEMP_COPY", help="append validation row to a temporary scoreboard copy")
     parser.add_argument("--oracle", action="store_true", help="use quad, true color and length; skip locate/rectify")
+    parser.add_argument("--stage-trace", help="write compact per-row JSONL trace for paired stage analysis")
+    parser.add_argument("--reuse-stage-trace", help="inherit Top-3 labels from a matching normal trace without rerunning locate")
     args = parser.parse_args(argv)
     if args.scoreboard:
         if Path(args.scoreboard).resolve() == (ALGORITHM_DIR/"reports"/"scoreboard.md").resolve():
@@ -304,6 +355,10 @@ def main(argv=None):
         parser.error("--dev-hard requires --split val")
     if args.locate_only and (args.scoreboard or args.oracle):
         parser.error("--locate-only cannot be combined with --scoreboard or --oracle")
+    if args.stage_trace and not (args.locate_recall or args.reuse_stage_trace):
+        parser.error("--stage-trace requires --locate-recall or --reuse-stage-trace")
+    if args.reuse_stage_trace and not args.oracle:
+        parser.error("--reuse-stage-trace is intended for --oracle runs")
     if args.subset and args.dev_hard:
         parser.error("--subset cannot be combined with --dev-hard")
     if args.split == "val" and not Path(args.exclude_manifest).is_file():
@@ -328,7 +383,7 @@ def main(argv=None):
                     subsets=set(args.subset) if args.subset else None)
                 sampling["mode"] = "val"
             manifest = Path(args.out)/"validation_manifest.csv"
-            write_manifest(manifest, [sample.row for sample in selected], check_files=True)
+            write_manifest(manifest, [sample.row for sample in selected], check_files=False)
         if args.locate_only:
             report = evaluate_locate_only(manifest, args.index, args.out, sampling=sampling,
                                           truth_samples=selected)
@@ -339,7 +394,9 @@ def main(argv=None):
         recognizer = make_recognizer(args, samples_dir=Path(manifest).resolve().parent)
         report = evaluate(manifest, recognizer, args.out, oracle=args.oracle,
                           index=args.index if args.split == "val" or args.locate_recall else None,
-                          locate_recall=args.locate_recall, sampling=sampling)
+                          locate_recall=args.locate_recall, sampling=sampling,
+                          stage_trace=args.stage_trace, reuse_stage_trace=args.reuse_stage_trace,
+                          truth_samples=selected)
         print_report(report)
         if args.split == "val":
             print(f"validation_manifest={manifest}")

@@ -18,6 +18,34 @@ from lpr_tools.eval.index_samples import path_key, read_samples, sample_dev_hard
 from lpr_tools.eval.eval_accuracy import evaluate, main
 import lpr_tools.eval.eval_accuracy as ev
 import lpr_tools.eval.locate_recall as lr
+import lpr_tools.eval.index_samples as index_samples_module
+
+
+@pytest.fixture(autouse=True)
+def isolate_eval_defaults(tmp_path, monkeypatch):
+    """Fence evaluator discovery and reject real model/index access in tests."""
+    algo = tmp_path / "algorithm"
+    golden = algo / "tests" / "data" / "golden" / "golden_manifest.csv"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("path,plate_no,plate_color,category,source,quad,note\n", encoding="utf-8")
+    monkeypatch.setattr(ev, "ALGORITHM_DIR", algo)
+    make_recognizer = ev.make_recognizer
+
+    def guarded_make_recognizer(args, *args_, **kwargs):
+        assert args.fake or args.uniform, "unit tests must never load the configured real model"
+        return make_recognizer(args, *args_, **kwargs)
+
+    monkeypatch.setattr(ev, "make_recognizer", guarded_make_recognizer)
+    read_samples_impl = index_samples_module.read_samples
+
+    def guarded_read_samples(index_path):
+        index_path = Path(index_path).resolve()
+        assert index_path.is_relative_to(tmp_path.resolve()), \
+            f"unit test attempted to read a non-temporary index: {index_path}"
+        return read_samples_impl(index_path)
+
+    monkeypatch.setattr(index_samples_module, "read_samples", guarded_read_samples)
+    monkeypatch.setattr(ev, "read_samples", guarded_read_samples)
 
 
 def index_fixture(root):
@@ -252,8 +280,12 @@ def test_missing_gt_and_cli_input_errors(tmp_path, capsys):
     with pytest.raises(ValueError,match="ground truth"):
         evaluate(manifest,FakeRecognizer(),tmp_path/"out",index=index,locate_recall=True)
     assert not (tmp_path/"out").exists()
-    for argv in (["--split","val","--index",str(tmp_path/"missing.csv")],
-                 ["--split","val","--index",str(index),"--n","0"],
-                 ["--split","val","--index",str(index),"--scoreboard","algorithm/reports/scoreboard.md"]):
+    exclude = tmp_path/"exclude.csv"
+    write_manifest(exclude, [])
+    for argv in (["--split","val","--index",str(tmp_path/"missing.csv"),
+                  "--exclude-manifest",str(exclude)],
+                 ["--split","val","--index",str(index),"--n","0","--exclude-manifest",str(exclude)],
+                 ["--split","val","--index",str(index),"--exclude-manifest",str(exclude),
+                  "--scoreboard",str(tmp_path/"algorithm"/"reports"/"scoreboard.md")]):
         with pytest.raises(SystemExit) as exc:main(argv)
         assert exc.value.code == 2

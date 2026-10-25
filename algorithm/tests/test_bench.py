@@ -63,9 +63,51 @@ def test_cli_sources(tmp_path,capsys,monkeypatch):
     write_manifest(manifest,[ManifestRow(p.name,"陕A12345","blue","clear","test")])
     for source in (["--images",str(p)],["--manifest",str(manifest)],[]):
         assert latency_main(["--fake","--n","2",*source])==0
-        assert json.loads(capsys.readouterr().out)["acceptance_eligible"] is False
+        report=json.loads(capsys.readouterr().out)
+        assert report["acceptance_eligible"] is False
+        if source:
+            assert (report["requested"],report["decoded"],report["skipped"])==(1,1,0)
+        else:
+            assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
     path=tmp_path/"synth.mp4";make_video(path)
     assert video_main(["--fake","--video",str(path)])==0
     assert json.loads(capsys.readouterr().out)["decoded_frames"]==20
-    for argv in (["--fake","--n","0"],["--fake","--images",str(tmp_path/"missing")]):
-        with pytest.raises(SystemExit):latency_main(argv)
+    with pytest.raises(SystemExit):latency_main(["--fake","--n","0"])
+    assert latency_main(["--fake","--images",str(tmp_path/"missing")])==0
+    report=json.loads(capsys.readouterr().out)
+    assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
+    assert report["n"]==0
+
+    missing=tmp_path/'missing-only.csv'
+    write_manifest(missing,[ManifestRow('absent.jpg','陕A12345','blue','clear','test')])
+    monkeypatch.setattr(bl,'make_recognizer',lambda *args,**kwargs: (_ for _ in ()).throw(AssertionError('all bad must not load model')))
+    assert latency_main(['--manifest',str(missing)])==0
+    report=json.loads(capsys.readouterr().out)
+    assert (report['requested'],report['decoded'],report['skipped'])==(1,0,1)
+    assert report['n']==0 and report['warmup']==0 and report['acceptance_eligible'] is False
+
+
+def test_cli_skips_undecodable_and_reports_empty_inputs(tmp_path,capsys,monkeypatch):
+    monkeypatch.setattr(bl,"runtime_info",lambda:{"cpu":"test CPU","torch_threads":2})
+    good=tmp_path/"good.png";imwrite(good,np.zeros((32,48,3),np.uint8))
+    bad=tmp_path/"bad.jpg";bad.write_bytes(b"not an image")
+    manifest=tmp_path/"mixed.csv"
+    write_manifest(manifest,[ManifestRow(good.name,"陕A12345","blue","clear","test"),
+                             ManifestRow(bad.name,"陕A12345","blue","clear","test")])
+    assert latency_main(["--fake","--manifest",str(manifest),"--n","2"])==0
+    report=json.loads(capsys.readouterr().out)
+    assert (report["requested"],report["decoded"],report["skipped"])==(2,1,1)
+    assert report["n"]==2 and report["decode_errors"][0]=={"path":str(bad),"reason":"decode_failed"}
+
+    all_bad=tmp_path/"bad-only.csv"
+    write_manifest(all_bad,[ManifestRow(bad.name,"陕A12345","blue","clear","test")])
+    assert latency_main(["--fake","--manifest",str(all_bad)])==0
+    report=json.loads(capsys.readouterr().out)
+    assert (report["requested"],report["decoded"],report["skipped"])==(1,0,1)
+    assert report["n"]==0 and report["wall_time"] is None
+
+    empty=tmp_path/"empty.csv";write_manifest(empty,[])
+    assert latency_main(["--fake","--manifest",str(empty)])==0
+    report=json.loads(capsys.readouterr().out)
+    assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
+    assert report["n"]==0

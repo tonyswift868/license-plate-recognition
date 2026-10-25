@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from pathlib import Path
 import numpy as np
 import pytest
 from lpr.io_utils import imwrite
@@ -9,8 +10,36 @@ from lpr.types import SegmentResult, RecogStatus as S
 from lpr_tools.data.manifest import ManifestRow, write_manifest
 from lpr_tools.eval.eval_accuracy import evaluate, main, append_scoreboard, OracleRecognizer
 import lpr_tools.eval.eval_accuracy as ev
+import lpr_tools.eval.index_samples as index_samples_module
 
 QUAD=((0.,0.),(199.,0.),(199.,119.),(0.,119.))
+
+
+@pytest.fixture(autouse=True)
+def isolate_eval_defaults(tmp_path, monkeypatch):
+    """Keep CLI defaults and accidental model construction inside this test."""
+    algo = tmp_path / "algorithm"
+    golden = algo / "tests" / "data" / "golden" / "golden_manifest.csv"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("path,plate_no,plate_color,category,source,quad,note\n", encoding="utf-8")
+    monkeypatch.setattr(ev, "ALGORITHM_DIR", algo)
+    make_recognizer = ev.make_recognizer
+
+    def guarded_make_recognizer(args, *args_, **kwargs):
+        assert args.fake or args.uniform, "unit tests must never load the configured real model"
+        return make_recognizer(args, *args_, **kwargs)
+
+    monkeypatch.setattr(ev, "make_recognizer", guarded_make_recognizer)
+    read_samples_impl = index_samples_module.read_samples
+
+    def guarded_read_samples(index_path):
+        index_path = Path(index_path).resolve()
+        assert index_path.is_relative_to(tmp_path.resolve()), \
+            f"unit test attempted to read a non-temporary index: {index_path}"
+        return read_samples_impl(index_path)
+
+    monkeypatch.setattr(index_samples_module, "read_samples", guarded_read_samples)
+    monkeypatch.setattr(ev, "read_samples", guarded_read_samples)
 
 
 def fixture_manifest(tmp_path):
@@ -49,12 +78,16 @@ def test_cli_and_scoreboard(tmp_path,capsys):
     output=capsys.readouterr().out
     assert "overall_g2 5 40.00%" in output and "lpr-fake" in output
     assert len(score.read_text(encoding="utf-8").splitlines())==2
-    for argv in (["--split","val"],["--scoreboard","algorithm/reports/scoreboard.md"],
+    # Supplying a missing temporary index exercises the CLI guard without
+    # falling through to the real shared index/default exclusion manifests.
+    protected = tmp_path/"algorithm"/"reports"/"scoreboard.md"
+    for argv in (["--split","val","--index",str(tmp_path/"missing-index.csv")],
+                 ["--scoreboard",str(protected)],
                  ["--scoreboard",str(score)]):
         with pytest.raises(SystemExit) as exc:main(argv)
         assert exc.value.code==2
     assert "ccpd_index.csv" in capsys.readouterr().err
-    with pytest.raises(ValueError):append_scoreboard("algorithm/reports/scoreboard.md",{},split="val",classifier="fake")
+    with pytest.raises(ValueError):append_scoreboard(tmp_path/"algorithm"/"reports"/"scoreboard.md",{},split="val",classifier="fake")
 
 
 def test_fake_oracle(tmp_path):

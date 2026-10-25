@@ -9,6 +9,7 @@ from pathlib import Path
 
 from lpr_tools.data.ccpd import read_index
 from lpr_tools.data.manifest import ManifestRow, validate_manifest, write_manifest
+from lpr_tools.data.image_health import decode_image
 
 SEED = 42
 # Delivered ccpd_db (10,132 rows): Q10=17, Q25=22, median=28.
@@ -61,6 +62,28 @@ def _choose(candidates: list[dict[str, str]], n: int, rng: random.Random,
             raise ValueError(f"{label}: need {n} test samples, found {len(ordered)} (shortfall {missing})")
         shortfalls[label] = missing
     return rng.sample(ordered, min(n, len(ordered)))
+
+
+def _decodeable(candidates: list[dict[str, str]]) -> tuple[list[dict[str, str]], int]:
+    good, skipped = [], 0
+    for row in candidates:
+        _, reason = decode_image(row['path'])
+        if reason is None:
+            good.append(row)
+        else:
+            skipped += 1
+    return good, skipped
+
+
+def _decodeable_rows(rows: list[ManifestRow]) -> tuple[list[ManifestRow], int]:
+    good, skipped = [], 0
+    for row in rows:
+        _, reason = decode_image(row.path)
+        if reason is None:
+            good.append(row)
+        else:
+            skipped += 1
+    return good, skipped
 
 
 def _local_rows(index_path: Path, local_labels: Path | None,
@@ -151,6 +174,15 @@ def build_testset(index_path: str | Path, out_path: str | Path, *,
     np_rows = [r for r in test if r.get("subset") == "ccpd_np" and r.get("skip_reason") == "no_plate"
                and r.get("has_plate") == "0"]
 
+    # Validate actual image bytes before sampling. A corrupt candidate is
+    # excluded while preserving the category quota whenever the pool allows.
+    skipped_total = 0
+    pools = [base, green, night, tilt, dirty, np_rows]
+    for i, pool in enumerate(pools):
+        pools[i], skipped = _decodeable(pool)
+        skipped_total += skipped
+    base, green, night, tilt, dirty, np_rows = pools
+
     for label, candidates, count, category in (
         ("clear_base", base, QUOTAS["clear_base"], "clear"),
         ("clear_2020", green, QUOTAS["clear_2020"], "clear"),
@@ -170,7 +202,10 @@ def build_testset(index_path: str | Path, out_path: str | Path, *,
                         if category != "np" else ManifestRow(_index_image_path(r["path"], index_path), "", "unknown", "np", r.get("subset", ""), None,
                                                                "no_plate") for r in chosen)
 
-    selected.extend(_local_rows(index_path, Path(local_labels) if local_labels else None, index_splits))
+    local_rows, local_skipped = _decodeable_rows(
+        _local_rows(index_path, Path(local_labels) if local_labels else None, index_splits))
+    skipped_total += local_skipped
+    selected.extend(local_rows)
     validate_manifest(selected, base_dir=out_path.resolve().parent, check_files=False)
     # Writing occurs only after all quotas, local labels, and manifest checks pass.
     write_manifest(out_path, selected)
@@ -179,6 +214,7 @@ def build_testset(index_path: str | Path, out_path: str | Path, *,
           ("clear", "night", "tilt", "dirty", "np", "local")))
     if shortfalls:
         print("shortfall=" + ", ".join(f"{k}:{v}" for k, v in shortfalls.items()))
+    print(f"undecodable_skipped={skipped_total}")
     return selected
 
 
