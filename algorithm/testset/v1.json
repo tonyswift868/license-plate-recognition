@@ -1,5 +1,5 @@
 {
-  "version": "v1",
+  "version": "v1.1",
   "seed": 42,
   "counts": {
     "clear": 150,
@@ -11,7 +11,7 @@
   "total": 320,
   "index": "D:\\keshe2\\algorithm\\data\\index\\ccpd_index.csv",
   "index_sha256": "241708e0b108de4e0a6251f988c5f4e68fd6a91953aa08f4490b52e61d7bad2c",
-  "manifest_sha256": "0f5e453b31f8edaea7e050edf5d0919655920cf801ff55ca08426c766d02b9d8",
+  "manifest_sha256": "3a50f9b973c6487dd7ef11f0450ea12adeb1026364ec9394e284f34d51ef2ff4",
   "shared_copy": "D:\\keshe2\\algorithm\\data\\index\\testset_manifest_v1.csv",
   "clear": "120 ccpd_base val holdout + 30 ccpd2020 test",
   "night_brightness_lt": 20,
@@ -113,5 +113,23 @@
   ],
   "dirty_policy": "AI 目检，待tonyswift868复核; visible physical occlusion only; <=8 thumbnails per call, each 400x400",
   "local": "No local labels/images supplied; local count 0, not counted in core 300",
-  "immutable_policy": "v1 frozen: future changes additive and documented; reserve all listed original paths"
+  "immutable_policy": "v1 frozen: future changes additive and documented; reserve all listed original paths",
+  "previous_version": {
+    "version": "v1",
+    "manifest": "manifest_v1.0.csv",
+    "manifest_sha256": "0f5e453b31f8edaea7e050edf5d0919655920cf801ff55ca08426c766d02b9d8",
+    "metadata": "v1.0.json"
+  },
+  "change_history": [
+    {
+      "version": "v1.1",
+      "reason": "Replace the confirmed undecodable ccpd_np test image with one decode-validated same-subset test image selected with seed 42.",
+      "old_path": "D:\\keshe2\\algorithm\\data\\raw\\ccpd2019\\ccpd_np\\5125.jpg",
+      "old_sha256": "fa974ea937106fef568c25d5893469fd9c869afc1ca87ba30e2230bddf05aaf8",
+      "new_path": "D:\\keshe2\\algorithm\\data\\raw\\ccpd2019\\ccpd_np\\5546.jpg",
+      "new_sha256": "105b50ac96ecf6af78d32b9433d79ef2f22722163db56231bb06bede0a9ecc85",
+      "old_manifest_sha256": "0f5e453b31f8edaea7e050edf5d0919655920cf801ff55ca08426c766d02b9d8",
+      "new_manifest_sha256": "3a50f9b973c6487dd7ef11f0450ea12adeb1026364ec9394e284f34d51ef2ff4"
+    }
+  ]
 }

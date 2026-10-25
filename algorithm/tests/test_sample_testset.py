@@ -1,8 +1,12 @@
 import csv
+import shutil
 from pathlib import Path
 
 import pytest
+import cv2
+import numpy as np
 
+from lpr.io_utils import imwrite
 from lpr_tools.data.ccpd import INDEX_FIELDS
 from lpr_tools.data.manifest import read_manifest
 from lpr_tools.data.sample_testset import build_testset
@@ -17,7 +21,10 @@ def make_index(path, *, short=False):
         for i in range(count):
             row = dict.fromkeys(INDEX_FIELDS, "")
             split = kw.get("split", "test")
-            row.update(path=f"/data/{dataset}/{subset}/{split}-{i}.jpg", dataset=dataset, subset=subset,
+            image = path.parent / dataset / subset / f"{split}-{i}.jpg"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            imwrite(image, np.full((8, 16, 3), 127, dtype=np.uint8))
+            row.update(path=str(image), dataset=dataset, subset=subset,
                        split="test", has_plate="1", plate_no=PLATE, plate_color="blue",
                        quad="1 2 3 2 3 4 1 4")
             row.update(kw)
@@ -53,6 +60,17 @@ def test_quota_seed_leakage_and_skip_rules(tmp_path):
     assert all(not r.plate_no for r in rows if r.category == "np")
 
 
+def test_undecodable_candidate_is_skipped_and_counted(tmp_path, capsys):
+    index = tmp_path / "ccpd_index.csv"; make_index(index)
+    records = list(csv.DictReader(index.open(encoding="utf-8", newline="")))
+    broken = next(Path(row["path"]) for row in records if row["subset"] == "ccpd_base" and row["split"] == "val")
+    broken.write_bytes(b"not an image")
+    result = build_testset(index, tmp_path / "manifest.csv")
+    assert len([row for row in result if row.category == "clear" and row.source == "ccpd_base"]) == 120
+    assert str(broken.resolve()) not in {row.path for row in result}
+    assert "undecodable_skipped=1" in capsys.readouterr().out
+
+
 def test_default_shortfall_does_not_write_and_demo_reports_shortfall(tmp_path, capsys):
     index = tmp_path / "ccpd_index.csv"; make_index(index, short=True)
     out = tmp_path / "manifest.csv"
@@ -66,7 +84,8 @@ def test_default_shortfall_does_not_write_and_demo_reports_shortfall(tmp_path, c
 def test_local_labels_all_paths_and_optional_path_column(tmp_path):
     index = tmp_path / "ccpd_index.csv"; make_index(index)
     labels_dir = tmp_path / "raw" / "local"; labels_dir.mkdir(parents=True)
-    (labels_dir / "a.jpg").touch(); (labels_dir / "b.jpg").touch()
+    for name in ("a.jpg", "b.jpg"):
+        imwrite(labels_dir / name, np.full((8, 16, 3), 127, dtype=np.uint8))
     labels = labels_dir / "labels.csv"
     labels.write_text("path,plate_no,plate_color\na.jpg,陕A12345,blue\nb.jpg,陕A12345,blue\n", encoding="utf-8")
     # Default convention derives raw/local from raw/index/ccpd_index.csv.
@@ -84,7 +103,7 @@ def test_canonical_algorithm_data_index_derives_raw_local(tmp_path):
     index_dir = data / "index"; index_dir.mkdir(parents=True)
     make_index(index_dir / "ccpd_index.csv")
     local_dir = data / "raw" / "local"; local_dir.mkdir(parents=True)
-    (local_dir / "local.jpg").touch()
+    imwrite(local_dir / "local.jpg", np.full((8, 16, 3), 127, dtype=np.uint8))
     (local_dir / "labels.csv").write_text(
         "file,plate_no,plate_color\nlocal.jpg,陕A12345,blue\n", encoding="utf-8")
     rows = build_testset(index_dir / "ccpd_index.csv", tmp_path / "manifest.csv")
@@ -94,6 +113,7 @@ def test_canonical_algorithm_data_index_derives_raw_local(tmp_path):
 
 def test_file_column_override_and_threshold(tmp_path):
     index = tmp_path / "ccpd_index.csv"; make_index(index)
+    imwrite(tmp_path / "local.jpg", np.full((8, 16, 3), 127, dtype=np.uint8))
     labels = tmp_path / "my_labels.csv"
     labels.write_text("file,plate_no,plate_color\nlocal.jpg,陕A12345,blue\n", encoding="utf-8")
     rows = build_testset(index, tmp_path / "manifest.csv", local_labels=labels, brightness_threshold=10,
@@ -105,7 +125,9 @@ def test_file_column_override_and_threshold(tmp_path):
 def test_duplicate_local_path_rejected_before_write(tmp_path):
     index = tmp_path / "ccpd_index.csv"; make_index(index)
     labels = tmp_path / "labels.csv"
-    labels.write_text("file,plate_no,plate_color\n/data/ccpd2020/ccpd_green/test-0.jpg,陕A12345,blue\n", encoding="utf-8")
+    rows = list(csv.DictReader(index.open(encoding="utf-8", newline="")))
+    green_path = next(row["path"] for row in rows if row["subset"] == "ccpd_green")
+    labels.write_text(f"file,plate_no,plate_color\n{green_path},陕A12345,blue\n", encoding="utf-8")
     out = tmp_path / "manifest.csv"
     with pytest.raises(ValueError, match="duplicate"):
         build_testset(index, out, local_labels=labels)
@@ -126,8 +148,11 @@ def test_relative_np_path_resolves_beside_index(tmp_path):
     index_dir = tmp_path / "raw" / "index"; index_dir.mkdir(parents=True)
     index = index_dir / "ccpd_index.csv"; make_index(index)
     rows = list(csv.DictReader(index.open(encoding="utf-8", newline="")))
+    relative_np_dir = tmp_path / "raw" / "ccpd2019" / "ccpd_np"
+    relative_np_dir.mkdir(parents=True)
     for row in rows:
         if row["subset"] == "ccpd_np":
+            shutil.copyfile(row["path"], relative_np_dir / Path(row["path"]).name)
             row["path"] = "../ccpd2019/ccpd_np/" + Path(row["path"]).name
     with index.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=INDEX_FIELDS); writer.writeheader(); writer.writerows(rows)
