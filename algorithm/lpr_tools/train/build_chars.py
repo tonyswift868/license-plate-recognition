@@ -6,6 +6,8 @@ import csv
 import hashlib
 import json
 import math
+import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from pathlib import Path
@@ -15,9 +17,12 @@ import numpy as np
 
 from lpr.charnorm import normalize_char, unify_polarity
 from lpr.charset import CHAR_TO_INDEX, CHARSET
-from lpr.config import load_config
+from lpr.config import DEFAULT_CONFIG_PATH, load_config
 from lpr.io_utils import decode_image, imread, imwrite
+from lpr.segment import segment as segment_plate
+from lpr.types import PlateCandidate, RectifiedPlate
 from lpr_tools.data.ccpd import INDEX_FIELDS as CCPD_INDEX_FIELDS
+from lpr_tools.data.manifest import image_path as manifest_image_path, read_manifest
 
 INDEX_FIELDS = ("path", "source_path", "split", "label", "char", "plate_no", "position")
 REJECTION_FIELDS = ("row", "split", "path", "reason")
@@ -79,6 +84,61 @@ def _excluded_paths(manifest: str | Path | None, raw_root: Path) -> tuple[set[st
                 if candidate.is_file():
                     content_hashes.add(_hash_file(candidate.resolve()))
         return result, content_hashes
+
+
+def _excluded_golden(manifest: str | Path | None) -> tuple[set[str], set[str]]:
+    """Resolve golden manifest paths by its contract and protect byte-identical copies."""
+    if manifest is None:
+        return set(), set()
+    manifest_path = Path(manifest)
+    rows = read_manifest(manifest_path, check_files=False)
+    paths: set[str] = set()
+    hashes: set[str] = set()
+    for row in rows:
+        source = manifest_image_path(row, manifest_path).resolve()
+        paths.add(str(source).casefold())
+        if source.is_file():
+            hashes.add(_hash_file(source))
+    return paths, hashes
+
+
+def _git_value(repo_root: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(["git", *args], check=True, capture_output=True,
+                                text=True, encoding="utf-8", errors="replace", cwd=repo_root)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _build_metadata(source: str, config, config_path: Path) -> dict[str, str | None]:
+    script_path = Path(__file__).resolve()
+    algorithm_root = script_path.parents[2]
+    repo_root = script_path.parents[3]
+    segment_path = algorithm_root / "lpr" / "segment.py"
+    charnorm_path = algorithm_root / "lpr" / "charnorm.py"
+    default_config = DEFAULT_CONFIG_PATH.resolve()
+    def sha256(path: Path) -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    effective_json = json.dumps(config.model_dump(), sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False).encode("utf-8")
+    return {
+        "source": source,
+        "config_path": str(config_path.resolve()),
+        "config_sha256": sha256(config_path),
+        "default_config_path": str(default_config),
+        "default_config_sha256": sha256(default_config),
+        "effective_config_sha256": hashlib.sha256(effective_json).hexdigest(),
+        "build_chars_sha256": sha256(script_path),
+        "segment_code_sha256": sha256(segment_path),
+        "charnorm_code_sha256": sha256(charnorm_path),
+        "segment_git_commit": _git_value(repo_root, "log", "-1", "--format=%H", "--", "algorithm/lpr/segment.py"),
+        "segment_git_blob": _git_value(repo_root, "rev-parse", "HEAD:algorithm/lpr/segment.py"),
+    }
 
 
 def _split_quotas(available: dict[str, int], cap: int) -> dict[str, int]:
@@ -158,17 +218,28 @@ def _preflight_one(item, config):
 
 def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 exclude_manifest: str | Path | None = None, max_per_class: int = 8000,
-                skip_invalid: bool = False, workers: int = 1) -> dict[str, int]:
+                skip_invalid: bool = False, workers: int = 1,
+                source: str = "slots", exclude_golden: str | Path | None = None) -> dict[str, int]:
     if max_per_class < 1:
         raise ValueError("max_per_class must be positive")
     if workers not in (1, 2, 3, 4):
         raise ValueError("workers must be between 1 and 4")
+    if source not in {"slots", "segment"}:
+        raise ValueError("source must be 'slots' or 'segment'")
+    source_mode = source
     cv2.setNumThreads(1)
     raw_root, out = Path(raw).resolve(), Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
     excluded, excluded_hashes = _excluded_paths(exclude_manifest, raw_root)
+    golden_paths, golden_hashes = _excluded_golden(exclude_golden)
+    excluded.update(golden_paths)
+    excluded_hashes.update(golden_hashes)
     config = load_config()
+    config_path = Path(os.environ.get("LPR_CONFIG", DEFAULT_CONFIG_PATH))
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    build_metadata = _build_metadata(source_mode, config, config_path)
     seen_paths: dict[str, tuple[str, int]] = {}
     seen_content: dict[str, str] = {}
     counts: Counter[int] = Counter()
@@ -253,6 +324,13 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
     quotas = {label: _split_quotas({split: preflight_counts[split][label] for split in ("train", "val")}, max_per_class)
               for label in range(len(CHARSET))}
     split_class_counts: dict[str, Counter[int]] = {"train": Counter(), "val": Counter()}
+    segment_failed_images = 0
+    segment_length_mismatch_images = 0
+    segment_invalid_images = 0
+    segment_attempted_images = 0
+    segment_success_images = 0
+    segment_attempted_by_split: Counter[str] = Counter()
+    segment_success_by_split: Counter[str] = Counter()
 
     out.mkdir(parents=True, exist_ok=True)
     with (out / "chars_index.csv").open("w", encoding="utf-8", newline="") as handle:
@@ -278,12 +356,37 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
             destination = np.asarray([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]], dtype=np.float32)
             matrix = cv2.getPerspectiveTransform(quad, destination)
             rectified = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_LINEAR)
-            gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
-            gray = unify_polarity(gray, color)
-            centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
-            char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
-            if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
-                raise ValueError(f"row {row_no}: invalid slot configuration for layout {layout}")
+            if source_mode == "segment":
+                x, y, bw, bh = cv2.boundingRect(quad)
+                candidate = PlateCandidate([tuple(map(float, point)) for point in quad],
+                                           (x, y, bw, bh), color, 1.0, "oracle")
+                rect = RectifiedPlate(rectified, layout, color, matrix, candidate)
+                segment_attempted_images += 1
+                segment_attempted_by_split[split] += 1
+                segmented = segment_plate(rect, layout, config.segment)
+                if not segmented.ok:
+                    segment_failed_images += 1
+                    continue
+                segment_success_images += 1
+                segment_success_by_split[split] += 1
+                if not isinstance(segmented.chars, np.ndarray) or segmented.chars.ndim == 0:
+                    segment_invalid_images += 1
+                    continue
+                if len(segmented.chars) != layout:
+                    segment_length_mismatch_images += 1
+                    continue
+                if (segmented.chars.shape != (layout, 32, 32)
+                        or segmented.chars.dtype != np.uint8):
+                    segment_invalid_images += 1
+                    continue
+                char_images = segmented.chars
+            else:
+                gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
+                gray = unify_polarity(gray, color)
+                centers = config.segment.layout7_centers if layout == 7 else config.segment.layout8_centers
+                char_w = config.segment.layout7_char_w if layout == 7 else config.segment.layout8_char_w
+                if len(centers) != layout or not 0 < char_w <= 1 or any(not 0 < c < 1 for c in centers):
+                    raise ValueError(f"row {row_no}: invalid slot configuration for layout {layout}")
             base = source.stem
             path_token = hashlib.sha256(str(source).casefold().encode("utf-8")).hexdigest()[:10]
             safe_base = f"{base}_{path_token}"
@@ -292,12 +395,18 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
                 if split_class_counts[split][label] >= quotas[label][split]:
                     truncated[label] += 1
                     continue
-                center = centers[position] * width
-                half = char_w * width / 2
-                left, right = max(0, math.floor(center-half)), min(width, math.ceil(center+half))
-                if right <= left:
-                    raise ValueError(f"row {row_no}: empty character slot {position}")
-                normalized = normalize_char(gray[:, left:right])
+                if source_mode == "segment":
+                    normalized = char_images[position]
+                    if (not isinstance(normalized, np.ndarray) or normalized.shape != (32, 32)
+                            or normalized.dtype != np.uint8):
+                        raise ValueError(f"row {row_no}: segment returned invalid character crop at {position}")
+                else:
+                    center = centers[position] * width
+                    half = char_w * width / 2
+                    left, right = max(0, math.floor(center-half)), min(width, math.ceil(center+half))
+                    if right <= left:
+                        raise ValueError(f"row {row_no}: empty character slot {position}")
+                    normalized = normalize_char(gray[:, left:right])
                 rel = Path(split) / str(label) / f"{safe_base}_{position}.png"
                 target = out / rel
                 if target.exists():
@@ -317,8 +426,27 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
         writer.writeheader()
         writer.writerows(rejected)
     total_chars = sum(counts.values())
+    current_metadata = _build_metadata(source_mode, config, config_path)
+    frozen_keys = ("config_sha256", "default_config_sha256", "effective_config_sha256",
+                   "build_chars_sha256", "segment_code_sha256", "charnorm_code_sha256",
+                   "segment_git_commit", "segment_git_blob")
+    changed = [key for key in frozen_keys if current_metadata.get(key) != build_metadata.get(key)]
+    if changed:
+        raise ValueError(f"build inputs changed while generating characters: {', '.join(changed)}")
     stats = {"total": total_chars, "skipped_excluded_images": skipped_excluded,
              "skip_invalid": skip_invalid, "rejected_count": len(rejected), "rejected": rejected,
+             "build": build_metadata,
+             "valid_source_images": len(valid),
+             "segment_attempted_images": segment_attempted_images,
+             "segment_success_images": segment_success_images,
+             "segment_attempted_by_split": dict(sorted(segment_attempted_by_split.items())),
+             "segment_success_by_split": dict(sorted(segment_success_by_split.items())),
+             "segment_ok_false_images": segment_failed_images,
+             "segment_wrong_count_images": segment_length_mismatch_images,
+             "segment_invalid_images": segment_invalid_images,
+             "segment_failed_images": segment_failed_images + segment_invalid_images,
+             "segment_length_mismatch_images": segment_length_mismatch_images,
+             "segment_dropped_images": segment_failed_images + segment_length_mismatch_images + segment_invalid_images,
              "per_split": dict(sorted(split_counts.items())),
              "per_class": {str(i): counts[i] for i in range(len(CHARSET))},
              "truncated_per_class": {str(i): truncated[i] for i in range(len(CHARSET))}}
@@ -338,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--raw", required=True, help="raw CCPD root for relative index paths")
     parser.add_argument("--out", required=True, help="output character directory")
     parser.add_argument("--exclude-manifest", help="test manifest; matching images are excluded")
+    parser.add_argument("--exclude-golden", help="golden manifest; original paths and byte-identical copies are protected")
+    parser.add_argument("--source", choices=("slots", "segment"), default="slots",
+                        help="character crop source (default: fixed layout slots)")
     parser.add_argument("--max-per-class", type=int, default=8000)
     parser.add_argument("--skip-invalid", action="store_true", help="record and skip invalid train/val images")
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=1,
@@ -345,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         build_chars(args.index, args.raw, args.out, exclude_manifest=args.exclude_manifest,
-                    max_per_class=args.max_per_class, skip_invalid=args.skip_invalid, workers=args.workers)
+                    max_per_class=args.max_per_class, skip_invalid=args.skip_invalid, workers=args.workers,
+                    source=args.source, exclude_golden=args.exclude_golden)
     except (OSError, ValueError, cv2.error) as exc:
         parser.error(str(exc))
     return 0
