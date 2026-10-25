@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from lpr_tools.data.ccpd import INDEX_FIELDS
+from lpr_tools.data.manifest import ManifestRow, write_manifest
 from lpr_tools.data.pick_golden import LABEL_FIELDS, pick_golden
 
 
@@ -158,3 +159,64 @@ def test_pick_golden_missing_source_leaves_no_output(tmp_path):
     with pytest.raises(FileNotFoundError, match="missing source"):
         pick_golden(index, out)
     assert not out.exists()
+
+
+def test_pick_golden_manifest_limits_sources_and_uses_reserved_base_val(tmp_path):
+    specs = [
+        ("ccpd_base", "clear", 120, "blue", "皖A12345"),
+        ("ccpd_green", "clear", 30, "green", "皖AD12345"),
+        ("ccpd_db", "night", 4, "blue", "皖A12345"),
+        ("ccpd_tilt", "tilt", 4, "blue", "皖A12345"),
+        ("ccpd_blur", "dirty", 4, "blue", "皖A12345"),
+        ("ccpd_np", "np", 20, "unknown", ""),
+    ]
+    rows = []
+    for subset, category, count, color, plate_no in specs:
+        for n in range(count):
+            path = tmp_path / "raw" / subset / f"{subset}-{n:03}.jpg"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"frozen-{subset}-{n}".encode())
+            rows.append(ManifestRow(str(path), plate_no, color, category, subset))
+    # This tempting unmanifested base-val candidate must never be selected.
+    outsider = tmp_path / "raw" / "ccpd_base" / "outside.jpg"
+    outsider.write_bytes(b"outside-manifest")
+    manifest = tmp_path / "manifest.csv"
+    write_manifest(manifest, rows)
+
+    out = tmp_path / "golden"
+    labels = pick_golden(None, out, manifest=manifest)
+    assert len(labels) == 20
+    assert sum(r["source"] == "ccpd_base" and r["category"] == "clear" for r in labels) == 10
+    assert sum(r["source"] == "ccpd_green" and r["category"] == "clear" for r in labels) == 2
+    assert {r["source"] for r in labels} == {spec[0] for spec in specs}
+    frozen_paths = {str(Path(r.path).resolve()) for r in rows}
+    copied_bytes = {(out / row["file"]).read_bytes() for row in labels}
+    expected_bytes = {Path(path).read_bytes() for path in frozen_paths}
+    assert copied_bytes <= expected_bytes
+    assert b"outside-manifest" not in copied_bytes
+
+
+def test_pick_golden_hybrid_uses_manifest_for_base_and_official_test_fallback(tmp_path):
+    index = _make_index(tmp_path, extra_base=110)
+    index_rows = _read_rows(index)
+    manifest_rows = []
+    for row in index_rows:
+        if row["subset"] != "ccpd_base" or row["split"] != "test":
+            continue
+        manifest_rows.append(ManifestRow(row["path"], row["plate_no"], row["plate_color"],
+                                         "clear", "ccpd_base"))
+    manifest = tmp_path / "frozen.csv"
+    write_manifest(manifest, manifest_rows)
+
+    out = tmp_path / "hybrid"
+    labels = pick_golden(index, out, manifest=manifest)
+    assert len(labels) == 20
+    assert sum(r["source"] == "ccpd_base" and r["category"] == "clear" for r in labels) == 10
+    assert all(r["source"] == "ccpd_base" for r in labels[:10])
+    with (out / "golden_manifest.csv").open(encoding="utf-8", newline="") as handle:
+        manifest_reader = csv.DictReader(handle)
+        assert tuple(manifest_reader.fieldnames) == ("path", "plate_no", "plate_color", "category", "source", "quad", "note")
+        golden_rows = list(manifest_reader)
+    assert len(golden_rows) == 20
+    assert sum(row["note"] == "frozen_manifest" for row in golden_rows) == 10
+    assert sum(row["note"] == "golden_only" for row in golden_rows) == 10

@@ -14,7 +14,7 @@ from lpr.io_utils import imwrite
 from lpr.testing import FakeRecognizer
 from lpr_tools.data.ccpd import INDEX_FIELDS
 from lpr_tools.data.manifest import read_manifest, write_manifest
-from lpr_tools.eval.index_samples import read_samples, sample_validation
+from lpr_tools.eval.index_samples import path_key, read_samples, sample_dev_hard, sample_validation
 from lpr_tools.eval.eval_accuracy import evaluate, main
 import lpr_tools.eval.eval_accuracy as ev
 import lpr_tools.eval.locate_recall as lr
@@ -79,6 +79,61 @@ def test_balanced_val_sampling_stable_and_without_leakage(tmp_path):
     with pytest.raises(ValueError, match="no supported val"):sample_validation(index)
 
 
+def test_val_exclusion_and_dev_hard_are_stratified(tmp_path):
+    index, rows = index_fixture(tmp_path)
+    hard = {"ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
+            "ccpd_fn", "ccpd_challenge", "ccpd_weather"}
+    base = next(r for r in rows if r["subset"] == "ccpd_db" and r["split"] == "val")
+    added = []
+    for subset in sorted(hard):
+        for i in range(3):
+            row = dict(base, subset=subset, split="test", path=f"images/hard/{subset}/{i}.png")
+            imwrite(tmp_path/row["path"], np.zeros((240,400,3),np.uint8))
+            added.append(row)
+    save_index(index, rows + added)
+    excluded = tmp_path/"frozen.csv"
+    from lpr_tools.data.manifest import ManifestRow, write_manifest
+    aliased = tmp_path/"unused"/".."/added[0]["path"]
+    write_manifest(excluded,[ManifestRow(str(aliased),"陕A12345","blue","night","test")])
+    selected, info = sample_dev_hard(index,n=2,seed=42,exclude_manifest=excluded)
+    assert len(selected)==14
+    assert set(info["selected_by_subset"].values())=={2}
+    assert info["split"] == "dev-hard/index-splits"
+    assert all(s.subset in hard for s in selected)
+    assert all(s.split == "test" for s in selected if s.subset != "ccpd_db")
+    assert all(info["index_splits_by_subset"][subset].get("test", 0) >= 2
+               for subset in hard - {"ccpd_db"})
+    assert path_key(tmp_path/added[0]["path"]) not in {path_key(s.row.path) for s in selected}
+    base_val = next(r for r in rows if r["subset"] == "ccpd_base" and r["split"] == "val")
+    frozen = tmp_path/"clear-test.csv"
+    write_manifest(frozen,[ManifestRow(base_val["path"],"陕A12345","blue","clear","test")])
+    clear, _ = sample_validation(index,n=99,seed=42,exclude_manifest=frozen,subsets={"ccpd_base"})
+    assert clear and {s.subset for s in clear} == {"ccpd_base"}
+    assert path_key(tmp_path/base_val["path"]) not in {path_key(s.row.path) for s in clear}
+
+
+def test_exclusion_manifest_union_deduplicates_canonical_aliases(tmp_path):
+    index, rows = index_fixture(tmp_path/"input")
+    from lpr_tools.data.manifest import ManifestRow, write_manifest
+    base = tmp_path/"input"
+    first, second = tmp_path/"frozen-a.csv", tmp_path/"frozen-b.csv"
+    base_rows = [r for r in rows if r["subset"] == "ccpd_base" and r["split"] == "val"]
+    canonical = base/base_rows[0]["path"]
+    alias = base/"unused"/".."/base_rows[0]["path"]
+    second_path = base/base_rows[1]["path"]
+    write_manifest(first,[ManifestRow(str(canonical),"陕A12345","blue","clear","test")])
+    write_manifest(second,[ManifestRow(str(alias),"陕A12345","blue","clear","test"),
+                           ManifestRow(str(second_path),"陕A12345","blue","clear","test")])
+    selected, metadata = sample_validation(index,n=99,exclude_manifest=[first,second],
+                                           subsets={"ccpd_base"})
+    assert len(selected)==3
+    assert metadata["excluded_n"]==2
+    assert metadata["exclusion_sources"]==[str(first.resolve()),str(second.resolve())]
+    remaining={path_key(sample.row.path) for sample in selected}
+    assert path_key(canonical) not in remaining
+    assert path_key(second_path) not in remaining
+
+
 def test_duplicate_path_split_alias_and_skipped_labels(tmp_path):
     index, rows = index_fixture(tmp_path)
     bad = dict(rows[0], path="images/skipped.png", skip_reason="placeholder")
@@ -89,6 +144,8 @@ def test_duplicate_path_split_alias_and_skipped_labels(tmp_path):
     with pytest.raises(ValueError, match="conflicting index path"):sample_validation(index)
     save_index(index, [dict(rows[0], bbox="1 2 -3 4")])
     with pytest.raises(ValueError, match="bbox"):read_samples(index)
+    save_index(index, [dict(rows[0], plate_color="ultraviolet")])
+    with pytest.raises(ValueError, match="plate color"):read_samples(index)
 
 
 def test_top3_iou_boundary_and_original_coordinates(cfg, monkeypatch):
@@ -137,11 +194,18 @@ def test_cli_val_uniform_sampling_and_scoreboard(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ev,"locate_match",lambda *args:{"hit":True,"best_iou":1.,"candidates":3})
     score = tmp_path/"scoreboard-copy.md"
     score.write_text("temporary copy\n",encoding="utf-8")
+    exclude = tmp_path/"exclude.csv"
+    write_manifest(exclude, [])
+    golden_exclude = tmp_path/"algo"/"tests"/"data"/"golden"/"golden_manifest.csv"
+    write_manifest(golden_exclude, [])
+    monkeypatch.setattr(ev,"ALGORITHM_DIR",tmp_path/"algo")
     out = tmp_path/"run"
     assert main(["--split","val","--index",str(index),"--n","8","--uniform",
+                 "--exclude-manifest",str(exclude),
                  "--locate-recall","--out",str(out),"--scoreboard",str(score)]) == 0
     report = json.loads((out/"report.json").read_text(encoding="utf-8"))
     assert report["mode"].endswith("uniform") and report["sampling"]["selected_n"] == 8
+    assert report["sampling"]["exclusion_sources"] == [str(exclude.resolve()),str(golden_exclude.resolve())]
     assert report["locate_recall"]["overall"]["total"] == 6
     assert all("/val/" in row.path for row in read_manifest(out/"validation_manifest.csv"))
     score_line = score.read_text(encoding="utf-8").splitlines()[-1]
@@ -149,6 +213,33 @@ def test_cli_val_uniform_sampling_and_scoreboard(tmp_path, monkeypatch, capsys):
     assert len(fields) == 12 and fields[2] == "uniform" and fields[8] == "100.00%"
     assert fields[1] != "unknown" and fields[0].count("-") == 2
     assert "Top-3 locate recall" in capsys.readouterr().out
+
+
+def test_locate_only_does_not_create_recognizer(tmp_path, monkeypatch, capsys):
+    index, _ = index_fixture(tmp_path/"input")
+    exclude = tmp_path/"exclude.csv"
+    write_manifest(exclude, [])
+    monkeypatch.setattr(ev,"make_recognizer",lambda *args,**kwargs: (_ for _ in ()).throw(
+        AssertionError("locate-only must not load a recognizer")))
+    monkeypatch.setattr(ev,"read_samples",lambda *args,**kwargs: (_ for _ in ()).throw(
+        AssertionError("CLI-sampled truth must be reused without rereading the full index")))
+    monkeypatch.setattr(ev,"locate_match",lambda *args:{"hit":True,"best_iou":1.,"candidates":3})
+    out = tmp_path/"locate"
+    assert main(["--split","val","--index",str(index),"--n","4","--exclude-manifest",str(exclude),
+                 "--locate-only","--out",str(out)]) == 0
+    report=json.loads((out/"report.json").read_text(encoding="utf-8"))
+    assert report["mode"]=="locate-only" and report["locate_recall"]["overall"]["total"]==3
+    assert "mode=locate-only" in capsys.readouterr().out
+
+
+def test_val_cli_fails_closed_when_exclusion_is_missing(tmp_path, capsys):
+    index, _ = index_fixture(tmp_path/"input")
+    with pytest.raises(SystemExit) as exc:
+        main(["--split","val","--index",str(index),"--locate-only","--exclude-manifest",
+              str(tmp_path/"missing.csv"),"--out",str(tmp_path/"out")])
+    assert exc.value.code == 2
+    assert not (tmp_path/"out").exists()
+    assert "validation exclusion manifest not found" in capsys.readouterr().err
 
 
 def test_missing_gt_and_cli_input_errors(tmp_path, capsys):

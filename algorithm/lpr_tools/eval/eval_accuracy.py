@@ -25,7 +25,8 @@ from lpr.segment import segment
 from lpr.types import PlateCandidate, RectifiedPlate, RecognitionResult, RecogStatus as S
 from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
 from .common import add_backend_args, make_recognizer, mode_name
-from .index_samples import DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples, sample_validation
+from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples,
+                           sample_dev_hard, sample_validation)
 from .locate_recall import locate_match, summarize as summarize_location
 
 
@@ -173,11 +174,55 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
     return report
 
 
+def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=None):
+    """Measure Top-3 localization directly from CCPD bbox labels, without a model."""
+    rows = read_manifest(manifest, check_files=True)
+    if not rows:
+        raise ValueError("manifest is empty")
+    if index is None:
+        raise ValueError("--locate-only needs ccpd_index.csv via --index")
+    lookup = ({path_key(sample.row.path): sample for sample in truth_samples}
+              if truth_samples is not None else
+              {path_key(sample.row.path): sample for sample in read_samples(index)})
+    locations = []
+    excluded_np = 0
+    cfg = load_config()
+    for row in rows:
+        if row.category == "np":
+            excluded_np += 1
+            continue
+        sample = lookup.get(path_key(image_path(row, manifest)))
+        if sample is None or sample.bbox is None:
+            raise ValueError(f"missing index bbox ground truth: {row.path}")
+        image = imread(image_path(row, manifest))
+        locations.append((sample.stratum, locate_match(image, sample.bbox, cfg)))
+    report = {"mode": "locate-only", "oracle": False,
+              "attribution": "Top-3 localization recall measured independently; no recognizer loaded",
+              "sampling": sampling,
+              "locate_recall": summarize_location(locations, excluded_np=excluded_np),
+              "sample_count": len(rows)}
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
 def _percent(value):
     return "N/A" if value is None else f"{value:.2%}"
 
 
 def print_report(report):
+    if report.get("mode") == "locate-only":
+        location = report["locate_recall"]
+        print("mode=locate-only oracle=False")
+        print(f"Top-{location['topk']} locate recall (IoU >= {location['iou_threshold']}; np excluded)")
+        for subset, values in [("overall", location["overall"]), *location["subsets"].items()]:
+            print(f"{subset} {values['hits']}/{values['total']} {_percent(values['recall'])}")
+        print(f"excluded_np={location['excluded_np']}")
+        if report.get("sampling"):
+            print("sampling=" + json.dumps({k:v for k,v in report["sampling"].items() if k != "paths"},
+                                           ensure_ascii=False, sort_keys=True))
+        return
     print(f"mode={report['mode']} oracle={report['oracle']}")
     print("category n plate_accuracy character_accuracy auto_pass_rate auto_pass_precision")
     for name,m in [("overall_g2",report["overall_g2"]),*report["categories"].items()]:
@@ -237,7 +282,12 @@ def main(argv=None):
                         help="val samples only the index val split; manifest-val uses a supplied validation manifest")
     parser.add_argument("--n", type=int, default=DEFAULT_VALIDATION_N, help="total validation sample upper bound (default 300)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--subset", action="append", help="restrict val sampling to a CCPD subset; repeatable")
+    parser.add_argument("--dev-hard", action="store_true", help="sample --n development images per hard subset from all index splits, excluding frozen tests")
+    parser.add_argument("--exclude-manifest", default=r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv",
+                        help="primary manifest of frozen test images excluded from val/dev-hard sampling; golden-only images are also excluded when golden_manifest.csv exists")
     parser.add_argument("--locate-recall", action="store_true", help="Top-3 original-space bbox IoU >= 0.5; requires --index")
+    parser.add_argument("--locate-only", action="store_true", help="measure Top-3 localization without loading a classifier")
     add_backend_args(parser)
     parser.add_argument("--out", default="algorithm/out/eval")
     parser.add_argument("--scoreboard", metavar="TEMP_COPY", help="append validation row to a temporary scoreboard copy")
@@ -248,16 +298,44 @@ def main(argv=None):
             parser.error("本批禁止修改正式 scoreboard.md；请传临时副本路径")
         if args.split not in {"val", "manifest-val"}:
             parser.error("--scoreboard 只允许验证清单：--split val 或 manifest-val")
-    if (args.split == "val" or args.locate_recall) and not Path(args.index).is_file():
+    if (args.split == "val" or args.locate_recall or args.locate_only) and not Path(args.index).is_file():
         parser.error("需要 ccpd_index.csv；请用 --index 指定已有索引")
+    if args.dev_hard and args.split != "val":
+        parser.error("--dev-hard requires --split val")
+    if args.locate_only and (args.scoreboard or args.oracle):
+        parser.error("--locate-only cannot be combined with --scoreboard or --oracle")
+    if args.subset and args.dev_hard:
+        parser.error("--subset cannot be combined with --dev-hard")
+    if args.split == "val" and not Path(args.exclude_manifest).is_file():
+        parser.error(f"validation exclusion manifest not found: {args.exclude_manifest}")
     if args.n < 1:
         parser.error("--n must be positive")
     try:
-        manifest, sampling = args.manifest, None
+        manifest, sampling, selected = args.manifest, None, None
         if args.split == "val":
-            selected, sampling = sample_validation(args.index, n=args.n, seed=args.seed)
+            exclusion_manifests = [Path(args.exclude_manifest)]
+            golden_exclusion = ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv"
+            if golden_exclusion.is_file() and golden_exclusion.resolve() not in {
+                    path.resolve() for path in exclusion_manifests}:
+                exclusion_manifests.append(golden_exclusion)
+            if args.dev_hard:
+                selected, sampling = sample_dev_hard(args.index, n=args.n, seed=args.seed,
+                                                     exclude_manifest=exclusion_manifests)
+                sampling["mode"] = "dev-hard"
+            else:
+                selected, sampling = sample_validation(args.index, n=args.n, seed=args.seed,
+                    exclude_manifest=exclusion_manifests,
+                    subsets=set(args.subset) if args.subset else None)
+                sampling["mode"] = "val"
             manifest = Path(args.out)/"validation_manifest.csv"
             write_manifest(manifest, [sample.row for sample in selected], check_files=True)
+        if args.locate_only:
+            report = evaluate_locate_only(manifest, args.index, args.out, sampling=sampling,
+                                          truth_samples=selected)
+            print_report(report)
+            print(f"validation_manifest={manifest}")
+            print(f"report={Path(args.out)/'report.json'}")
+            return 0
         recognizer = make_recognizer(args, samples_dir=Path(manifest).resolve().parent)
         report = evaluate(manifest, recognizer, args.out, oracle=args.oracle,
                           index=args.index if args.split == "val" or args.locate_recall else None,
