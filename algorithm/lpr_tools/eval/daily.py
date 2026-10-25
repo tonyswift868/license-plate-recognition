@@ -12,8 +12,9 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from lpr.config import ALGORITHM_DIR
+from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
 from lpr_tools.data.manifest import read_manifest, write_manifest
+from .common import effective_config_info, model_identity
 
 ROOT = ALGORITHM_DIR.parent
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -24,6 +25,48 @@ SCOREBOARD_HEADER = ("日期", "commit", "分类器", "清晰", "夜间", "倾�
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _effective_config(config_path: Path | None = None):
+    """Resolve one config identity for a daily run and its child processes."""
+    selected = Path(config_path or os.environ.get("LPR_CONFIG") or DEFAULT_CONFIG_PATH).resolve()
+    cfg = load_config(selected)
+    info = effective_config_info(cfg, str(selected))
+    info.update(config_sha256=_sha(selected), classifier=cfg.runtime.classifier,
+                classifier_model=model_identity(cfg, "model_path"))
+    return selected, info
+
+
+def _child_env(config_path: Path, base=None):
+    env = dict(os.environ if base is None else base)
+    env["PYTHONPATH"] = str(ALGORITHM_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    env["LPR_CONFIG"] = str(config_path)
+    return env
+
+
+def _verify_marker_config(marker):
+    saved = marker.get("effective_config")
+    if not saved:
+        raise ValueError("daily marker has no effective config identity; refusing to mix run configurations")
+    path, current = _effective_config(Path(saved["config_path"]))
+    if current != saved:
+        raise ValueError("effective config/model identity changed since daily validation; refusing to mix configurations")
+    return path
+
+
+def _attribution(reports):
+    keys = ("network_candidate_selected_count", "network_candidate_selected_correct",
+            "crnn_selected_count", "crnn_selected_correct", "reader_invoked_images",
+            "reader_invoked_calls", "corner_invoked_images", "corner_invoked_calls")
+    totals = {key: 0 for key in keys}
+    for report in reports:
+        values = report.get("network_attribution", {})
+        for key in keys:
+            totals[key] += int(values.get(key, 0) or 0)
+    for stem in ("network_candidate_selected", "crnn_selected"):
+        count = totals[f"{stem}_count"]
+        totals[f"{stem}_accuracy"] = totals[f"{stem}_correct"] / count if count else None
+    return totals
 
 
 def _run(command: list[str], cwd: Path, log: Path, *, env=None) -> subprocess.CompletedProcess:
@@ -59,7 +102,11 @@ def _scoreboard_line(date, commit, val, hard, bench):
     location = val.get("locate_recall")
     recall = location["overall"]["recall"] if location else None
     p95 = (bench.get("wall_time") or {}).get("p95_ms")
+    attr = val.get("network_attribution", {})
     note = (f"daily; val n={metrics['n']}; auto-pass={_fmt(metrics.get('auto_pass_rate'))}; "
+            f"CRNN selected={attr.get('crnn_selected_count', 0)} "
+            f"accuracy={_fmt(attr.get('crnn_selected_accuracy'))}; "
+            f"network candidate selected={attr.get('network_candidate_selected_count', 0)}; "
             f"dev-hard 7x300; golden={hard.get('golden_correct', 'N/A')}/20")
     mode = val.get("mode", "cnn")
     classifier = "cnn v1" if "char_cnn_v1" in mode else mode
@@ -106,6 +153,23 @@ def _comparable(previous: dict, current: dict) -> bool:
                ("val_sampling", "hard_sampling", "metric_definition"))
 
 
+def _identity_changes(previous: dict, current: dict):
+    models = {}
+    for name, old_model, new_model in (
+            ("classifier", previous.get("classifier_model", {}), current.get("classifier_model", {})),
+            ("corner", previous.get("models", {}).get("corner", {}), current.get("models", {}).get("corner", {})),
+            ("plate_reader", previous.get("models", {}).get("plate_reader", {}), current.get("models", {}).get("plate_reader", {}))):
+        old_hash, new_hash = old_model.get("sha256"), new_model.get("sha256")
+        old_path, new_path = old_model.get("path"), new_model.get("path")
+        models[name] = {"changed": old_hash != new_hash or old_path != new_path,
+                        "previous_path": old_path, "current_path": new_path,
+                        "previous_sha256": old_hash, "current_sha256": new_hash}
+    return {"models": models,
+            "config_path_changed": previous.get("config_path") != current.get("config_path"),
+            "config_sha256_changed": previous.get("config_sha256") != current.get("config_sha256"),
+            "effective_config_changed": previous.get("effective_config_sha256") != current.get("effective_config_sha256")}
+
+
 def _compare(current: dict, root: Path):
     runs = sorted((p for p in root.iterdir() if p.is_dir() and (p / "summary.json").is_file()),
                   key=lambda p: (p / "summary.json").stat().st_mtime, reverse=True) if root.exists() else []
@@ -113,6 +177,7 @@ def _compare(current: dict, root: Path):
         path = runs[0]
         old = _read_json(path / "summary.json")
         old_key, now_key = old.get("comparison_key", {}), current["comparison_key"]
+        identities = _identity_changes(old.get("effective_config", {}), current.get("effective_config", {}))
         if _comparable(old_key, now_key):
             diffs = []
             for subset, now in current["metrics"].items():
@@ -127,6 +192,8 @@ def _compare(current: dict, root: Path):
             return {"previous_run": path.name, "comparable": True,
                     "model_changed": old_key.get("model_sha256") != now_key.get("model_sha256"),
                     "config_changed": old_key.get("config_sha256") != now_key.get("config_sha256"),
+                    "effective_config_changed": old_key.get("effective_config_sha256") != now_key.get("effective_config_sha256"),
+                    "identity_changes": identities,
                     "comparisons": diffs,
                     "regressions_over_1pp": [x for x in diffs if x["alert"]]}
         reasons = [key for key in ("val_sampling", "hard_sampling", "metric_definition")
@@ -134,9 +201,11 @@ def _compare(current: dict, root: Path):
         return {"previous_run": path.name, "comparable": False,
                 "note": "Latest completed run is not comparable: " + ", ".join(reasons),
                 "model_changed": old_key.get("model_sha256") != now_key.get("model_sha256"),
-                "config_changed": old_key.get("config_sha256") != now_key.get("config_sha256")}
+                "config_changed": old_key.get("config_sha256") != now_key.get("config_sha256"),
+                "effective_config_changed": old_key.get("effective_config_sha256") != now_key.get("effective_config_sha256"),
+                "identity_changes": identities}
     return {"previous_run": None, "comparable": False,
-            "note": "No previous run with identical model, config, and sampling fingerprint."}
+            "note": "No previous run with matching sampling and metric definition."}
 
 
 def _subset_metrics(report):
@@ -154,7 +223,7 @@ def _partition_hard_rows(rows):
 
 
 def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commit: str | None = None,
-          defer_g1: bool = False):
+          defer_g1: bool = False, config_path: Path | None = None):
     if not PYTHON.is_file():
         raise FileNotFoundError(f"project interpreter missing: {PYTHON}")
     if not index.is_file():
@@ -166,12 +235,12 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     if out.exists():
         out = out_root / f"{date}-{commit}-{datetime.now().astimezone():%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ALGORITHM_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    config_path, effective_config = _effective_config(config_path)
+    env = _child_env(config_path)
     val_out = out / "val1000"
     val_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--split", "val", "--n", "1000",
                "--seed", "42", "--locate-recall", "--index", str(index), "--out", str(val_out),
-               "--stage-trace", str(out / "val1000" / "trace.jsonl")]
+               "--stage-trace", str(out / "val1000" / "trace.jsonl"), "--config", str(config_path)]
     val_run = _run(val_cmd, ROOT, out / "logs" / "val1000.log", env=env)
     if val_run.returncode:
         raise RuntimeError(f"val1000 failed ({val_run.returncode}); see {out / 'logs' / 'val1000.log'}")
@@ -210,7 +279,8 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
         manifest = target / "subset_manifest.csv"
         write_manifest(manifest, rows, check_files=False)
         evaluate_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
-                        str(manifest), "--split", "manifest-val", "--out", str(target)]
+                        str(manifest), "--split", "manifest-val", "--out", str(target),
+                        "--config", str(config_path)]
         run = _run(evaluate_cmd, ROOT, out / "logs" / f"dev-{subset}.log", env=env)
         hard_status[subset] = run.returncode
         if run.returncode == 0:
@@ -237,14 +307,16 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
         else:
             golden_pass = False
     if defer_g1:
-        marker = {"date": date, "commit": commit, "golden_exit": golden.returncode,
+        marker = {"date": date, "commit": commit, "effective_config": effective_config,
+                  "golden_exit": golden.returncode,
                   "golden_pass": golden_pass, "golden_correct": golden_count,
                   "hard_status": hard_status, "hard_reports": sorted(hard_reports),
                   "g1": "deferred; run daily.py --g1-only <run-dir>"}
         (out / "pre-g1.json").write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
         return marker
     g1 = _run([str(PYTHON), "-m", "lpr_tools.eval.bench_latency", "--manifest",
-               "algorithm/testset/manifest.csv", "--n", "100", "--size", "1280x720"],
+               "algorithm/testset/manifest.csv", "--n", "100", "--size", "1280x720",
+               "--config", str(config_path)],
               ROOT, out / "logs" / "g1.log", env=env)
     if g1.returncode:
         raise RuntimeError(f"G1 failed ({g1.returncode}); see {out / 'logs' / 'g1.log'}")
@@ -257,8 +329,9 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     hard_metrics = {subset: report["overall_g2"] for subset, report in hard_reports.items()}
     metrics = _subset_metrics(val_report)
     metrics.update({f"dev-hard/{k}": v for k, v in hard_metrics.items()})
-    comparison_key = {"model_sha256": _sha(ALGORITHM_DIR / "models" / "char_cnn_v1.pt"),
-                      "config_sha256": _sha(ALGORITHM_DIR / "config" / "default.toml"),
+    comparison_key = {"model_sha256": effective_config["classifier_model"]["sha256"],
+                      "config_sha256": effective_config["config_sha256"],
+                      "effective_config_sha256": effective_config["effective_config_sha256"],
                       "val_sampling": {"mode": "val", "n": 1000, "seed": 42},
                       "hard_sampling": {"subsets": list(hard_reports), "n_each": 300, "seed": 42},
                       "metric_definition": "plate positional metrics v1"}
@@ -268,6 +341,8 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     line = _scoreboard_line(date, commit, val_report, {**hard_status, "reports": hard_reports}, bench)
     error_analysis = _error_analysis(out / "val1000" / "trace.jsonl")
     summary = {"date": date, "commit": commit, "directory": str(out), "scoreboard_header": SCOREBOARD_HEADER,
+               "effective_config": effective_config,
+               "network_attribution": _attribution([val_report, *hard_reports.values()]),
                "scoreboard_row": line, "metrics": metrics, "hard_status": hard_status,
                "source_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                                 capture_output=True, text=True, check=True).stdout.strip(),
@@ -293,14 +368,14 @@ def recover_hard(run_dir: Path):
     run_dir = run_dir.resolve()
     marker_path = run_dir / "pre-g1.json"
     marker = _read_json(marker_path)
+    config_path = _verify_marker_config(marker)
     samples = read_manifest(run_dir / "dev-hard" / "all-hard-manifest.csv", check_files=False)
     pools = {}
     for row in samples:
         pools.setdefault(row.source.split("/")[-1], []).append(row)
     subsets = ("ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate", "ccpd_fn", "ccpd_challenge", "ccpd_weather")
     reports, statuses = {}, {}
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ALGORITHM_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    env = _child_env(config_path)
     for subset in subsets:
         target = run_dir / "dev-hard" / subset
         target.mkdir(parents=True, exist_ok=True)
@@ -315,7 +390,8 @@ def recover_hard(run_dir: Path):
         if log.exists():
             log.replace(run_dir / "logs" / f"dev-{subset}-attempt1.log")
         command = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
-                   str(manifest), "--split", "manifest-val", "--out", str(target)]
+                   str(manifest), "--split", "manifest-val", "--out", str(target),
+                   "--config", str(config_path)]
         run = _run(command, ROOT, log, env=env)
         statuses[subset] = run.returncode
         if run.returncode == 0:
@@ -336,10 +412,11 @@ def finish_g1(run_dir: Path):
     marker = _read_json(run_dir / "pre-g1.json")
     if not marker:
         raise ValueError(f"no pre-G1 daily run in {run_dir}")
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ALGORITHM_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    config_path = _verify_marker_config(marker)
+    env = _child_env(config_path)
     g1 = _run([str(PYTHON), "-m", "lpr_tools.eval.bench_latency", "--manifest",
-               "algorithm/testset/manifest.csv", "--n", "100", "--size", "1280x720"],
+               "algorithm/testset/manifest.csv", "--n", "100", "--size", "1280x720",
+               "--config", str(config_path)],
               ROOT, run_dir / "logs" / "g1.log", env=env)
     if g1.returncode:
         raise RuntimeError(f"G1 failed ({g1.returncode}); see {run_dir / 'logs' / 'g1.log'}")
@@ -354,8 +431,10 @@ def finish_g1(run_dir: Path):
                        golden_correct=marker["golden_correct"])
     metrics = _subset_metrics(val_report)
     metrics.update({f"dev-hard/{k}": report["overall_g2"] for k, report in hard_reports.items()})
-    key = {"model_sha256": _sha(ALGORITHM_DIR / "models" / "char_cnn_v1.pt"),
-           "config_sha256": _sha(ALGORITHM_DIR / "config" / "default.toml"),
+    effective_config = marker["effective_config"]
+    key = {"model_sha256": effective_config["classifier_model"]["sha256"],
+           "config_sha256": effective_config["config_sha256"],
+           "effective_config_sha256": effective_config["effective_config_sha256"],
            "val_sampling": {"mode": "val", "n": 1000, "seed": 42,
                             "paths_sha256": _sha(run_dir / "val1000" / "validation_manifest.csv")},
            "hard_sampling": {"subsets": marker["hard_reports"], "n_each": 300, "seed": 42,
@@ -366,6 +445,8 @@ def finish_g1(run_dir: Path):
     line = _scoreboard_line(marker["date"], marker["commit"], val_report,
                             {**hard_status, "reports": hard_reports}, bench)
     summary = {"date": marker["date"], "commit": marker["commit"], "directory": str(run_dir),
+               "effective_config": effective_config,
+               "network_attribution": _attribution([val_report, *hard_reports.values()]),
                "scoreboard_header": SCOREBOARD_HEADER, "scoreboard_row": line,
                "metrics": metrics, "hard_status": hard_status, "hard_completed": marker["hard_reports"],
                "golden_exit": marker["golden_exit"], "g1": bench, "comparison_key": key,
@@ -412,8 +493,18 @@ def _format_errors(summary):
 def _format_summary(summary):
     regressions = summary["comparison"].get("regressions_over_1pp", [])
     alert = ("\n⚠️ **检测到超过1个百分点的退步。**\n" if regressions else "")
+    cfg = summary.get("effective_config", {})
+    attr = summary.get("network_attribution", {})
     return (f"# 每日 M2 评测 {summary['date']}\n\n"
             f"- commit: `{summary['commit']}`（代码来源 `{summary['source_commit']}`）\n"
+            f"- 配置: `{cfg.get('config_path', 'N/A')}`；有效配置 SHA256 `{cfg.get('effective_config_sha256', 'N/A')}`；"
+            f"分类器 `{cfg.get('classifier', 'N/A')}`；分类器模型 `{cfg.get('classifier_model', {}).get('path', 'N/A')}`"
+            f" SHA256 `{cfg.get('classifier_model', {}).get('sha256', 'N/A')}`\n"
+            f"- 网络贡献（val + hard）：CRNN最终兜底 {attr.get('crnn_selected_count', 0)}，"
+            f"准确率 {_fmt(attr.get('crnn_selected_accuracy'))}；网络候选最终选中 "
+            f"{attr.get('network_candidate_selected_count', 0)}；reader被调用图数 "
+            f"reader调用 {attr.get('reader_invoked_calls', 0)} 次/{attr.get('reader_invoked_images', 0)} 图，"
+            f"corner调用 {attr.get('corner_invoked_calls', 0)} 次/{attr.get('corner_invoked_images', 0)} 图\n"
             f"- 状态: **{summary['status']}**；golden {summary['hard_status'].get('golden_correct')}/20，"
             f"门槛 12/20；hard 子集完成 {len(summary['hard_completed'])}/7\n"
             f"- G1: P95 {summary['g1'].get('wall_time', {}).get('p95_ms', float('nan')):.1f} ms；"
@@ -431,8 +522,15 @@ def _format_comparison(comparison):
         return comparison["note"] + "\n"
     lines = [f"对比最近完成运行：{comparison['previous_run']}",
              f"模型变化：{'是' if comparison.get('model_changed') else '否'}；"
-             f"配置变化：{'是' if comparison.get('config_changed') else '否'}", "",
+             f"配置文件变化：{'是' if comparison.get('config_changed') else '否'}；"
+             f"有效配置变化：{'是' if comparison.get('effective_config_changed') else '否'}", "",
              "| 子集 | 指标 | 上次 | 本次 | 变化 | 标记 |", "| --- | --- | ---: | ---: | ---: | --- |"]
+    changes = comparison.get("identity_changes", {})
+    for name, info in changes.get("models", {}).items():
+        if info["changed"]:
+            lines.insert(2, (f"模型 `{name}` 变化：`{info.get('previous_path')}` "
+                             f"({info.get('previous_sha256')}) → `{info.get('current_path')}` "
+                             f"({info.get('current_sha256')})"))
     for item in comparison["comparisons"]:
         mark = "⚠️ 退步超过1个百分点" if item["alert"] else ""
         lines.append(f"| {item['subset']} | {item['metric']} | {_fmt(item['previous'])} | {_fmt(item['current'])} | "
@@ -444,6 +542,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-root", type=Path, default=ALGORITHM_DIR / "out" / "daily")
     parser.add_argument("--index", type=Path, default=INDEX)
+    parser.add_argument("--config", type=Path, help="effective TOML config; overrides inherited LPR_CONFIG")
     parser.add_argument("--defer-g1", action="store_true", help="run validation and golden now; leave G1 for --g1-only")
     parser.add_argument("--g1-only", type=Path, help="finish a run created with --defer-g1")
     parser.add_argument("--recover-hard", type=Path, help="retry hard evaluations using the saved 7x300 selection")
@@ -454,8 +553,8 @@ def main(argv=None):
         elif args.g1_only:
             summary = finish_g1(args.g1_only)
         else:
-            summary = daily(args.out_root, args.index, defer_g1=args.defer_g1)
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            summary = daily(args.out_root, args.index, defer_g1=args.defer_g1, config_path=args.config)
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
     if "hard_recovery" in summary:
         print(f"hard retry: {summary['hard_recovery']['decoded_reports']}/7 reports; G1 pending")

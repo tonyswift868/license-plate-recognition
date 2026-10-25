@@ -12,6 +12,13 @@ import lpr_tools.eval.bench_latency as bl
 import lpr_tools.eval.bench_video as bv
 
 
+@pytest.fixture(autouse=True)
+def isolate_bench_config(tmp_path, monkeypatch):
+    config = tmp_path / "isolated-bench.toml"
+    config.write_text('[runtime]\nmodel_path = ""\n', encoding="utf-8")
+    monkeypatch.setenv("LPR_CONFIG", str(config))
+
+
 class CountingFake(FakeRecognizer):
     def __init__(self):
         super().__init__();self.shapes=[]
@@ -36,6 +43,25 @@ def test_letterbox_and_warmup():
         with pytest.raises(ValueError):parse_size(size)
 
 
+def test_bench_reports_crnn_accuracy_only_with_aligned_ground_truth():
+    class SelectedRecognizer:
+        version = "test"
+        def recognize(self, image):
+            self.last_selection = {"source": "color", "crnn_selected": True}
+            return type("Result", (), {"status": type("Status", (), {"value": "OK"})(),
+                                        "plate_no": "A", "stage_ms": {}})()
+    images = [np.zeros((12, 24, 3), np.uint8), np.ones((12, 24, 3), np.uint8)]
+    report = benchmark(SelectedRecognizer(), images, n=2, size=(24, 12), truths=["A", "B"])
+    attribution = report["network_attribution"]
+    assert attribution["crnn_selected_count"] == 2
+    assert attribution["crnn_selected_correct_count"] == 1
+    assert attribution["crnn_selected_accuracy"] == .5
+    unknown = benchmark(SelectedRecognizer(), images, n=2, size=(24, 12))["network_attribution"]
+    assert unknown["crnn_selected_accuracy"] is None
+    assert unknown["crnn_selected_correct_count"] is None
+    assert unknown["crnn_selected_accuracy_status"] == "unknown_no_ground_truth"
+
+
 def make_video(path):
     writer=cv2.VideoWriter(str(path),cv2.VideoWriter_fourcc(*"mp4v"),20.,(160,120))
     assert writer.isOpened()
@@ -56,8 +82,8 @@ def test_all_frames_decoded_and_sampled(tmp_path):
 
 
 def test_cli_sources(tmp_path,capsys,monkeypatch):
-    monkeypatch.setattr(bl,"runtime_info",lambda:{"cpu":"test CPU","torch_threads":2})
-    monkeypatch.setattr(bv,"runtime_info",lambda:{"cpu":"test CPU","torch_threads":2})
+    monkeypatch.setattr(bl,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
+    monkeypatch.setattr(bv,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
     p=tmp_path/"image.png";imwrite(p,np.zeros((120,200,3),np.uint8))
     manifest=tmp_path/"m.csv"
     write_manifest(manifest,[ManifestRow(p.name,"陕A12345","blue","clear","test")])
@@ -88,7 +114,7 @@ def test_cli_sources(tmp_path,capsys,monkeypatch):
 
 
 def test_cli_skips_undecodable_and_reports_empty_inputs(tmp_path,capsys,monkeypatch):
-    monkeypatch.setattr(bl,"runtime_info",lambda:{"cpu":"test CPU","torch_threads":2})
+    monkeypatch.setattr(bl,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
     good=tmp_path/"good.png";imwrite(good,np.zeros((32,48,3),np.uint8))
     bad=tmp_path/"bad.jpg";bad.write_bytes(b"not an image")
     manifest=tmp_path/"mixed.csv"

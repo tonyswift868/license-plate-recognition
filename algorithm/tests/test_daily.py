@@ -4,7 +4,8 @@ import pytest
 
 import lpr_tools.eval.daily as daily_module
 from lpr_tools.eval.daily import (_compare, _error_analysis, _format_comparison,
-                                 _partition_hard_rows, daily)
+                                 _partition_hard_rows, _attribution, _effective_config,
+                                 _identity_changes, _verify_marker_config, daily)
 from lpr_tools.data.manifest import ManifestRow, read_manifest, write_manifest
 
 
@@ -87,6 +88,53 @@ def test_hard_manifest_round_trip_uses_canonical_encoding_and_columns(tmp_path):
     assert not manifest.read_bytes().startswith(b"\xef\xbb\xbf")
 
 
+def test_network_attribution_distinguishes_selected_results_and_invocations():
+    report = {"network_attribution": {
+        "network_candidate_selected_count": 2, "network_candidate_selected_correct": 1,
+        "crnn_selected_count": 3, "crnn_selected_correct": 2,
+        "reader_invoked_images": 5, "reader_invoked_calls": 8,
+        "corner_invoked_images": 4, "corner_invoked_calls": 6}}
+    totals = _attribution([report, report])
+    assert totals["crnn_selected_count"] == 6
+    assert totals["crnn_selected_accuracy"] == pytest.approx(2 / 3)
+    assert totals["reader_invoked_images"] == 10
+    assert totals["reader_invoked_calls"] == 16
+
+
+def test_identity_comparison_reports_each_model_change_without_changing_sampling_key():
+    old = {"classifier_model": {"path": "cnn-v1.pt", "sha256": "a"},
+           "models": {"corner": {"path": None, "sha256": None},
+                      "plate_reader": {"path": "reader-old.pt", "sha256": "b"}},
+           "config_path": "old.toml", "config_sha256": "c", "effective_config_sha256": "d"}
+    current = {"classifier_model": {"path": "cnn-v1.pt", "sha256": "a"},
+               "models": {"corner": {"path": "corner.pt", "sha256": "e"},
+                          "plate_reader": {"path": "reader-new.pt", "sha256": "f"}},
+               "config_path": "new.toml", "config_sha256": "g", "effective_config_sha256": "h"}
+    changes = _identity_changes(old, current)
+    assert not changes["models"]["classifier"]["changed"]
+    assert changes["models"]["corner"]["changed"]
+    assert changes["models"]["plate_reader"]["changed"]
+    assert changes["effective_config_changed"]
+
+
+def test_deferred_marker_config_identity_rejects_changed_model(tmp_path):
+    model = tmp_path / "reader.pt"
+    model.write_bytes(b"reader-one")
+    classifier = tmp_path / "classifier.pt"
+    classifier.write_bytes(b"classifier")
+    config = tmp_path / "daily.toml"
+    config.write_text(f'[runtime]\nmodel_path = "{classifier.as_posix()}"\n'
+                      f'plate_reader_model_path = "{model.as_posix()}"\n', encoding="utf-8")
+    path, identity = _effective_config(config)
+    assert identity["models"]["plate_reader"]["sha256"]
+    assert identity["config_path"] == str(path)
+    marker = {"effective_config": identity}
+    assert _verify_marker_config(marker) == path
+    model.write_bytes(b"reader-two")
+    with pytest.raises(ValueError, match="identity changed"):
+        _verify_marker_config(marker)
+
+
 @pytest.mark.parametrize(("decoded", "expected"), [(6, 1), (7, 0)])
 def test_recovery_exit_code_reflects_completed_hard_reports(tmp_path, monkeypatch, capsys,
                                                            decoded, expected):
@@ -104,7 +152,11 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     (algorithm / "models").mkdir(parents=True)
     (algorithm / "config").mkdir()
     (algorithm / "models" / "char_cnn_v1.pt").write_bytes(b"model")
-    (algorithm / "config" / "default.toml").write_text("cfg", encoding="utf-8")
+    config_path = tmp_path / "daily.toml"
+    classifier = tmp_path / "classifier.pt"
+    classifier.write_bytes(b"classifier")
+    config_path.write_text(f'[runtime]\nmodel_path = "{classifier.as_posix()}"\n'
+                           'corner_model_path = ""\nplate_reader_model_path = ""\n', encoding="utf-8")
     index = tmp_path / "ccpd_index.csv"
     index.write_text("index", encoding="utf-8")
     python = tmp_path / "python.exe"
@@ -126,9 +178,11 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
                 "locate_recall": {"overall": {"recall": .9}},
                 "decoded_rows": 1000, "decode_error_count": 0}
 
+    observed = []
     def fake_run(command, cwd, log, *, env=None):
         from pathlib import Path
         command = [str(x) for x in command]
+        observed.append((command, dict(env or {})))
         if any("eval_accuracy" in item for item in command) and "--split" in command and "val" in command:
             out = Path(command[command.index("--out") + 1])
             out.mkdir(parents=True, exist_ok=True)
@@ -168,7 +222,8 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     monkeypatch.setattr(daily_module, "_run", fake_run)
     monkeypatch.setattr(daily_module.subprocess, "run",
                         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "source123\n", ""))
-    result = daily(tmp_path / "daily", index, date="2026-10-26", commit="test123")
+    result = daily(tmp_path / "daily", index, date="2026-10-26", commit="test123",
+                   config_path=config_path)
     dest = tmp_path / "daily" / "2026-10-26-test123"
     assert result["status"] == "PASS"
     assert "val/subset/ccpd2019/ccpd_base" in result["metrics"]
@@ -179,3 +234,9 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     assert "| cnn v1 |" in result["scoreboard_row"]
     assert (dest / "summary.md").is_file() and (dest / "errors.md").is_file()
     assert "⚠️" not in (dest / "summary.md").read_text(encoding="utf-8")
+    effective_path = str(config_path.resolve())
+    for command, child_env in observed:
+        if "eval_accuracy" in command or "bench_latency" in command:
+            assert command[command.index("--config") + 1] == effective_path
+        if "eval_accuracy" in command or "bench_latency" in command or "test_golden.py" in command or "-c" in command:
+            assert child_env["LPR_CONFIG"] == effective_path

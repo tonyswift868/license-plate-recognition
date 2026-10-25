@@ -18,6 +18,9 @@ QUAD=((0.,0.),(199.,0.),(199.,119.),(0.,119.))
 @pytest.fixture(autouse=True)
 def isolate_eval_defaults(tmp_path, monkeypatch):
     """Keep CLI defaults and accidental model construction inside this test."""
+    isolated_config = tmp_path / "isolated-eval.toml"
+    isolated_config.write_text('[runtime]\nmodel_path = ""\n', encoding="utf-8")
+    monkeypatch.setenv("LPR_CONFIG", str(isolated_config))
     algo = tmp_path / "algorithm"
     golden = algo / "tests" / "data" / "golden" / "golden_manifest.csv"
     golden.parent.mkdir(parents=True)
