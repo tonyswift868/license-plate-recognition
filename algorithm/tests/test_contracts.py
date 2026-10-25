@@ -189,6 +189,16 @@ def test_stage_signatures(qualname, params):
     assert list(inspect.signature(obj).parameters) == params
 
 
+def test_optional_rectify_candidates_signature():
+    """阶段三可选的多假设函数：存在时签名必须与 rectify 一致，返回 list[RectifiedPlate]（首个为首选）。"""
+    import lpr.rectify as rect_mod
+
+    fn = getattr(rect_mod, "rectify_candidates", None)
+    if fn is None:
+        pytest.skip("rectify_candidates 尚未实现")
+    assert list(inspect.signature(fn).parameters) == ["image", "cand", "cfg"]
+
+
 def test_classifiers_have_predict_proba():
     from lpr.recognize.cnn import CnnClassifier
     from lpr.recognize.svm import SvmClassifier

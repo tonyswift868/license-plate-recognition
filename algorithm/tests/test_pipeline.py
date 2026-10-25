@@ -54,6 +54,7 @@ def stages(monkeypatch):
     monkeypatch.setattr(pl, "preprocess", fake_pre)
     monkeypatch.setattr(pl, "locate", fake_locate)
     monkeypatch.setattr(pl, "rectify", fake_rectify)
+    monkeypatch.setattr(pl, "rectify_candidates", None)
     monkeypatch.setattr(pl, "segment", fake_segment)
     monkeypatch.setattr(pl, "decode", fake_decode)
     return plan, calls
@@ -137,6 +138,26 @@ def test_special_plate_unsupported(recognizer, stages, color):
     plan["cands"] = [_cand(0, color)]
     r = recognizer.recognize(IMG)
     assert r.status is S.UNSUPPORTED and r.error_code == 3006
+
+
+def test_rectify_hypotheses_fallback(recognizer, stages, monkeypatch):
+    """同一候选的首选四角点分割失败时，改用下一个四角点假设。"""
+    plan, calls = stages
+    plan["cands"] = [_cand(0)]
+    plan["decode"] = [_dec(S.OK, 0.95, "陕A54321")]
+
+    def fake_many(image, cand, cfg):
+        rects = []
+        for k in (0, 5):                                 # 用 bbox x 偏移区分两个假设
+            c = _cand(cand.bbox[0] + k)
+            rects.append(RectifiedPlate(np.zeros((80, 252, 3), np.uint8), 7, "blue", np.eye(3), c))
+        return rects
+
+    monkeypatch.setattr(pl, "rectify_candidates", fake_many)
+    plan["seg_ok"] = {(0, 7): False}
+    r = recognizer.recognize(IMG)
+    assert r.status is S.OK and r.plate_no == "陕A54321" and r.bbox[0] == 5
+    assert [c for c in calls if c[0] == "segment"] == [("segment", 0, 7), ("segment", 5, 7)]
 
 
 def test_stage_exception_becomes_internal_error(recognizer, stages, monkeypatch):

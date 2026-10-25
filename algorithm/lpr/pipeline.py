@@ -26,6 +26,11 @@ from .recognize import load_classifier
 from .recognize.base import CharClassifier
 from .rectify import rectify
 from .segment import segment
+
+try:                                                     # 可选：同一候选的多个四角点假设（5.9）
+    from .rectify import rectify_candidates
+except ImportError:
+    rectify_candidates = None
 from .types import DecodeResult, RecogStatus, RecognitionResult, RectifiedPlate, SegmentResult
 from .voting import vote
 
@@ -77,6 +82,15 @@ def _layouts_to_try(rect: RectifiedPlate) -> list[int]:
         if other not in layouts:
             layouts.append(other)
     return layouts
+
+
+def _rectifications(image: np.ndarray, cand, cfg) -> list[RectifiedPlate]:
+    """同一候选的校正假设，首个为首选；阶段三没有提供多假设函数时退回单个 rectify。"""
+    if rectify_candidates is not None:
+        rects = rectify_candidates(image, cand, cfg)
+        if rects:
+            return list(rects)
+    return [rectify(image, cand, cfg)]
 
 
 def _rank(dec: DecodeResult) -> tuple[int, float]:
@@ -221,24 +235,25 @@ class PlateRecognizer:
         lead_color = candidates[0].color
         for i, cand in enumerate(candidates[:cfg.runtime.max_candidates]):
             with timer("rectify"):
-                rect = rectify(image, cand, cfg.rectify)
+                rects = _rectifications(image, cand, cfg.rectify)
             if i == 0:
-                lead_color = rect.color
+                lead_color = rects[0].color
             if dbg is not None:
-                dbg[f"plate_{i}"] = rect.image
-            for layout in _layouts_to_try(rect):
-                with timer("segment"):
-                    seg = segment(rect, layout, cfg.segment)
-                if not seg.ok:
-                    continue
-                with timer("recognize"):
-                    probs = self.classifier.predict_proba(seg.chars)
-                with timer("postprocess"):
-                    dec = decode(probs, seg.layout, rect.color, cfg.postprocess)
-                if best is None or _rank(dec) > _rank(best.dec):
-                    best = _Attempt(dec, rect, seg)
-                if dec.status == S.OK:                   # 提前结束
-                    return self._build(best, dbg)
+                dbg[f"plate_{i}"] = rects[0].image
+            for rect in rects:                           # 四角点假设回退
+                for layout in _layouts_to_try(rect):
+                    with timer("segment"):
+                        seg = segment(rect, layout, cfg.segment)
+                    if not seg.ok:
+                        continue
+                    with timer("recognize"):
+                        probs = self.classifier.predict_proba(seg.chars)
+                    with timer("postprocess"):
+                        dec = decode(probs, seg.layout, rect.color, cfg.postprocess)
+                    if best is None or _rank(dec) > _rank(best.dec):
+                        best = _Attempt(dec, rect, seg)
+                    if dec.status == S.OK:               # 提前结束
+                        return self._build(best, dbg)
 
         if lead_color in _SPECIAL_COLORS:                # 走到这里说明没有 OK 结果
             return failure_result(S.UNSUPPORTED)
