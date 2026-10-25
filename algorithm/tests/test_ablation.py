@@ -40,6 +40,7 @@ def trained_models(tmp_path_factory):
     svm_path.with_suffix(".training.json").write_text(
         json.dumps({"train_seconds": 7.75}), encoding="utf-8")
     # Exercise CSV fallback for the template model.
+    template_path.with_suffix(".training.json").unlink(missing_ok=True)
     template_path.with_suffix(".train.csv").write_text(
         "epoch,epoch_seconds\n1,1.25\n2,2.75\n", encoding="utf-8")
     return data, {"cnn": cnn_path, "template": template_path, "svm": svm_path}
@@ -97,6 +98,26 @@ def test_ablation_province_only_and_empty_input_errors(trained_models, tmp_path)
     empty.mkdir()
     with pytest.raises(ValueError, match="no character"):
         load_chars(empty)
+
+
+def test_load_chars_parallel_reader_keeps_lexical_path_order_and_validation(tmp_path):
+    root = tmp_path / "ordered"
+    imwrite(root / "2" / "b.png", np.full((32, 32), 22, dtype=np.uint8))
+    imwrite(root / "10" / "a.png", np.full((32, 32), 10, dtype=np.uint8))
+    imwrite(root / "metadata" / "ignored.png", np.zeros((32, 32), dtype=np.uint8))
+    images, labels = load_chars(root)
+    np.testing.assert_array_equal(labels, [10, 2])
+    assert [int(image[0, 0]) for image in images] == [10, 22]
+
+    invalid_shape = tmp_path / "bad-shape"
+    imwrite(invalid_shape / "0" / "bad.png", np.zeros((31, 32), dtype=np.uint8))
+    with pytest.raises(ValueError, match="32 x 32 uint8"):
+        load_chars(invalid_shape)
+
+    invalid_class = tmp_path / "bad-class"
+    imwrite(invalid_class / "65" / "bad.png", np.zeros((32, 32), dtype=np.uint8))
+    with pytest.raises(ValueError, match="class index"):
+        load_chars(invalid_class)
 
 
 def test_training_time_metadata_precedence_and_missing(tmp_path):

@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from lpr.charset import NUM_CLASSES
+from lpr.charset import DIGIT_IDX, LETTER_IDX, NUM_CLASSES, PROVINCE_IDX
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.cnn_model import CharCNN
 from .augment import augment_char
@@ -90,10 +90,12 @@ def _data_signature(sources):
 
 
 def _save_checkpoint(path, *, model, optimizer, scheduler, epoch, config, data_signature,
-                     loader_generator, sampler_generator, train_seconds, val_char_acc):
+                     loader_generator, sampler_generator, train_seconds, val_char_acc,
+                     val_province_acc, val_alnum_acc, best_model, best_epoch,
+                     best_score, best_val_char_acc, best_val_province_acc, best_val_alnum_acc):
     np_state = np.random.get_state()
     checkpoint = {
-        "format": 1, "epoch": epoch, "config": config, "data_signature": data_signature,
+        "format": 2, "epoch": epoch, "config": config, "data_signature": data_signature,
         "model": model.state_dict(), "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(), "python_rng": random.getstate(),
         "numpy_rng": {"name": np_state[0], "keys": torch.as_tensor(np_state[1].astype(np.int64)),
@@ -103,6 +105,10 @@ def _save_checkpoint(path, *, model, optimizer, scheduler, epoch, config, data_s
         "loader_rng": loader_generator.get_state(), "sampler_rng": sampler_generator.get_state(),
         "train_seconds": train_seconds,
         "val_char_acc": val_char_acc,
+        "val_province_acc": val_province_acc, "val_alnum_acc": val_alnum_acc,
+        "best_model": best_model, "best_epoch": best_epoch, "best_score": best_score,
+        "best_val_char_acc": best_val_char_acc,
+        "best_val_province_acc": best_val_province_acc, "best_val_alnum_acc": best_val_alnum_acc,
     }
     torch.save(checkpoint, path)
 
@@ -150,15 +156,19 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else out.with_suffix(".checkpoint.pt")
     log_path = Path(log_path) if log_path is not None else out.with_suffix(".train.csv")
     sidecar_path = out.with_suffix(".training.json")
-    protected = {p.resolve() for p in (out, checkpoint_path, log_path, sidecar_path)}
-    if len(protected) != 4:
-        raise ValueError("checkpoint, inference model, training log, and timing sidecar must use distinct paths")
+    best_path = out.with_name(f"{out.stem}.best{out.suffix}")
+    protected = {p.resolve() for p in (out, checkpoint_path, log_path, sidecar_path, best_path)}
+    if len(protected) != 5:
+        raise ValueError("checkpoint, best/inference models, training log, and sidecar must use distinct paths")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     first_epoch, elapsed_total, last_accuracy = 0, 0.0, None
+    last_province_accuracy = last_alnum_accuracy = None
+    best_model, best_epoch, best_score = None, None, None
+    best_accuracy = best_province_accuracy = best_alnum_accuracy = None
     if resume is not None:
         state = torch.load(Path(resume), map_location="cpu", weights_only=True)
-        if state.get("format") != 1 or state.get("data_signature") != signature:
+        if state.get("format") != 2 or state.get("data_signature") != signature:
             raise ValueError("checkpoint format or training data directories are incompatible")
         if state["config"] != config:
             raise ValueError("checkpoint hyperparameters/sampling weights are incompatible")
@@ -176,12 +186,21 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         loader_generator.set_state(state["loader_rng"]); sampler_generator.set_state(state["sampler_rng"])
         elapsed_total = float(state.get("train_seconds", 0.0))
         last_accuracy = state.get("val_char_acc")
+        last_province_accuracy = state.get("val_province_acc")
+        last_alnum_accuracy = state.get("val_alnum_acc")
+        best_model = state["best_model"]
+        best_epoch = state["best_epoch"]
+        best_score = tuple(state["best_score"]) if state["best_score"] is not None else None
+        best_accuracy = state["best_val_char_acc"]
+        best_province_accuracy = state["best_val_province_acc"]
+        best_alnum_accuracy = state["best_val_alnum_acc"]
 
     run_end = epochs if max_epochs_this_run is None else min(epochs, first_epoch + max_epochs_this_run)
     if max_epochs_this_run is not None and max_epochs_this_run < 1:
         raise ValueError("max_epochs_this_run must be positive")
 
-    fields = ["epoch", "loss", "val_char_acc", "lr", "epoch_seconds", "train_seconds"]
+    fields = ["epoch", "loss", "val_char_acc", "val_province_acc", "val_alnum_acc",
+              "lr", "epoch_seconds", "train_seconds"]
     mode = "a" if first_epoch and log_path.exists() and log_path.stat().st_size else "w"
     history = []
     with log_path.open(mode, encoding="utf-8", newline="") as handle:
@@ -196,35 +215,71 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
                 loss = criterion(model(images), labels); loss.backward(); optimizer.step()
                 loss_total += loss.item() * len(labels)
             model.eval(); correct = 0
+            province_correct = province_count = alnum_correct = alnum_count = 0
             with torch.inference_mode():
                 for images, labels in val_loader:
-                    correct += int((model(images).argmax(dim=1) == labels).sum())
+                    predictions = model(images).argmax(dim=1)
+                    matches = predictions == labels
+                    correct += int(matches.sum())
+                    province_mask = (labels >= min(PROVINCE_IDX)) & (labels <= max(PROVINCE_IDX))
+                    alnum_mask = (labels >= min(DIGIT_IDX + LETTER_IDX))
+                    province_count += int(province_mask.sum())
+                    province_correct += int((matches & province_mask).sum())
+                    alnum_count += int(alnum_mask.sum())
+                    alnum_correct += int((matches & alnum_mask).sum())
             epoch_seconds = time.perf_counter() - started
             elapsed_total += epoch_seconds
+            province_accuracy = province_correct / province_count if province_count else None
+            alnum_accuracy = alnum_correct / alnum_count if alnum_count else None
+            accuracy = correct / len(val_data)
+            score = (accuracy, province_accuracy if province_accuracy is not None else -1.0)
             row = {"epoch": epoch + 1, "loss": loss_total / len(train_data),
-                   "val_char_acc": correct / len(val_data), "lr": optimizer.param_groups[0]["lr"],
+                   "val_char_acc": accuracy, "val_province_acc": province_accuracy,
+                   "val_alnum_acc": alnum_accuracy, "lr": optimizer.param_groups[0]["lr"],
                    "epoch_seconds": epoch_seconds, "train_seconds": elapsed_total}
             writer.writerow(row); handle.flush()
             last_accuracy = row["val_char_acc"]
+            last_province_accuracy = province_accuracy
+            last_alnum_accuracy = alnum_accuracy
             # Keep the public history deterministic for existing callers; timings
             # live in the flushed CSV and the .training.json sidecar.
             history.append({key: row[key] for key in ("epoch", "loss", "val_char_acc", "lr")})
             print(f"epoch={epoch + 1}/{epochs} loss={row['loss']:.6f} "
-                  f"val_char_acc={row['val_char_acc']:.6f} lr={row['lr']:.8f} "
+                  f"val_char_acc={row['val_char_acc']:.6f} "
+                  f"val_province_acc={province_accuracy if province_accuracy is not None else 'n/a'} "
+                  f"val_alnum_acc={alnum_accuracy if alnum_accuracy is not None else 'n/a'} "
+                  f"lr={row['lr']:.8f} "
                   f"epoch_seconds={epoch_seconds:.3f}", flush=True)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_epoch = epoch + 1
+                best_model = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                best_accuracy = accuracy
+                best_province_accuracy = province_accuracy
+                best_alnum_accuracy = alnum_accuracy
+                torch.save(best_model, best_path)
             scheduler.step()
             _save_checkpoint(checkpoint_path, model=model, optimizer=optimizer, scheduler=scheduler,
                              epoch=epoch + 1, config=config, data_signature=signature,
                              loader_generator=loader_generator, sampler_generator=sampler_generator,
-                             train_seconds=elapsed_total, val_char_acc=last_accuracy)
-    torch.save(model.state_dict(), out)
+                             train_seconds=elapsed_total, val_char_acc=last_accuracy,
+                             val_province_acc=last_province_accuracy, val_alnum_acc=last_alnum_accuracy,
+                             best_model=best_model, best_epoch=best_epoch, best_score=best_score,
+                             best_val_char_acc=best_accuracy,
+                             best_val_province_acc=best_province_accuracy,
+                             best_val_alnum_acc=best_alnum_accuracy)
+    if best_model is None:
+        raise ValueError("training checkpoint has no best-validation model")
+    torch.save(best_model, out)
     source_manifest = json.dumps([{"path": str(p), "weight": w} for p, w in zip(sources, weights_by_source)],
                                  ensure_ascii=False)
-    final_acc = history[-1]["val_char_acc"] if history else last_accuracy
-    write_manifest_entry(out, version=version, train_data=source_manifest, val_char_acc=final_acc)
+    write_manifest_entry(out, version=version, train_data=source_manifest, val_char_acc=best_accuracy)
     sidecar_path.write_text(
-        json.dumps({"train_seconds": elapsed_total}, indent=2) + "\n", encoding="utf-8")
+        json.dumps({"train_seconds": elapsed_total, "best_epoch": best_epoch,
+                    "val_char_acc": best_accuracy, "val_province_acc": best_province_accuracy,
+                    "val_alnum_acc": best_alnum_accuracy}, indent=2) + "\n", encoding="utf-8")
     print(f"saved={out.as_posix()} version={version} log={log_path.as_posix()} "
+          f"best={best_path.as_posix()} best_epoch={best_epoch} "
           f"checkpoint={checkpoint_path.as_posix()} train_seconds={elapsed_total:.3f}")
     return history
 

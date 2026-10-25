@@ -1,5 +1,7 @@
 import csv
+import json
 import shutil
+import tracemalloc
 from pathlib import Path
 
 import cv2
@@ -8,7 +10,7 @@ import pytest
 
 from lpr.io_utils import imread, imwrite
 from lpr_tools.data.ccpd import INDEX_FIELDS, parse_ccpd_name
-from lpr_tools.train.build_chars import build_chars
+from lpr_tools.train.build_chars import _iter_index, build_chars
 
 
 def _name(plate_indices="0_0_22_27_27_33_16"):
@@ -79,7 +81,7 @@ def test_build_chars_rejects_cross_split_duplicate_content(tmp_path):
     index = tmp_path / "index.csv"
     _write_index(index, [_row(first, "train"), _row(second, "val", "沪B12345")])
     with pytest.raises(ValueError, match="leakage across splits"):
-        build_chars(index, raw, tmp_path / "out")
+        build_chars(index, raw, tmp_path / "out", skip_invalid=True)
 
 
 def test_build_chars_rejects_train_test_duplicate_before_writing(tmp_path):
@@ -94,6 +96,51 @@ def test_build_chars_rejects_train_test_duplicate_before_writing(tmp_path):
     with pytest.raises(ValueError, match="leakage across splits"):
         build_chars(index, raw, out)
     assert not out.exists()
+
+
+@pytest.mark.parametrize("manifest_relative_base", ["manifest", "raw"])
+def test_build_chars_rejects_train_copy_of_excluded_manifest_image(tmp_path, manifest_relative_base):
+    raw = tmp_path / "raw"
+    manifest_dir = tmp_path / "manifests"
+    raw.mkdir()
+    manifest_dir.mkdir()
+    excluded = (manifest_dir if manifest_relative_base == "manifest" else raw) / "heldout.jpg"
+    train_copy = raw / "renamed-train-copy.jpg"
+    _image(excluded)
+    shutil.copyfile(excluded, train_copy)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(train_copy, "train"), _row(excluded, "val", "沪B12345")])
+    manifest = manifest_dir / "testset.csv"
+    manifest.write_text("path\nheldout.jpg\n", encoding="utf-8")
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="image content matches exclude manifest"):
+        build_chars(index, raw, out, exclude_manifest=manifest,
+                    skip_invalid=True, workers=2)
+    assert not out.exists()
+
+
+def test_build_chars_allows_test_candidate_matching_exclude_manifest_content(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    test_image = raw / "test.jpg"
+    train_copy = raw / "train-copy.jpg"
+    _image(test_image)
+    shutil.copyfile(test_image, train_copy)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(train_copy, "train"), _row(test_image, "test")])
+    manifest = tmp_path / "testset.csv"
+    manifest.write_text("path\n" + str(test_image) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="image content matches exclude manifest"):
+        build_chars(index, raw, tmp_path / "out", exclude_manifest=manifest)
+
+    # The manifest's own test-split row is allowed to share its content hash;
+    # with no train/val alias, this build completes and emits only train data.
+    index = tmp_path / "test-only-index.csv"
+    _write_index(index, [_row(test_image, "test")])
+    counts = build_chars(index, raw, tmp_path / "test-only-out", exclude_manifest=manifest)
+    assert sum(counts.values()) == 0
 
 
 def test_build_chars_class_cap_reserves_validation_quota(tmp_path):
@@ -182,6 +229,79 @@ def test_missing_test_image_is_ignored_but_its_path_still_blocks_train(tmp_path)
     _write_index(index, [_row(train_image), _row(missing_test, "test")])
     counts = build_chars(index, raw, tmp_path / "out")
     assert sum(counts.values()) == 7
+
+
+def test_skip_invalid_records_both_quad_boundary_errors_but_still_rejects_leakage(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    bad_x, bad_y, valid = raw / "bad-x.jpg", raw / "bad-y.jpg", raw / "valid.jpg"
+    for path in (bad_x, bad_y, valid):
+        _image(path)
+    index = tmp_path / "index.csv"
+    _write_index(index, [
+        _row(bad_x, quad="0 0 252 0 252 79 0 79"),
+        _row(bad_y, quad="0 0 251 0 251 80 0 80"),
+        _row(valid),
+    ])
+    out = tmp_path / "skip-out"
+    counts = build_chars(index, raw, out, skip_invalid=True)
+    assert sum(counts.values()) == 7
+    rejected = list(csv.DictReader((out / "chars_rejected.csv").open(encoding="utf-8")))
+    assert [(r["row"], r["split"], Path(r["path"]).name) for r in rejected] == [
+        ("2", "train", bad_x.name), ("3", "train", bad_y.name)]
+    assert "point outside source image" in rejected[0]["reason"]
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["rejected_count"] == 2 and stats["skip_invalid"] is True
+
+    # Even when malformed rows are skippable, cross-split content reuse is fatal.
+    other = raw / "same-content-val.jpg"
+    shutil.copyfile(valid, other)
+    _write_index(index, [_row(valid, "train"), _row(other, "val")])
+    with pytest.raises(ValueError, match="leakage across splits"):
+        build_chars(index, raw, tmp_path / "leak-out", skip_invalid=True)
+
+
+def test_preflight_workers_produce_identical_outputs(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    train_image, val_image = raw / "train.jpg", raw / "val.jpg"
+    _image(train_image, value=0)
+    _image(val_image, value=1)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(train_image, "train"), _row(val_image, "val")])
+    out_one, out_two = tmp_path / "out-one", tmp_path / "out-two"
+    build_chars(index, raw, out_one, workers=1)
+    build_chars(index, raw, out_two, workers=2)
+    assert (out_one / "chars_index.csv").read_bytes() == (out_two / "chars_index.csv").read_bytes()
+    assert (out_one / "chars_stats.json").read_bytes() == (out_two / "chars_stats.json").read_bytes()
+
+
+def test_index_reader_is_strict_and_streams_large_csv(tmp_path):
+    index = tmp_path / "large-index.csv"
+    row = dict.fromkeys(INDEX_FIELDS, "")
+    row.update(path="x.jpg", dataset="ccpd2019", subset="ccpd_base", split="train",
+               has_plate="1", plate_no="皖AY339S", layout="7", plate_color="blue",
+               quad="0 0 251 0 251 79 0 79", bbox="0 0 252 80", skip_reason="")
+    with index.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
+        writer.writeheader()
+        writer.writerows([row] * 12000)
+    tracemalloc.start()
+    count = sum(1 for _ in _iter_index(index))
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert count == 12000
+    assert peak < 2_000_000
+
+    bad_header = tmp_path / "bad-header.csv"
+    bad_header.write_text("split,path\ntrain,x.jpg\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid CCPD index columns"):
+        next(_iter_index(bad_header))
+    short_row = tmp_path / "short-row.csv"
+    short_row.write_text(",".join(INDEX_FIELDS) + "\n" + ",".join([""] * (len(INDEX_FIELDS)-1)) + "\n",
+                         encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid CCPD index row width"):
+        next(_iter_index(short_row))
 
 
 def test_ground_truth_quad_extracts_plate_from_offset_scene(tmp_path):

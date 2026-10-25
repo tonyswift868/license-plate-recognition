@@ -32,12 +32,16 @@ class SvmClassifier:
 
     def __init__(self, version: str, model) -> None:
         self.version = version
-        if (not hasattr(model, "classes_") or not np.array_equal(model.classes_, np.arange(NUM_CLASSES))
-                or getattr(model, "n_features_in_", None) != HOG_SIZE
-                or not callable(getattr(model, "predict_proba", None))):
-            raise ValueError("expected probability SVC/calibrator with all 65 classes and 324 HOG features")
-        if hasattr(model, "probability") and not model.probability:
-            raise ValueError("SVC must have probability=True")
+        classes = np.asarray(getattr(model, "classes_", ()))
+        if (classes.ndim != 1 or len(classes) < 2 or
+                not np.issubdtype(classes.dtype, np.integer) or
+                np.any(classes < 0) or np.any(classes >= NUM_CLASSES) or
+                len(np.unique(classes)) != len(classes) or
+                getattr(model, "n_features_in_", None) != HOG_SIZE or
+                not callable(getattr(model, "predict_proba", None))):
+            raise ValueError("expected a probability classifier with at least two valid classes and 324 HOG features")
+        self.classes = np.array(classes, dtype=np.int64, copy=True)
+        self.classes.setflags(write=False)
         self.model = model
 
     @classmethod
@@ -48,5 +52,15 @@ class SvmClassifier:
         features = hog_features(chars)
         if len(features) == 0:
             return np.empty((0, NUM_CLASSES), dtype=np.float32)
-        probs = self.model.predict_proba(features).astype(np.float32)
-        return probs / probs.sum(axis=1, keepdims=True)
+        class_probs = np.asarray(self.model.predict_proba(features), dtype=np.float32)
+        if class_probs.shape != (len(features), len(self.classes)):
+            raise ValueError("SVM returned probabilities with an unexpected class shape")
+        if not np.isfinite(class_probs).all() or np.any(class_probs < 0):
+            raise ValueError("SVM returned invalid probabilities")
+        totals = class_probs.sum(axis=1, keepdims=True)
+        if np.any(totals <= 0) or not np.isfinite(totals).all():
+            raise ValueError("SVM probability rows cannot be normalized")
+        class_probs /= totals
+        probs = np.zeros((len(features), NUM_CLASSES), dtype=np.float32)
+        probs[:, self.classes] = class_probs
+        return probs
