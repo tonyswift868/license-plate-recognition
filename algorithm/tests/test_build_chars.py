@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from lpr.io_utils import imread, imwrite
+from lpr.types import SegmentResult
 from lpr_tools.data.ccpd import INDEX_FIELDS, parse_ccpd_name
 from lpr_tools.train.build_chars import _iter_index, build_chars
 
@@ -328,3 +329,124 @@ def test_ground_truth_quad_extracts_plate_from_offset_scene(tmp_path):
         expected = normalize_char(plate[:, left:right])
         actual = imread(out / rows[position]["path"], cv2.IMREAD_GRAYSCALE)
         np.testing.assert_array_equal(actual, expected)
+
+
+def test_segment_source_saves_exact_segment_char_bytes_and_uses_gt_rectification(tmp_path, monkeypatch):
+    import lpr_tools.train.build_chars as builder
+    from lpr.config import load_config
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    source = raw / "scene.png"
+    _image(source, size=(300, 120), value=19)
+    quad = "20 15 271 15 271 94 20 94"
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(source, quad=quad)])
+    expected = np.stack([np.full((32, 32), 20 + i * 21, np.uint8) for i in range(7)])
+    seen = []
+
+    def fake_segment(rect, layout, cfg):
+        seen.append((rect, layout, cfg))
+        return SegmentResult(True, layout, [], expected.copy(), 1.0)
+
+    monkeypatch.setattr(builder, "segment_plate", fake_segment)
+    out = tmp_path / "segment-chars"
+    counts = builder.build_chars(index, raw, out, source="segment")
+    cfg = load_config()
+    assert len(seen) == 1
+    rect, layout, passed_cfg = seen[0]
+    assert layout == 7 and passed_cfg.model_dump() == cfg.segment.model_dump()
+    assert rect.image.shape == (cfg.rectify.size_7[1], cfg.rectify.size_7[0], 3)
+    np.testing.assert_allclose(rect.candidate.corners,
+                               np.asarray([[20, 15], [271, 15], [271, 94], [20, 94]], np.float32))
+    assert sum(counts.values()) == 7
+    rows = list(csv.DictReader((out / "chars_index.csv").open(encoding="utf-8")))
+    assert [int(row["position"]) for row in rows] == list(range(7))
+    for row in rows:
+        saved = imread(out / row["path"], cv2.IMREAD_GRAYSCALE)
+        np.testing.assert_array_equal(saved, expected[int(row["position"])])
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["build"]["source"] == "segment"
+    assert stats["build"]["config_sha256"]
+    assert stats["build"]["build_chars_sha256"]
+    assert stats["build"]["segment_code_sha256"]
+    assert "segment_git_commit" in stats["build"] and "segment_git_blob" in stats["build"]
+
+
+def test_segment_failures_and_wrong_character_count_drop_whole_images(tmp_path, monkeypatch):
+    import lpr_tools.train.build_chars as builder
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    first, second = raw / "first.png", raw / "second.png"
+    _image(first)
+    _image(second, value=1)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(first), _row(second, plate="沪B12345")])
+    results = iter([
+        SegmentResult(False, 7, [], np.empty((0, 32, 32), np.uint8), 0.),
+        SegmentResult(True, 7, [], np.zeros((6, 32, 32), np.uint8), 1.),
+    ])
+    monkeypatch.setattr(builder, "segment_plate", lambda *_args: next(results))
+    out = tmp_path / "out"
+    counts = builder.build_chars(index, raw, out, source="segment")
+    assert sum(counts.values()) == 0
+    assert list((out / "train").glob("*/*.png")) == []
+    assert list((out / "val").glob("*/*.png")) == []
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["segment_ok_false_images"] == 1
+    assert stats["segment_wrong_count_images"] == 1
+    assert stats["segment_dropped_images"] == 2
+
+
+def test_segment_malformed_success_outputs_are_counted_and_dropped(tmp_path, monkeypatch):
+    import lpr_tools.train.build_chars as builder
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    sources = [raw / f"bad-{i}.png" for i in range(3)]
+    for i, path in enumerate(sources):
+        _image(path, value=10 + i)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(path) for path in sources])
+    malformed = iter([
+        np.asarray(1, dtype=np.uint8),
+        np.zeros((7, 32, 32), dtype=np.uint16),
+        np.zeros((7, 31, 32), dtype=np.uint8),
+    ])
+    monkeypatch.setattr(
+        builder, "segment_plate",
+        lambda _rect, layout, _cfg: SegmentResult(True, layout, [], next(malformed), 1.0))
+    out = tmp_path / "out"
+    counts = builder.build_chars(index, raw, out, source="segment")
+    assert sum(counts.values()) == 0
+    assert not list(out.glob("train/*/*.png"))
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["valid_source_images"] == 3
+    assert stats["segment_attempted_images"] == 3
+    assert stats["segment_success_images"] == 3
+    assert stats["segment_invalid_images"] == 3
+    assert stats["segment_wrong_count_images"] == 0
+    assert stats["segment_dropped_images"] == 3
+
+
+def test_exclude_golden_manifest_blocks_renamed_byte_identical_copy(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    manifest_dir = tmp_path / "golden"
+    manifest_dir.mkdir()
+    golden_image = manifest_dir / "golden.png"
+    renamed_copy = raw / "renamed-golden.png"
+    _image(golden_image)
+    shutil.copyfile(golden_image, renamed_copy)
+    manifest = manifest_dir / "golden_manifest.csv"
+    manifest.write_text(
+        "path,plate_no,plate_color,category,source,quad,note\n"
+        "golden.png,皖AY339S,blue,clear,fixture,0 0 251 0 251 79 0 79,golden_only\n",
+        encoding="utf-8")
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(renamed_copy)])
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="image content matches exclude manifest"):
+        build_chars(index, raw, out, exclude_golden=manifest, skip_invalid=True)
+    assert not out.exists()
