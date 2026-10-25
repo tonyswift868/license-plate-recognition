@@ -6,7 +6,9 @@ from lpr import charnorm
 from lpr.locate import locate, box_iou
 from lpr.preprocess import preprocess
 from lpr.rectify import rectify
-from lpr.segment import _aligned_slots, _crossing_edge_ink, _fallback_binary_from_gray, segment
+from lpr.segment import (_aligned_slots, _crossing_edge_ink, _fallback_binary_from_gray,
+                         _glyph_like_border_component,
+                         _fit_slots_to_text_extent, binary_plate, segment)
 from lpr.types import RectifiedPlate, PlateCandidate
 from lpr_tools.synth_scenes import draw_plate, make_scene
 from .test_locate import truth_bbox
@@ -25,11 +27,12 @@ def test_segment_clean_polarity_boxes_and_normalization(cfg, color, layout, bina
     rect = plate_rect(color, layout)
     scfg = cfg.segment.model_copy(update={'binarize': binarize})
     calls = []
+    normalize_inputs = []
     unify, normalize = charnorm.unify_polarity, charnorm.normalize_char
     def tracked_unify(g, c):
         calls.append(('polarity', c)); return unify(g, c)
     def tracked_normalize(crop):
-        calls.append(('normalize', crop.shape)); return normalize(crop)
+        calls.append(('normalize', crop.shape)); normalize_inputs.append(crop.copy()); return normalize(crop)
     monkeypatch.setattr(charnorm, 'unify_polarity', tracked_unify)
     monkeypatch.setattr(charnorm, 'normalize_char', tracked_normalize)
     result = segment(rect, layout, scfg)
@@ -37,11 +40,17 @@ def test_segment_clean_polarity_boxes_and_normalization(cfg, color, layout, bina
     assert result.chars.shape == (layout, 32, 32) and result.chars.dtype == np.uint8
     assert calls[0] == ('polarity', color) and len(calls) == layout+1
     assert 0 < result.quality <= 1
-    g = unify(cv2.cvtColor(rect.image, cv2.COLOR_BGR2GRAY), color)
-    for box, char in zip(result.boxes, result.chars):
+    g, binary = binary_plate(rect, scfg)
+    slots = _aligned_slots(binary, scfg.layout7_centers if layout == 7 else scfg.layout8_centers,
+                           scfg.layout7_char_w if layout == 7 else scfg.layout8_char_w)
+    assert len(normalize_inputs) == layout
+    for i, ((left, right), box, char) in enumerate(zip(slots, result.boxes, result.chars)):
         x, y, w, h = box
         assert 0 <= x < x+w <= rect.image.shape[1] and 0 <= y < y+h <= 80
-        assert np.array_equal(char, normalize(g[y:y+h, x:x+w]))
+        assert np.array_equal(char, normalize(g[:, left:right]))
+        # Returned geometry remains tight even though the CNN sees the training slot.
+        assert normalize_inputs[i].shape == (80, right-left)
+        assert not np.array_equal(char, normalize(g[y:y+h, x:x+w]))
         assert not char[0].any() and char.max() == 255
 
 
@@ -146,6 +155,67 @@ def test_valley_adjustment_requires_low_central_ink():
     plain = _aligned_slots(binary, centers, .10)
     adjusted = _aligned_slots(binary, centers, .10, projection_valleys=True)
     assert adjusted == plain
+
+
+def test_wide_valley_search_moves_only_a_cut_that_splits_glyphs():
+    from lpr.config import load_config
+
+    cfg = load_config().segment
+    centers, char_w = cfg.layout7_centers, cfg.layout7_char_w
+    binary = np.zeros((80, 252), np.uint8)
+    prior = _aligned_slots(binary, centers, char_w)
+    boundary = prior[2][1]
+    for i, center in enumerate(centers):
+        x = round(center*binary.shape[1])
+        left, right = x-4, x+4
+        if i == 2:
+            left, right = boundary-29, boundary-21
+        elif i == 3:
+            # A shifted glyph crosses the prior cut; the true gap is 13 px left.
+            left, right = boundary-12, boundary+5
+        binary[20:60, left:right] = 255
+
+    base = _aligned_slots(binary, centers, char_w)
+    boundary = base[2][1]
+    narrow = _aligned_slots(binary, centers, char_w,
+                            projection_valleys=True, valley_search_rel=.025)
+    adjusted = _aligned_slots(binary, centers, char_w, projection_valleys=True)
+    assert narrow[2][1] == boundary
+    assert adjusted[2][1] <= boundary-8
+    # The new boundary passes through the real blank gap, not either character.
+    assert not binary[20:60, adjusted[2][1]-1:adjusted[2][1]+1].any()
+
+
+def test_text_extent_relocates_slots_only_when_projection_shows_shift(cfg):
+    centers, char_w = cfg.segment.layout7_centers, cfg.segment.layout7_char_w
+    binary = np.zeros((80, 252), np.uint8)
+    # Nominal full-slot projection does not justify changing the layout prior.
+    for center in centers:
+        left = max(0, round((center-char_w/2)*binary.shape[1]))
+        right = min(binary.shape[1], round((center+char_w/2)*binary.shape[1]))
+        binary[20:60, left:right] = 255
+    assert _fit_slots_to_text_extent(binary, centers, char_w) is None
+
+    # A translated candidate is measured from its complete text span and fit
+    # by scale/offset, instead of hoping a fixed +/-6% search happens to align.
+    shifted = np.zeros_like(binary)
+    for center in centers:
+        left = max(0, round((center-char_w/2)*binary.shape[1])+12)
+        right = min(binary.shape[1], round((center+char_w/2)*binary.shape[1])+12)
+        shifted[20:60, left:right] = 255
+    fit = _fit_slots_to_text_extent(shifted, centers, char_w)
+    assert fit is not None
+    adjusted, adjusted_width, scale, offset = fit
+    assert .95 <= scale <= 1.05 and .035 <= offset <= .06
+    assert adjusted_width == pytest.approx(char_w*scale)
+    assert adjusted == pytest.approx([.5+(c-.5)*scale+offset for c in centers])
+
+
+def test_border_cleanup_can_distinguish_clipped_glyph_from_plate_rim():
+    # A tall, compact component touching the top can be a glyph after a clipped
+    # candidate warp; a long thin bottom edge is still a rim component.
+    assert _glyph_like_border_component(92, 0, 18, 65, 540, 252, 80)
+    assert not _glyph_like_border_component(0, 54, 252, 26, 2_800, 252, 80)
 
 
 def test_slot_edge_counts_only_ink_crossing_cut():

@@ -22,18 +22,45 @@ def classify_color(image: np.ndarray) -> str:
     inner = hsv[max(0, h//10):max(1, h-h//10), max(0, w//20):max(1, w-w//20)]
     fractions = {color: float(np.mean(cv2.inRange(inner, np.uint8(lo), np.uint8(hi)) > 0))
                  for color, (lo, hi) in _COLOR_RANGES.items()}
-    color = max(fractions, key=fractions.get)
-    if fractions[color] >= .15:
+    ranked = sorted(fractions.items(), key=lambda item: item[1], reverse=True)
+    color, color_fraction = ranked[0]
+    runner_up, runner_fraction = ranked[1]
+    if color_fraction >= .15:
+        # Daylight/white-balance shifts can move a true blue plate toward green
+        # (or a green plate toward yellow). When the rectified crop has strong
+        # evidence for both competing hues, retain uncertainty so the pipeline
+        # tries both layouts instead of committing to the wrong character count.
+        if runner_fraction >= max(.15, color_fraction*.40):
+            return 'unknown'
         return color
-    if np.mean((inner[..., 1] < 35) & (inner[..., 2] > 175)) > .6:
+    # White/black is a special-plate decision in the pipeline. Require neutral
+    # pixels as well as the brightness vote so saturated low-light blue/green
+    # backgrounds do not become unsupported black plates.
+    neutral = inner[..., 1] < 35
+    if np.mean(neutral & (inner[..., 2] > 175)) > .6:
         return 'white'
-    if np.mean(inner[..., 2] < 35) > .6:
+    if np.mean(neutral & (inner[..., 2] < 35)) > .6:
         return 'black'
     return 'unknown'
 
 
-def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.ndarray:
-    """Prefer a colour contour, then edges; reject unrelated crop contours."""
+def _quad_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """Intersection-over-union for two ordered convex quadrilaterals."""
+    area_a = abs(cv2.contourArea(np.float32(a)))
+    area_b = abs(cv2.contourArea(np.float32(b)))
+    if area_a <= 0 or area_b <= 0:
+        return 0.
+    try:
+        intersection, _ = cv2.intersectConvexConvex(np.float32(a), np.float32(b))
+    except cv2.error:
+        return 0.
+    union = area_a + area_b - float(intersection)
+    return float(intersection / union) if union > 0 else 0.
+
+
+def _quad_candidates(image: np.ndarray, cand: PlateCandidate, expand: float,
+                    max_candidates: int = 8) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Return legacy first accepted geometry plus a bounded set of alternatives."""
     h, w = image.shape[:2]
     x, y, bw, bh = cand.bbox
     x0, y0 = max(0, int(np.floor(x-bw*expand))), max(0, int(np.floor(y-bh*expand)))
@@ -52,6 +79,8 @@ def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.nd
     edge = cv2.Canny(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), 50, 150)
     edge = cv2.morphologyEx(edge, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     expected = abs(cv2.contourArea(np.float32(cand.corners)))
+    accepted: list[np.ndarray] = []
+    first: np.ndarray | None = None
     for branch in (mask, edge):
         mode = cv2.RETR_EXTERNAL if branch is mask else cv2.RETR_LIST
         contours = cv2.findContours(branch, mode, cv2.CHAIN_APPROX_SIMPLE)[0]
@@ -72,8 +101,124 @@ def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.nd
                     quad = order_points(poly.reshape(4, 2) + [x0, y0])
                     sides = np.linalg.norm(np.roll(quad, -1, axis=0)-quad, axis=1)
                     if min(sides) > 2 and 1.8 < (sides[0]+sides[2])/(sides[1]+sides[3]) < 6:
-                        return quad
-    return fallback
+                        fallback_area = abs(cv2.contourArea(np.float32(fallback)))
+                        quad_area = abs(cv2.contourArea(np.float32(quad)))
+                        consistent = (_quad_iou(fallback, quad) >= .80
+                                      and quad_area <= fallback_area * 1.08)
+                        if first is None and consistent:
+                            first = quad
+                        if all(_quad_iou(quad, old) < .995 for old in accepted):
+                            accepted.append(quad)
+                            if len(accepted) >= max_candidates-1:
+                                break
+            if len(accepted) >= max_candidates-1:
+                break
+        if len(accepted) >= max_candidates-1:
+            break
+    primary = first if first is not None else fallback
+    candidates = [primary]
+    for quad in [fallback, *accepted]:
+        if all(_quad_iou(quad, old) < .995 for old in candidates):
+            candidates.append(quad)
+        if len(candidates) >= max_candidates:
+            break
+    return primary, candidates
+
+
+def _quad_glyph_evidence(image: np.ndarray) -> dict[str, float | int]:
+    """Measure repeated glyph-like components and their placement in a warp."""
+    h, w = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    y0, y1 = int(.10*h), int(.90*h)
+    x0, x1 = int(.03*w), int(.97*w)
+    center = gray[y0:y1, x0:x1]
+    threshold, _ = cv2.threshold(center, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    dark = center <= threshold
+    # Estimate polarity from the center, but measure components in the complete
+    # warp. A component touching the center window is not necessarily clipped by
+    # the actual plate image; full-image coordinates distinguish those cases.
+    ink = gray <= threshold if np.count_nonzero(dark) < dark.size/2 else gray > threshold
+    n, _, stats, centers = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
+    glyphs: list[tuple[float, int]] = []
+    edge_touch = 0
+    for i in range(1, n):
+        xx, yy, ww, hh, area = stats[i]
+        if (hh < .30*h or hh > .98*h or ww < 2 or ww > .20*w
+                or area < 10 or area > .20*w*h):
+            continue
+        cx = float(centers[i, 0])
+        if cx < .02*w or cx > .98*w:
+            continue
+        glyphs.append((cx, int(hh)))
+        edge_touch += int(yy <= 1 or yy+hh >= h-1)
+    count = len(glyphs)
+    if count >= 4:
+        xs = np.sort([item[0] for item in glyphs])
+        gaps = np.diff(xs)
+        gap_cv = float(np.std(gaps)/(np.mean(gaps)+1e-6))
+        coverage = float((xs[-1]-xs[0])/w)
+        median_height = float(np.median([item[1] for item in glyphs])/h)
+    else:
+        gap_cv, coverage, median_height = 1., 0., 0.
+    return {"glyph_count": count, "edge_touch_count": edge_touch,
+            "gap_cv": gap_cv, "coverage": coverage,
+            "median_height_ratio": median_height,
+            "ink_fraction": float(np.mean(ink[y0:y1, x0:x1]))}
+
+
+def _quad_pixel_quality(image: np.ndarray, layout: int) -> float:
+    """Rank a rectified crop by repeated character-like pixel components."""
+    evidence = _quad_glyph_evidence(image)
+    count = int(evidence["glyph_count"])
+    edge_touch = int(evidence["edge_touch_count"])
+    gap_cv = float(evidence["gap_cv"])
+    coverage = float(evidence["coverage"])
+    median_height = float(evidence["median_height_ratio"])
+    target = 8 if layout == 8 else 7
+    score = float(min(count, target)) - 1.8*abs(count-target) - 1.8*edge_touch
+    if count >= 4:
+        score -= min(2., 2.*gap_cv)
+        score += 1.5*max(0., 1.-abs(coverage-.72)/.72)
+        score += max(0., 1.-abs(median_height-.65)/.65)
+    ink_fraction = float(evidence["ink_fraction"])
+    if ink_fraction < .015 or ink_fraction > .48:
+        score -= 1.5
+    return score
+
+
+def _quad_rank_score(pixel_quality: float, geometry_iou: float) -> float:
+    """Use the current geometric proposal as a prior when pixel evidence ties."""
+    return float(pixel_quality - 4.*(1.-geometry_iou))
+
+
+def _warp_quad(image: np.ndarray, cand: PlateCandidate, quad: np.ndarray
+               ) -> RectifiedPlate:
+    target7 = np.float32([[0, 0], [251, 0], [251, 79], [0, 79]])
+    matrix7 = cv2.getPerspectiveTransform(np.float32(quad), target7)
+    plate7 = cv2.warpPerspective(image, matrix7, (252, 80))
+    color = classify_color(plate7)
+    layout = 8 if color == 'green' else (7 if color in ('blue', 'yellow') else 0)
+    if layout == 8:
+        target8 = np.float32([[0, 0], [275, 0], [275, 79], [0, 79]])
+        matrix = cv2.getPerspectiveTransform(np.float32(quad), target8)
+        plate = cv2.warpPerspective(image, matrix, (276, 80))
+    else:
+        matrix, plate = matrix7, plate7
+    return RectifiedPlate(plate, layout, color, matrix, cand)
+
+
+def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.ndarray:
+    """Choose among bounded geometric candidates using only warped pixels."""
+    primary, candidates = _quad_candidates(image, cand, expand)
+    best_quad, best_score = primary, -float('inf')
+    for quad in candidates:
+        rect = _warp_quad(image, cand, quad)
+        layouts = (7, 8) if rect.layout == 0 else (rect.layout,)
+        pixel_score = max(_quad_pixel_quality(rect.image, layout) for layout in layouts)
+        score = _quad_rank_score(pixel_score, _quad_iou(primary, quad))
+        if score > best_score:
+            best_quad, best_score = quad, score
+    return best_quad
 
 
 def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> RectifiedPlate:
@@ -92,6 +237,14 @@ def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> Rect
     matrix = cv2.getPerspectiveTransform(quad, target)
     plate = cv2.warpPerspective(image, matrix, cfg.size_7)
     color = classify_color(plate)
+    if color == 'white' and cand.color == 'unknown':
+        evidence = _quad_glyph_evidence(plate)
+        repeated_text = (evidence['glyph_count'] >= 5
+                         and evidence['edge_touch_count'] <= max(1, evidence['glyph_count']//4)
+                         and evidence['gap_cv'] <= .8
+                         and evidence['coverage'] >= .45)
+        if not repeated_text:
+            color = 'unknown'
     layout = 8 if color == 'green' else (7 if color in ('blue', 'yellow') else 0)
     if layout == 8:
         width, height = cfg.size_8
