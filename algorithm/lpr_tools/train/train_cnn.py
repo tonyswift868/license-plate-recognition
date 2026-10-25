@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from lpr.charset import DIGIT_IDX, LETTER_IDX, NUM_CLASSES, PROVINCE_IDX
+from lpr.charset import CHARSET, CHAR_TO_INDEX, DIGIT_IDX, LETTER_IDX, NUM_CLASSES, PROVINCE_IDX
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.cnn_model import CharCNN
 from .augment import augment_char
@@ -54,8 +54,9 @@ def _as_sources(data, data_weights=None):
     return sources, weights
 
 
-def _load_sources(sources, weights, split, *, seed, require_all):
+def _load_sources(sources, weights, split, *, seed, require_all, class_boosts=None):
     imgs, labs, sample_weights = [], [], []
+    class_boosts = class_boosts or {}
     for source_id, (root, source_weight) in enumerate(zip(sources, weights)):
         images, labels = load_split(root, split, seed=seed + source_id, require_all=False)
         if not len(labels):
@@ -64,9 +65,11 @@ def _load_sources(sources, weights, split, *, seed, require_all):
             raise ValueError(f"no {split} samples found in {root}")
         imgs.append(images)
         labs.append(labels)
-        # The weight controls the source's total sampling probability, then samples
-        # are uniform within that source. Normalize below in WeightedRandomSampler.
-        sample_weights.extend([source_weight / len(labels)] * len(labels))
+        # Keep each source's configured total probability fixed while emphasizing
+        # selected true labels within that source.
+        per_sample = np.asarray([class_boosts.get(int(label), 1.0) for label in labels], dtype=np.double)
+        per_sample *= source_weight / per_sample.sum()
+        sample_weights.extend(per_sample.tolist())
     if not imgs:
         raise ValueError("combined val data contains no samples")
     images, labels = np.concatenate(imgs), np.concatenate(labs)
@@ -117,6 +120,7 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
           batch_size: int = 256, lr: float = 1e-3, seed: int = 42,
           num_workers: int = 0, weight_decay: float = 1e-4,
           log_path: Path | None = None, data_weights=None,
+          class_boosts=None,
           resume: Path | None = None, checkpoint_path: Path | None = None,
           max_epochs_this_run: int | None = None) -> list[dict]:
     if (epochs < 1 or batch_size < 1 or not np.isfinite(lr) or lr <= 0
@@ -124,15 +128,21 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
             or num_workers not in (0, 1, 2)):
         raise ValueError("epochs/batch_size/lr must be positive; num_workers must be 0..2")
     sources, weights_by_source = _as_sources(data, data_weights)
+    class_boosts = {} if class_boosts is None else {int(k): float(v) for k, v in class_boosts.items()}
+    if any(k < 0 or k >= NUM_CLASSES or not np.isfinite(v) or v <= 0
+           for k, v in class_boosts.items()):
+        raise ValueError("class_boosts must map valid class indices to positive finite factors")
     # epochs means the desired total epoch count, including epochs already in checkpoint.
     config = {"epochs": epochs, "batch_size": batch_size, "lr": lr,
               "weight_decay": weight_decay, "seed": seed, "num_workers": num_workers,
-              "data_weights": weights_by_source}
+              "data_weights": weights_by_source,
+              "class_boosts": {str(k): class_boosts[k] for k in sorted(class_boosts)}}
     signature = _data_signature(sources)
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     torch.set_num_threads(2); torch.use_deterministic_algorithms(True); cv2.setNumThreads(1)
     train_images, train_labels, sampling_weights = _load_sources(
-        sources, weights_by_source, "train", seed=seed, require_all=True)
+        sources, weights_by_source, "train", seed=seed, require_all=True,
+        class_boosts=class_boosts)
     val_images, val_labels, _ = _load_sources(sources, weights_by_source, "val", seed=seed, require_all=False)
     train_data = CharacterDataset(train_images, train_labels, seed=seed, augment=True)
     val_data = CharacterDataset(val_images, val_labels, seed=seed, augment=False)
@@ -170,7 +180,11 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         state = torch.load(Path(resume), map_location="cpu", weights_only=True)
         if state.get("format") != 2 or state.get("data_signature") != signature:
             raise ValueError("checkpoint format or training data directories are incompatible")
-        if state["config"] != config:
+        saved_config = dict(state["config"])
+        # Checkpoints created before class-aware sampling implicitly used no
+        # class boosts, so keep those resumable when the current run also uses none.
+        saved_config.setdefault("class_boosts", {})
+        if saved_config != config:
             raise ValueError("checkpoint hyperparameters/sampling weights are incompatible")
         first_epoch = int(state["epoch"])
         if epochs < first_epoch:
@@ -271,13 +285,17 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     if best_model is None:
         raise ValueError("training checkpoint has no best-validation model")
     torch.save(best_model, out)
-    source_manifest = json.dumps([{"path": str(p), "weight": w} for p, w in zip(sources, weights_by_source)],
+    source_manifest = json.dumps([{"path": str(p), "weight": w,
+                                   "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()}}
+                                  for p, w in zip(sources, weights_by_source)],
                                  ensure_ascii=False)
     write_manifest_entry(out, version=version, train_data=source_manifest, val_char_acc=best_accuracy)
     sidecar_path.write_text(
         json.dumps({"train_seconds": elapsed_total, "best_epoch": best_epoch,
                     "val_char_acc": best_accuracy, "val_province_acc": best_province_accuracy,
-                    "val_alnum_acc": best_alnum_accuracy}, indent=2) + "\n", encoding="utf-8")
+                    "val_alnum_acc": best_alnum_accuracy,
+                    "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()}},
+        indent=2) + "\n", encoding="utf-8")
     print(f"saved={out.as_posix()} version={version} log={log_path.as_posix()} "
           f"best={best_path.as_posix()} best_epoch={best_epoch} "
           f"checkpoint={checkpoint_path.as_posix()} train_seconds={elapsed_total:.3f}")
@@ -290,6 +308,8 @@ def main() -> None:
                         help="training data root; repeat for mixed sources")
     parser.add_argument("--data-weight", type=float, action="append",
                         help="source sampling weight, one per --data (default 1 each)")
+    parser.add_argument("--class-boost", action="append", default=[], metavar="CHAR=FACTOR",
+                        help="multiply within-source sampling for this true class; repeatable")
     parser.add_argument("--epochs", type=int, default=15, help="target total epochs, including resumed epochs")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -304,9 +324,23 @@ def main() -> None:
     parser.add_argument("--stop-after", type=int,
                         help="optional maximum epochs in this invocation; checkpoints at epoch boundaries")
     args = parser.parse_args()
+    class_boosts = {}
+    for item in args.class_boost:
+        try:
+            char, raw_factor = item.rsplit("=", 1)
+            label = CHAR_TO_INDEX[char]
+            factor = float(raw_factor)
+        except (ValueError, KeyError) as exc:
+            parser.error(f"invalid --class-boost {item!r}; expected one known character=positive factor")
+        if not np.isfinite(factor) or factor <= 0:
+            parser.error(f"invalid --class-boost {item!r}; factor must be positive and finite")
+        if label in class_boosts:
+            parser.error(f"duplicate --class-boost for {char!r}")
+        class_boosts[label] = factor
     train(args.data, args.out, version=args.version, epochs=args.epochs,
           batch_size=args.batch_size, lr=args.lr, seed=args.seed, num_workers=args.num_workers,
           weight_decay=args.weight_decay, log_path=args.log, data_weights=args.data_weight,
+          class_boosts=class_boosts,
           resume=args.resume, checkpoint_path=args.checkpoint, max_epochs_this_run=args.stop_after)
 
 

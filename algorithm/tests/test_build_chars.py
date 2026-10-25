@@ -450,3 +450,59 @@ def test_exclude_golden_manifest_blocks_renamed_byte_identical_copy(tmp_path):
     with pytest.raises(ValueError, match="image content matches exclude manifest"):
         build_chars(index, raw, out, exclude_golden=manifest, skip_invalid=True)
     assert not out.exists()
+
+
+def test_segment_can_add_only_located_candidates_meeting_gt_iou(tmp_path, monkeypatch):
+    import lpr_tools.train.build_chars as builder
+    from lpr.types import PlateCandidate, RectifiedPlate
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    source = raw / "scene.png"
+    _image(source)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(source, bbox="50 0 100 80")])
+    accepted = PlateCandidate([(25., 0.), (149., 0.), (149., 79.), (25., 79.)],
+                              (25, 0, 125, 80), "blue", .9, "edge")
+    rejected = PlateCandidate([(200., 0.), (251., 0.), (251., 79.), (200., 79.)],
+                              (200, 0, 52, 80), "blue", .8, "color")
+    monkeypatch.setattr(builder, "preprocess", lambda image, *_args: object())
+    monkeypatch.setattr(builder, "locate", lambda *_args: [accepted, rejected])
+
+    def fake_rectify(image, candidate, _config):
+        return RectifiedPlate(image.copy(), 7, "blue", np.eye(3), candidate)
+
+    monkeypatch.setattr(builder, "_rectifications", lambda image, candidate, config:
+                        [fake_rectify(image, candidate, config)])
+    segmented_candidates = []
+
+    def fake_segment(rect, layout, _config):
+        segmented_candidates.append(rect.candidate.source)
+        assert layout == 7
+        chars = np.stack([np.full((32, 32), 20+i, np.uint8) for i in range(7)])
+        return SegmentResult(True, layout, [], chars, 1.)
+
+    monkeypatch.setattr(builder, "segment_plate", fake_segment)
+    out = tmp_path / "chars"
+    counts = builder.build_chars(index, raw, out, source="segment",
+                                 include_located_iou=.5, max_per_class=12)
+    rows = list(csv.DictReader((out / "chars_index.csv").open(encoding="utf-8")))
+    assert segmented_candidates == ["oracle", "edge"]
+    assert {row["source_variant"] for row in rows} == {"gt", "located"}
+    assert {row["source_path"] for row in rows} == {str(source.resolve())}
+    located_rows = [row for row in rows if row["source_variant"] == "located"]
+    assert {row["candidate_index"] for row in located_rows} == {"0"}
+    assert {row["rectification_index"] for row in located_rows} == {"0"}
+    assert all(float(row["candidate_iou"]) >= .5 for row in located_rows)
+    assert sum(counts.values()) == 14
+    assert len({row["path"] for row in rows}) == len(rows)
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["located_candidates_seen"] == 2
+    assert stats["located_candidates_iou"] == 1
+    assert stats["segment_attempted_by_variant"] == {"gt": 1, "located": 1}
+    assert stats["variant_max_per_class"] == {"gt": 8, "located": 4}
+    assert stats["build"]["preprocess_code_sha256"]
+    assert stats["build"]["locate_code_sha256"]
+    assert stats["build"]["rectify_code_sha256"]
+    assert stats["build"]["pipeline_code_sha256"]
+    assert stats["build"]["build_git_commit"]

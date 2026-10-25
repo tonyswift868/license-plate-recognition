@@ -36,6 +36,68 @@ def test_mixed_data_directory_sampling_and_partial_classes(tmp_path):
     assert weights[:first_source_count].sum() / weights.sum() == pytest.approx(0.75)
 
 
+def test_class_sampling_boost_preserves_source_mix(tmp_path):
+    from lpr.charset import index_of
+
+    primary, supplement = tmp_path / "primary", tmp_path / "supplement"
+    generate_dataset(primary, per_class=2, seed=31)
+    generate_dataset(supplement, per_class=2, seed=32)
+    images, labels, weights = _load_sources(
+        [primary, supplement], [3, 1], "train", seed=5, require_all=True,
+        class_boosts={index_of("0"): 2.0},
+    )
+    assert len(images) == len(labels) == len(weights)
+    primary_count = len(labels) // 2
+    assert weights[:primary_count].sum() == pytest.approx(3.0)
+    assert weights[primary_count:].sum() == pytest.approx(1.0)
+    # Dataset order is charset order, with one training sample per class here.
+    digit_zero, digit_one = 31, 32
+    assert weights[digit_zero] / weights[digit_one] == pytest.approx(2.0)
+
+
+def test_resume_rejects_changed_class_sampling_boost(tmp_path):
+    from lpr.charset import index_of
+
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=41)
+    checkpoint = tmp_path / "model.checkpoint.pt"
+    out = tmp_path / "model.pt"
+    train_cnn(data, out, version="v", epochs=1, batch_size=130,
+              checkpoint_path=checkpoint, class_boosts={index_of("0"): 2.0})
+    with pytest.raises(ValueError, match="hyperparameters"):
+        train_cnn(data, out, version="v", epochs=1, batch_size=130,
+                  checkpoint_path=checkpoint, resume=checkpoint,
+                  class_boosts={index_of("0"): 3.0})
+
+
+def test_resume_accepts_pre_boost_checkpoint_without_boosts(tmp_path):
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=42)
+    checkpoint = tmp_path / "model.checkpoint.pt"
+    out = tmp_path / "model.pt"
+    train_cnn(data, out, version="v", epochs=2, batch_size=130,
+              checkpoint_path=checkpoint, max_epochs_this_run=1)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    state["config"].pop("class_boosts")
+    torch.save(state, checkpoint)
+    history = train_cnn(data, out, version="v", epochs=2, batch_size=130,
+                        checkpoint_path=checkpoint, resume=checkpoint)
+    assert [row["epoch"] for row in history] == [2]
+
+
+@pytest.mark.parametrize("boosts", [["0=0"], ["皖=nan"], ["?=2"], ["0=2", "0=3"]])
+def test_class_boost_cli_rejects_invalid_or_duplicate_values(monkeypatch, boosts):
+    from lpr_tools.train import train_cnn as module
+
+    args = ["train_cnn", "--data", "unused", "--out", "unused.pt", "--version", "v"]
+    for value in boosts:
+        args.extend(["--class-boost", value])
+    monkeypatch.setattr("sys.argv", args)
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
+
+
 def test_parallel_reader_keeps_order_across_bounded_batches(tmp_path, monkeypatch):
     paths = [tmp_path / f"{index:04d}.png" for index in range(1031)]
 
