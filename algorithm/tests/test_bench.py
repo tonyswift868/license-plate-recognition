@@ -96,8 +96,12 @@ def test_cli_sources(tmp_path,capsys,monkeypatch):
         else:
             assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
     path=tmp_path/"synth.mp4";make_video(path)
-    assert video_main(["--fake","--video",str(path)])==0
-    assert json.loads(capsys.readouterr().out)["decoded_frames"]==20
+    custom = tmp_path / "video-config.toml"
+    custom.write_text('[runtime]\ntorch_threads = 3\nmodel_path = ""\n', encoding="utf-8")
+    monkeypatch.setattr(bv, "runtime_info", lambda cfg: {"cpu": "test CPU", "torch_threads": cfg.runtime.torch_threads})
+    assert video_main(["--fake","--video",str(path),"--config",str(custom)])==0
+    video_report = json.loads(capsys.readouterr().out)
+    assert video_report["decoded_frames"] == 20 and video_report["torch_threads"] == 3
     with pytest.raises(SystemExit):latency_main(["--fake","--n","0"])
     assert latency_main(["--fake","--images",str(tmp_path/"missing")])==0
     report=json.loads(capsys.readouterr().out)

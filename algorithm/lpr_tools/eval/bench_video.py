@@ -15,7 +15,7 @@ import cv2
 
 from lpr.config import load_config
 from lpr.voting import PlateVoteSession
-from .common import add_backend_args, make_recognizer, mode_name, runtime_info
+from .common import add_backend_args, config_for_args, make_recognizer, mode_name, runtime_info
 
 
 def benchmark_video(recognizer, video, *, sample_fps=5.):
@@ -73,7 +73,7 @@ def main(argv=None):
     parser.add_argument("--sample-fps",type=float,default=5.)
     args = parser.parse_args(argv)
     try:
-        info = runtime_info()
+        info = runtime_info(config_for_args(args))
         recognizer = make_recognizer(args)
         report = benchmark_video(recognizer,args.video,sample_fps=args.sample_fps)
         report.update(info,mode=mode_name(args),model_version=recognizer.version,
