@@ -222,6 +222,11 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     monkeypatch.setattr(daily_module, "_run", fake_run)
     monkeypatch.setattr(daily_module.subprocess, "run",
                         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "source123\n", ""))
+    original_compare = daily_module._compare
+    def compare_with_identity(current, out_root):
+        assert current["effective_config"]["effective_config_sha256"]
+        return original_compare(current, out_root)
+    monkeypatch.setattr(daily_module, "_compare", compare_with_identity)
     result = daily(tmp_path / "daily", index, date="2026-10-26", commit="test123",
                    config_path=config_path)
     dest = tmp_path / "daily" / "2026-10-26-test123"
@@ -240,3 +245,11 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
             assert command[command.index("--config") + 1] == effective_path
         if "eval_accuracy" in command or "bench_latency" in command or "test_golden.py" in command or "-c" in command:
             assert child_env["LPR_CONFIG"] == effective_path
+
+
+def test_identity_comparison_does_not_treat_missing_legacy_metadata_as_unchanged():
+    assert _identity_changes({}, {"config_path": "new.toml"})["available"] is False
+    result = _identity_changes(
+        {"models": {"corner": {"path": "corner.pt", "sha256": "old"}}},
+        {"models": {"corner": {"path": "corner.pt", "sha256": "new"}}})
+    assert result["available"] and result["models"]["corner"]["changed"]

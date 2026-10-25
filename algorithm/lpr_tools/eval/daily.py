@@ -154,6 +154,9 @@ def _comparable(previous: dict, current: dict) -> bool:
 
 
 def _identity_changes(previous: dict, current: dict):
+    if not previous or not current:
+        return {"available": False, "models": {},
+                "note": "Previous or current run lacks detailed model identity metadata; do not infer unchanged weights."}
     models = {}
     for name, old_model, new_model in (
             ("classifier", previous.get("classifier_model", {}), current.get("classifier_model", {})),
@@ -164,7 +167,7 @@ def _identity_changes(previous: dict, current: dict):
         models[name] = {"changed": old_hash != new_hash or old_path != new_path,
                         "previous_path": old_path, "current_path": new_path,
                         "previous_sha256": old_hash, "current_sha256": new_hash}
-    return {"models": models,
+    return {"available": True, "models": models,
             "config_path_changed": previous.get("config_path") != current.get("config_path"),
             "config_sha256_changed": previous.get("config_sha256") != current.get("config_sha256"),
             "effective_config_changed": previous.get("effective_config_sha256") != current.get("effective_config_sha256")}
@@ -337,7 +340,8 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
                       "metric_definition": "plate positional metrics v1"}
     comparison_key["val_sampling"]["paths_sha256"] = _sha(val_out / "validation_manifest.csv")
     comparison_key["hard_sampling"]["paths_sha256"] = _sha(sample_all)
-    comparison = _compare({"comparison_key": comparison_key, "metrics": metrics}, out_root)
+    comparison = _compare({"comparison_key": comparison_key, "metrics": metrics,
+                           "effective_config": effective_config}, out_root)
     line = _scoreboard_line(date, commit, val_report, {**hard_status, "reports": hard_reports}, bench)
     error_analysis = _error_analysis(out / "val1000" / "trace.jsonl")
     summary = {"date": date, "commit": commit, "directory": str(out), "scoreboard_header": SCOREBOARD_HEADER,
@@ -441,7 +445,8 @@ def finish_g1(run_dir: Path):
                              "paths_sha256": _sha(run_dir / "dev-hard" / "all-hard-manifest.csv")},
            "metric_definition": "plate positional metrics v1"}
     out_root = run_dir.parent
-    comparison = _compare({"comparison_key": key, "metrics": metrics}, out_root)
+    comparison = _compare({"comparison_key": key, "metrics": metrics,
+                           "effective_config": marker["effective_config"]}, out_root)
     line = _scoreboard_line(marker["date"], marker["commit"], val_report,
                             {**hard_status, "reports": hard_reports}, bench)
     summary = {"date": marker["date"], "commit": marker["commit"], "directory": str(run_dir),
@@ -495,16 +500,21 @@ def _format_summary(summary):
     alert = ("\n⚠️ **检测到超过1个百分点的退步。**\n" if regressions else "")
     cfg = summary.get("effective_config", {})
     attr = summary.get("network_attribution", {})
+    def model_text(name):
+        model = cfg.get("models", {}).get(name, {})
+        return (f"{model.get('path') or 'disabled'} (SHA256 {model.get('sha256') or 'N/A'}, "
+                f"version {model.get('version') or 'N/A'})")
     return (f"# 每日 M2 评测 {summary['date']}\n\n"
             f"- commit: `{summary['commit']}`（代码来源 `{summary['source_commit']}`）\n"
             f"- 配置: `{cfg.get('config_path', 'N/A')}`；有效配置 SHA256 `{cfg.get('effective_config_sha256', 'N/A')}`；"
             f"分类器 `{cfg.get('classifier', 'N/A')}`；分类器模型 `{cfg.get('classifier_model', {}).get('path', 'N/A')}`"
             f" SHA256 `{cfg.get('classifier_model', {}).get('sha256', 'N/A')}`\n"
+            f"- 网络权重: corner {model_text('corner')}；plate reader {model_text('plate_reader')}\n"
             f"- 网络贡献（val + hard）：CRNN最终兜底 {attr.get('crnn_selected_count', 0)}，"
             f"准确率 {_fmt(attr.get('crnn_selected_accuracy'))}；网络候选最终选中 "
-            f"{attr.get('network_candidate_selected_count', 0)}；reader被调用图数 "
-            f"reader调用 {attr.get('reader_invoked_calls', 0)} 次/{attr.get('reader_invoked_images', 0)} 图，"
-            f"corner调用 {attr.get('corner_invoked_calls', 0)} 次/{attr.get('corner_invoked_images', 0)} 图\n"
+            f"{attr.get('network_candidate_selected_count', 0)}；reader调用 "
+            f"{attr.get('reader_invoked_calls', 0)} 次（覆盖 {attr.get('reader_invoked_images', 0)} 图），"
+            f"corner调用 {attr.get('corner_invoked_calls', 0)} 次（覆盖 {attr.get('corner_invoked_images', 0)} 图）\n"
             f"- 状态: **{summary['status']}**；golden {summary['hard_status'].get('golden_correct')}/20，"
             f"门槛 12/20；hard 子集完成 {len(summary['hard_completed'])}/7\n"
             f"- G1: P95 {summary['g1'].get('wall_time', {}).get('p95_ms', float('nan')):.1f} ms；"
@@ -526,6 +536,8 @@ def _format_comparison(comparison):
              f"有效配置变化：{'是' if comparison.get('effective_config_changed') else '否'}", "",
              "| 子集 | 指标 | 上次 | 本次 | 变化 | 标记 |", "| --- | --- | ---: | ---: | ---: | --- |"]
     changes = comparison.get("identity_changes", {})
+    if changes.get("note"):
+        lines.insert(2, changes["note"])
     for name, info in changes.get("models", {}).items():
         if info["changed"]:
             lines.insert(2, (f"模型 `{name}` 变化：`{info.get('previous_path')}` "
