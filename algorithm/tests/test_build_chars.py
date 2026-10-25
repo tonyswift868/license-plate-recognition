@@ -506,3 +506,157 @@ def test_segment_can_add_only_located_candidates_meeting_gt_iou(tmp_path, monkey
     assert stats["build"]["rectify_code_sha256"]
     assert stats["build"]["pipeline_code_sha256"]
     assert stats["build"]["build_git_commit"]
+
+
+def test_locate_failure_checkpoint_resumes_closed_prefix_without_overwrite(tmp_path, monkeypatch):
+    import hashlib
+    import lpr_tools.train.build_chars as builder
+    from lpr.config import DEFAULT_CONFIG_PATH, load_config
+    from lpr.types import PlateCandidate, RectifiedPlate
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    first, second = raw / "first.png", raw / "second.png"
+    _image(first, value=10)
+    _image(second, value=20)
+    index = tmp_path / "index.csv"
+    _write_index(index, [_row(first), _row(second)])
+    candidate = PlateCandidate([(0., 0.), (251., 0.), (251., 79.), (0., 79.)],
+                               (0, 0, 252, 80), "blue", .9, "edge")
+    monkeypatch.setattr(builder, "_rectifications", lambda image, cand, _cfg:
+                        [RectifiedPlate(image.copy(), 7, "blue", np.eye(3), cand)])
+    monkeypatch.setattr(builder, "segment_plate", lambda _rect, layout, _cfg: SegmentResult(
+        True, layout, [], np.stack([np.full((32, 32), 40+i, np.uint8) for i in range(7)]), 1.))
+    calls = 0
+
+    def fail_before_second_source_write(image, _config):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SystemError("simulated Sobel allocation failure") from MemoryError("pressure")
+        return object(), [candidate]
+
+    monkeypatch.setattr(builder, "_locate_with_memory_retry", fail_before_second_source_write)
+    out = tmp_path / "v2"
+    kwargs = dict(source="segment", include_located_iou=.5, max_per_class=12,
+                  skip_invalid=True, workers=1)
+    with pytest.raises(SystemError, match="allocation failure"):
+        builder.build_chars(index, raw, out, **kwargs)
+    csv_path = out / "chars_index.csv"
+    original_csv_sha = builder._hash_file(csv_path)
+    original_rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+    assert {row["source_path"] for row in original_rows} == {str(first.resolve())}
+
+    config = load_config()
+    metadata = builder._build_metadata("segment", config, DEFAULT_CONFIG_PATH, .5)
+    origin_code_sha = builder._git_file_sha256(
+        metadata["build_git_commit"], "algorithm/lpr_tools/train/build_chars.py",
+        Path(builder.__file__).resolve().parents[3])
+    metadata["build_chars_sha256"] = origin_code_sha
+    fingerprints = {key: metadata[key] for key in (
+        "config_sha256", "default_config_sha256", "effective_config_sha256",
+        "segment_code_sha256", "charnorm_code_sha256", "segment_git_commit",
+        "segment_git_blob", "preprocess_code_sha256", "locate_code_sha256",
+        "rectify_code_sha256", "pipeline_code_sha256")}
+    checkpoint = {
+        "schema_version": 1,
+        "attestation": "locate_failure_before_current_source_write",
+        "origin_head": metadata["build_git_commit"],
+        "origin_build_chars_sha256": origin_code_sha,
+        "partial_output_dir": str(out.resolve()),
+        "chars_index_sha256": original_csv_sha,
+        "chars_index_bytes": csv_path.stat().st_size,
+        "chars_index_data_rows": len(original_rows),
+        "last_source_path": str(first.resolve()),
+        "last_source_completed": True,
+        "index_sha256": builder._hash_file(index.resolve()),
+        "exclude_manifest_sha256": None,
+        "golden_manifest_sha256": None,
+        "build_args": {"source": "segment", "include_located_iou": .5,
+                        "max_per_class": 12, "skip_invalid": True, "workers": 1},
+        "runtime_fingerprints": fingerprints,
+        "origin_build_metadata": metadata,
+        "prior_counters_unknown": True,
+    }
+    checkpoint_path = tmp_path / "resume-origin.json"
+
+    # Unknown attestations and changed prefixes must fail before append mode opens.
+    checkpoint["attestation"] = "unsupported"
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    with pytest.raises(ValueError, match="supported locate-before-write attestation"):
+        builder.build_chars(index, raw, out, resume_origin=checkpoint_path, **kwargs)
+    assert builder._hash_file(csv_path) == original_csv_sha
+    checkpoint["attestation"] = "locate_failure_before_current_source_write"
+    checkpoint["chars_index_sha256"] = "0" * 64
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA-256 changed"):
+        builder.build_chars(index, raw, out, resume_origin=checkpoint_path, **kwargs)
+    assert builder._hash_file(csv_path) == original_csv_sha
+
+    checkpoint["chars_index_sha256"] = original_csv_sha
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    monkeypatch.setattr(builder, "_locate_with_memory_retry", lambda image, _config: (object(), [candidate]))
+    counts = builder.build_chars(index, raw, out, resume_origin=checkpoint_path, **kwargs)
+    rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+    assert sum(counts.values()) == 28
+    assert len(rows) == 28 and len({row["path"] for row in rows}) == 28
+    assert {row["source_path"] for row in rows} == {str(first.resolve()), str(second.resolve())}
+    assert sum(row["source_path"] == str(first.resolve()) for row in rows) == len(original_rows)
+    stats = json.loads((out / "chars_stats.json").read_text(encoding="utf-8"))
+    assert stats["counter_scope"] == "resumed_phase_only"
+    assert stats["prior_counters_unknown"] is True
+    assert stats["resume_after_source_no"] == 1
+    assert stats["total"] == 28
+
+
+def test_locate_memory_retry_retries_only_memory_failures_and_is_bounded(monkeypatch):
+    from types import SimpleNamespace
+    import lpr_tools.train.build_chars as builder
+
+    config = SimpleNamespace(preprocess=object(), locate=object(),
+                              runtime=SimpleNamespace(max_candidates=3),
+                              lane_roi=lambda _lane: None)
+    preprocessed = object()
+    preprocess_calls = []
+    monkeypatch.setattr(builder, "preprocess",
+                        lambda image, _cfg, _roi: preprocess_calls.append(image) or preprocessed)
+    sleeps = []
+    monkeypatch.setattr(builder.time, "sleep", sleeps.append)
+
+    transient_calls = []
+
+    def transient_memory(_pre, _cfg, _max):
+        transient_calls.append(1)
+        if len(transient_calls) == 1:
+            raise MemoryError("transient")
+        return []
+
+    monkeypatch.setattr(builder, "locate", transient_memory)
+    assert builder._locate_with_memory_retry("image", config) == (preprocessed, [])
+    assert len(preprocess_calls) == len(transient_calls) == 2
+    assert sleeps == [1.0]
+
+    sleeps.clear()
+    ordinary_calls = []
+
+    def ordinary_system_error(*_args):
+        ordinary_calls.append(1)
+        raise SystemError("unrelated defect")
+
+    monkeypatch.setattr(builder, "locate", ordinary_system_error)
+    with pytest.raises(SystemError, match="unrelated defect"):
+        builder._locate_with_memory_retry("image", config)
+    assert len(ordinary_calls) == 1
+    assert sleeps == []
+
+    persistent_calls = []
+
+    def persistent_memory(*_args):
+        persistent_calls.append(1)
+        raise MemoryError("still unavailable")
+
+    monkeypatch.setattr(builder, "locate", persistent_memory)
+    with pytest.raises(MemoryError, match="still unavailable"):
+        builder._locate_with_memory_retry("image", config)
+    assert len(persistent_calls) == 3
+    assert sleeps == [1.0, 2.0]
