@@ -3,16 +3,17 @@ import numpy as np
 import pytest
 
 from lpr.errors import BadInputError
-from lpr.locate import locate
+from lpr.locate import locate, order_points
 from lpr.preprocess import preprocess
-from lpr.rectify import classify_color, rectify
+from lpr.rectify import (_quad_glyph_evidence, _quad_iou, _quad_pixel_quality,
+                         _quad_rank_score, classify_color, refine_quad, rectify)
 from lpr.types import PlateCandidate
 from lpr_tools.synth_scenes import make_scene
 from .test_locate import truth_bbox
 from lpr.locate import box_iou
 
 
-@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 8])
+@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 7, 8])
 def test_rectify_scene_original_homography(cfg, index):
     image, row = make_scene(index)
     cs = locate(preprocess(image, cfg.preprocess), cfg.locate)
@@ -55,3 +56,94 @@ def test_rectify_invalid_quad_and_outside(cfg):
     ((110, 210, 100), 'green'), ((230, 230, 230), 'white'), ((80, 80, 80), 'unknown')])
 def test_rectify_color_vote(bgr, color):
     assert classify_color(np.full((80, 252, 3), bgr, np.uint8)) == color
+
+
+@pytest.mark.parametrize('bgr', [((27, 10, 2)), ((5, 25, 10))])
+def test_rectify_color_vote_keeps_underexposed_chromatic_plates_uncertain(bgr):
+    """Hue is not strong enough at very low value to claim a plate layout."""
+    assert classify_color(np.full((80, 252, 3), bgr, np.uint8)) == 'unknown'
+
+
+@pytest.mark.parametrize('left,right', [((180, 65, 15), (110, 210, 100)),
+                                        ((20, 205, 235), (110, 210, 100))])
+def test_rectify_color_vote_preserves_uncertainty_on_competing_hues(left, right):
+    plate = np.empty((80, 252, 3), np.uint8)
+    plate[:, :126] = left
+    plate[:, 126:] = right
+    assert classify_color(plate) == 'unknown'
+
+
+def test_refine_quad_rejects_contour_that_expands_candidate_substantially():
+    image = np.zeros((120, 240, 3), np.uint8)
+    blue = (180, 65, 15)
+    # A nearby body-colored patch overlaps the candidate but is larger than the
+    # plate proposal, so its contour must not replace the candidate geometry.
+    cv2.rectangle(image, (65, 39), (170, 71), blue, -1)
+    corners = [(70, 40), (170, 40), (170, 70), (70, 70)]
+    candidate = PlateCandidate(corners, (70, 40, 100, 30), 'blue', .8, 'color')
+    refined = refine_quad(image, candidate, .10)
+    fallback = order_points(cv2.boxPoints(cv2.minAreaRect(np.float32(corners))))
+    assert _quad_iou(fallback, refined) >= .90
+    assert np.allclose(refined, fallback)
+
+
+def test_quad_pixel_quality_penalizes_glyph_components_touching_crop_edge():
+    edge = np.full((80, 252, 3), (180, 65, 15), np.uint8)
+    inset = edge.copy()
+    for x in range(18, 230, 31):
+        cv2.rectangle(edge, (x, 0), (x+9, 48), (245, 245, 245), -1)
+        cv2.rectangle(inset, (x, 10), (x+9, 58), (245, 245, 245), -1)
+
+    assert _quad_glyph_evidence(edge)['edge_touch_count'] == 7
+    assert _quad_glyph_evidence(inset)['edge_touch_count'] == 0
+    assert _quad_pixel_quality(inset, 7) > _quad_pixel_quality(edge, 7)
+
+
+def test_quad_pixel_quality_does_not_reward_textless_body_color_block():
+    textless = np.full((80, 252, 3), (180, 65, 15), np.uint8)
+    plate_like = textless.copy()
+    for x in range(18, 230, 31):
+        cv2.rectangle(plate_like, (x, 12), (x+9, 60), (245, 245, 245), -1)
+
+    assert _quad_pixel_quality(textless, 7) < _quad_pixel_quality(plate_like, 7)
+    # With equal pixel evidence, a remote body contour loses to the current
+    # geometric proposal instead of taking over solely through its color area.
+    assert _quad_rank_score(0., .70) < _quad_rank_score(0., 1.)
+
+
+def test_quad_edge_evidence_uses_plate_boundary_not_central_window():
+    plate = np.full((80, 252, 3), (180, 65, 15), np.uint8)
+    for x in range(18, 230, 31):
+        cv2.rectangle(plate, (x, 4), (x+9, 70), (245, 245, 245), -1)
+    # These glyphs cross the central measurement window at y=8, but all their
+    # strokes remain inside the real plate image.
+    evidence = _quad_glyph_evidence(plate)
+    assert evidence['glyph_count'] == 7
+    assert evidence['edge_touch_count'] == 0
+
+
+def test_unknown_neutral_body_texture_is_not_accepted_as_white_plate(cfg):
+    image = np.full((160, 320, 3), (225, 225, 225), np.uint8)
+    # Two plate-sized fragments touch opposite crop edges, as in the audited
+    # vehicle-texture false-white case; they do not form a repeated text row.
+    cv2.rectangle(image, (60, 40), (82, 70), (35, 35, 35), -1)
+    cv2.rectangle(image, (250, 90), (272, 119), (35, 35, 35), -1)
+    candidate = PlateCandidate([(40, 40), (280, 40), (280, 120), (40, 120)],
+                               (40, 40, 240, 80), 'unknown', .8, 'edge')
+    result = rectify(image, candidate, cfg.rectify)
+
+    assert classify_color(result.image) == 'white'
+    assert result.color == 'unknown' and result.layout == 0
+
+
+def test_unknown_candidate_with_repeated_glyphs_remains_white(cfg):
+    image = np.full((160, 320, 3), (230, 230, 230), np.uint8)
+    for x in range(58, 255, 31):
+        cv2.rectangle(image, (x, 54), (x+9, 108), (25, 25, 25), -1)
+    candidate = PlateCandidate([(40, 40), (280, 40), (280, 120), (40, 120)],
+                               (40, 40, 240, 80), 'unknown', .8, 'edge')
+    result = rectify(image, candidate, cfg.rectify)
+
+    evidence = _quad_glyph_evidence(result.image)
+    assert evidence['glyph_count'] >= 5
+    assert result.color == 'white' and result.layout == 0

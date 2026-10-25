@@ -29,6 +29,15 @@ def _threshold(gray: np.ndarray, cfg: SegmentConfig) -> np.ndarray:
     return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
 
 
+def _glyph_like_border_component(x: int, y: int, cw: int, ch: int, area: int,
+                                 width: int, height: int) -> bool:
+    """Keep a large character-shaped CC that merely touches a clipped plate edge."""
+    fill = area / max(1, cw*ch)
+    return (ch >= .38*height and .025*width <= cw <= .18*width
+            and area >= .002*width*height and .12 <= cw/max(1, ch) <= 1.25
+            and .10*height <= y+ch and y <= .90*height and .08 <= fill <= .95)
+
+
 def binary_plate(rect: RectifiedPlate, cfg: SegmentConfig) -> tuple[np.ndarray, np.ndarray]:
     """Return unified grayscale and cleaned binary; shared by segmentation and viz."""
     gray = _unified_gray(rect)
@@ -47,7 +56,10 @@ def binary_plate(rect: RectifiedPlate, cfg: SegmentConfig) -> tuple[np.ndarray, 
         binary[:max(0, active[0]-1)] = 0
         binary[min(h, active[-1]+2):] = 0
     for i in range(1, n):
-        if i in border_ids or stats[i, cv2.CC_STAT_AREA] < .002*w*h:
+        x, y, cw, ch, area = stats[i]
+        clipped_glyph = i in border_ids and _glyph_like_border_component(
+            int(x), int(y), int(cw), int(ch), int(area), w, h)
+        if (i in border_ids and not clipped_glyph) or area < .002*w*h:
             binary[labels == i] = 0
     return gray, binary
 
@@ -114,7 +126,10 @@ def _fallback_binary_from_gray(gray: np.ndarray, cfg: SegmentConfig) -> np.ndarr
         x, y, cw, ch, area = stats[i]
         outside_text_rivet = (area < .012*w*h and ch < .16*h
                               and (y+ch <= .18*h or y >= .82*h))
-        if i in border_ids or area < .002*w*h or outside_text_rivet:
+        clipped_glyph = i in border_ids and _glyph_like_border_component(
+            int(x), int(y), int(cw), int(ch), int(area), w, h)
+        if ((i in border_ids and not clipped_glyph) or area < .002*w*h
+                or outside_text_rivet):
             binary[labels == i] = 0
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
     for i in range(1, n):
@@ -135,13 +150,20 @@ def fallback_binary_plate(rect: RectifiedPlate, cfg: SegmentConfig) -> tuple[np.
 
 
 def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
-                   *, projection_valleys: bool = False) -> list[tuple[int, int]]:
+                   *, projection_valleys: bool = False,
+                   valley_search_rel: float = .06,
+                   expanded_fit: bool = False,
+                   return_fit: bool = False):
     h, w = binary.shape
     projection = np.count_nonzero(binary, axis=0)
     prefix = np.r_[0, projection.cumsum()]
     relative = np.asarray(centers)-.5
-    scales = np.linspace(.90, 1.08, 10)
-    offsets = np.arange(-round(.06*w), round(.06*w)+1, 2, dtype=np.int32)
+    if expanded_fit:
+        scales = np.linspace(.75, 1.25, 21)
+        offsets = np.arange(-round(.12*w), round(.12*w)+1, 2, dtype=np.int32)
+    else:
+        scales = np.linspace(.90, 1.08, 10)
+        offsets = np.arange(-round(.06*w), round(.06*w)+1, 2, dtype=np.int32)
     # Preserve the former scale-major/offset-minor search order so np.argmax's
     # first-tie rule returns exactly the same slots as the scalar implementation.
     trial_scales = np.repeat(scales, len(offsets))
@@ -152,8 +174,8 @@ def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
     right = np.clip(np.ceil(xs+radius).astype(int), 0, w)
     # No column may be counted by two slots during alignment.
     midpoints = np.round((xs[:, :-1]+xs[:, 1:])/2).astype(int)
-    right[:, :-1] = np.minimum(right[:, :-1], midpoints)
-    left[:, 1:] = np.maximum(left[:, 1:], midpoints)
+    right[:, :-1] = np.clip(np.minimum(right[:, :-1], midpoints), 0, w)
+    left[:, 1:] = np.clip(np.maximum(left[:, 1:], midpoints), 0, w)
     amounts = prefix[right]-prefix[left]
     total = amounts.sum(axis=1)
     boundary_ink = (projection[np.minimum(left, w-1)]+
@@ -162,6 +184,9 @@ def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
               - .05*np.abs(trial_offsets)*h - .02*np.abs(trial_scales-1)*w*h)
     best = int(np.argmax(scores))
     slots = list(zip(left[best].tolist(), right[best].tolist()))
+    fit = (float(trial_scales[best]), int(trial_offsets[best]))
+    if return_fit:
+        return slots, fit[0], fit[1], round(w*.06)
     if not projection_valleys or len(slots) < 2:
         return slots
 
@@ -172,7 +197,16 @@ def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
     adjusted = list(slots)
     for i in range(len(adjusted)-1):
         midpoint = round((adjusted[i][1]+adjusted[i+1][0])/2)
-        radius_px = max(1, round(.025*w))
+        # When a fitted cut lands on visible character ink, search farther for
+        # the actual inter-character gap. The CCPD oracle examples show a
+        # misplaced prior cut can bisect a glyph by 10-15 px; keep the narrow
+        # window whenever the fitted boundary already lies in a clean valley.
+        center_midpoint = center_projection = None
+        band_y0, band_y1 = round(.20*h), round(.80*h)
+        center_projection = np.count_nonzero(binary[band_y0:band_y1], axis=0)
+        center_midpoint = int(center_projection[midpoint])
+        radius_rel = valley_search_rel if center_midpoint > 2 else .025
+        radius_px = max(1, round(radius_rel*w))
         lo, hi = max(1, midpoint-radius_px), min(w-1, midpoint+radius_px+1)
         values = projection[lo:hi]
         if not len(values):
@@ -180,8 +214,6 @@ def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
         # Only move into a convincing valley inside the character band. A
         # uniformly inked green plate gap can contain genuine strokes, so the
         # full-height minimum alone is insufficient evidence for a safe cut.
-        y0, y1 = round(.20*h), round(.80*h)
-        center_projection = np.count_nonzero(binary[y0:y1], axis=0)
         center_values = center_projection[lo:hi]
         minimum = values.min()
         center_minimum = center_values.min()
@@ -213,16 +245,55 @@ def _crossing_edge_ink(binary: np.ndarray, y0: int, y1: int,
     return int(left_ink + right_ink)
 
 
+def _fit_slots_to_text_extent(binary: np.ndarray, centers: list[float], char_w: float):
+    """Estimate a bounded global slot scale/offset from the central text band."""
+    h, w = binary.shape
+    y0, y1 = round(.20*h), round(.80*h)
+    projection = np.count_nonzero(binary[y0:y1], axis=0)
+    active = np.flatnonzero(projection >= max(3, round(.06*(y1-y0))))
+    if len(active) < max(4, len(centers)*2):
+        return None
+    expected_left = (centers[0] - char_w/2)*w
+    expected_right = (centers[-1] + char_w/2)*w
+    expected_span = max(1., expected_right-expected_left)
+    actual_span = float(active[-1]-active[0]+1)
+    span_ratio = actual_span/expected_span
+    expected_mid = (expected_left+expected_right)/2
+    actual_mid = (active[0]+active[-1])/2
+    offset = abs(actual_mid-expected_mid)/w
+    if not (span_ratio < .88 or span_ratio > 1.12 or offset > .035):
+        return None
+    if not .75 <= span_ratio <= 1.25 or offset > .12:
+        return None
+    fitted_centers = [0.5+(float(center)-0.5)*span_ratio+(actual_mid-expected_mid)/w
+                      for center in centers]
+    fitted_char_w = char_w*span_ratio
+    if (not np.isfinite(fitted_centers).all() or not .015 <= fitted_char_w <= .25
+            or any(not .015 < center < .985 for center in fitted_centers)):
+        return None
+    return fitted_centers, fitted_char_w, span_ratio, (actual_mid-expected_mid)/w
+
+
+def _alignment_search_saturated(binary: np.ndarray, centers: list[float], char_w: float) -> bool:
+    """Permit a larger search only when the nominal ink objective hits a bound."""
+    _, scale, offset, max_offset = _aligned_slots(binary, centers, char_w, return_fit=True)
+    return scale <= .900001 or scale >= 1.079999 or abs(offset) >= max(0, max_offset-1)
+
+
 def _segment_binary(gray: np.ndarray, binary: np.ndarray, layout: int,
                     centers: list[float], char_w: float,
-                    *, projection_valleys: bool = False) -> SegmentResult:
+                    *, projection_valleys: bool = False,
+                    expanded_fit: bool = False) -> SegmentResult:
     failure = SegmentResult(False, layout, [], np.empty((0, 32, 32), np.uint8), 0.)
     h, w = binary.shape
     total = np.count_nonzero(binary)
     if total < layout*.002*w*h:
         return failure
     boxes, chars, ink_counts = [], [], []
-    for left, right in _aligned_slots(binary, centers, char_w, projection_valleys=projection_valleys):
+    slots = _aligned_slots(binary, centers, char_w,
+                           projection_valleys=projection_valleys,
+                           expanded_fit=expanded_fit)
+    for left, right in slots:
         ys, xs = np.where(binary[:, left:right] > 0)
         if len(xs) < .002*w*h:
             return failure
@@ -240,7 +311,11 @@ def _segment_binary(gray: np.ndarray, binary: np.ndarray, layout: int,
             return failure
         boxes.append((x0, y0, cw, ch))
         try:
-            chars.append(charnorm.normalize_char(gray[y0:y1, x0:x1]))
+            # Character training uses the whole fixed slot across the plate's
+            # full height (build_chars.py). Keep that context and aspect ratio
+            # for the classifier; the tight ink box is only the reported
+            # geometry and must not redefine the CNN input crop.
+            chars.append(charnorm.normalize_char(gray[:, left:right]))
         except (ValueError, cv2.error):
             return failure
         ink_counts.append(len(xs))
@@ -287,6 +362,21 @@ def segment(rect: RectifiedPlate, layout: int, cfg: SegmentConfig) -> SegmentRes
         result = _segment_binary(gray, adaptive, layout, centers, char_w)
         if result.ok:
             return result
-        return _segment_binary(gray, adaptive, layout, centers, char_w, projection_valleys=True)
+        result = _segment_binary(gray, adaptive, layout, centers, char_w, projection_valleys=True)
+        if result.ok:
+            return result
+        # Only refit the global slot prior when the central text band clearly
+        # differs in scale or position from the nominal layout. Preserve all
+        # per-slot geometry and coverage checks after this evidence-based fit.
+        for fitted in (binary, rim_cleaned, adaptive):
+            fit = _fit_slots_to_text_extent(fitted, centers, char_w)
+            saturated = _alignment_search_saturated(fitted, centers, char_w)
+            if fit is not None or saturated:
+                fitted_centers, fitted_width = fit[:2] if fit is not None else (centers, char_w)
+                result = _segment_binary(gray, fitted, layout, fitted_centers, fitted_width,
+                                         projection_valleys=True, expanded_fit=saturated)
+                if result.ok:
+                    return result
+        return result
     except (ValueError, TypeError, AttributeError, IndexError, cv2.error, OverflowError):
         return failure
