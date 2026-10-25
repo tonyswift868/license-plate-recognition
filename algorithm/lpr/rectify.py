@@ -125,6 +125,90 @@ def _quad_candidates(image: np.ndarray, cand: PlateCandidate, expand: float,
     return primary, candidates
 
 
+def _linear_percentile_sorted(values: np.ndarray, quantile: float) -> float:
+    """Match NumPy's default linear percentile for already-sorted small arrays."""
+    position = quantile*(len(values)-1)
+    lower = int(position)
+    upper = min(len(values)-1, lower+1)
+    fraction = position-lower
+    return float(values[lower] + fraction*(values[upper]-values[lower]))
+
+
+def _green_boundary_quad(image: np.ndarray, cand: PlateCandidate
+                         ) -> tuple[np.ndarray | None, dict[str, float | int | str]]:
+    """Fit a green plate's top/bottom boundaries from supported color pixels."""
+    if cand.color != 'green':
+        return None, {"reason": "candidate_color"}
+    h, w = image.shape[:2]
+    x, y, bw, bh = cand.bbox
+    x0, x1 = max(0, int(x-.18*bw)), min(w, int(x+1.18*bw))
+    y0, y1 = max(0, int(y-.18*bh)), min(h, int(y+1.18*bh))
+    if x1-x0 < 20 or y1-y0 < 12:
+        return None, {"reason": "small_roi"}
+    hsv = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    lo, hi = _COLOR_RANGES['green']
+    mask = cv2.inRange(hsv, np.uint8(lo), np.uint8(hi))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 5), np.uint8)) > 0
+    rh, rw = mask.shape
+    edges = np.linspace(0, rw, 10).astype(int)
+    top_points, bottom_points, supports = [], [], []
+    for i in range(9):
+        left, right = edges[i], edges[i+1]
+        if right-left < 2:
+            continue
+        columns = [np.flatnonzero(mask[:, col]) for col in range(left, right)]
+        valid = [ys for ys in columns if len(ys) >= .30*rh]
+        supports.append(len(valid)/max(1, right-left))
+        if len(valid) < max(2, int(.45*(right-left))):
+            continue
+        top = float(np.median([_linear_percentile_sorted(ys, .08) for ys in valid]))
+        bottom = float(np.median([_linear_percentile_sorted(ys, .92) for ys in valid]))
+        x_center = x0+(left+right-1)/2
+        top_points.append((x_center, y0+top))
+        bottom_points.append((x_center, y0+bottom))
+    if len(top_points) < 6:
+        return None, {"reason": "insufficient_bins", "bin_count": len(top_points)}
+
+    def robust_line(points: list[tuple[float, float]]) -> tuple[float, float, float]:
+        p = np.asarray(points, dtype=np.float64)
+        slopes = [(p[j, 1]-p[i, 1])/(p[j, 0]-p[i, 0])
+                  for i in range(len(p)) for j in range(i+1, len(p))
+                  if p[j, 0] != p[i, 0]]
+        slope = float(np.median(slopes))
+        intercept = float(np.median(p[:, 1]-slope*p[:, 0]))
+        inliers = np.abs(p[:, 1]-(slope*p[:, 0]+intercept)) <= max(2., .06*bh)
+        if inliers.sum() >= 6:
+            q = p[inliers]
+            slopes = [(q[j, 1]-q[i, 1])/(q[j, 0]-q[i, 0])
+                      for i in range(len(q)) for j in range(i+1, len(q))
+                      if q[j, 0] != q[i, 0]]
+            slope = float(np.median(slopes))
+            intercept = float(np.median(q[:, 1]-slope*q[:, 0]))
+            residual = np.abs(q[:, 1]-(slope*q[:, 0]+intercept))
+        else:
+            residual = np.abs(p[:, 1]-(slope*p[:, 0]+intercept))
+        return slope, intercept, float(np.median(residual))
+
+    top_m, top_b, top_residual = robust_line(top_points)
+    bottom_m, bottom_b, bottom_residual = robust_line(bottom_points)
+    if max(top_residual, bottom_residual) > .08*bh:
+        return None, {"reason": "fit_residual", "top_residual": top_residual,
+                      "bottom_residual": bottom_residual, "bin_count": len(top_points)}
+    left = max(x0, min(x0+rw-1, min(p[0] for p in top_points+bottom_points)))
+    right = max(left+1, min(x0+rw-1, max(p[0] for p in top_points+bottom_points)))
+    quad = np.float32([[left, top_m*left+top_b], [right, top_m*right+top_b],
+                       [right, bottom_m*right+bottom_b], [left, bottom_m*left+bottom_b]])
+    area = abs(cv2.contourArea(quad))
+    expected = abs(cv2.contourArea(np.float32(cand.corners)))
+    if (not cv2.isContourConvex(quad) or not .40*expected <= area <= 1.8*expected):
+        return None, {"reason": "geometry_gate"}
+    support = float(np.median(supports)) if supports else 0.
+    if support < .45:
+        return None, {"reason": "weak_support", "fit_support": support}
+    return quad, {"reason": "accepted", "fit_support": support,
+                  "top_residual": top_residual, "bottom_residual": bottom_residual}
+
+
 def _quad_glyph_evidence(image: np.ndarray) -> dict[str, float | int]:
     """Measure repeated glyph-like components and their placement in a warp."""
     h, w = image.shape[:2]
@@ -187,7 +271,7 @@ def _quad_pixel_quality(image: np.ndarray, layout: int) -> float:
 
 
 def _quad_rank_score(pixel_quality: float, geometry_iou: float) -> float:
-    """Use the current geometric proposal as a prior when pixel evidence ties."""
+    """Use the first accepted contour quad as a prior when pixel evidence ties."""
     return float(pixel_quality - 4.*(1.-geometry_iou))
 
 
@@ -207,21 +291,47 @@ def _warp_quad(image: np.ndarray, cand: PlateCandidate, quad: np.ndarray
     return RectifiedPlate(plate, layout, color, matrix, cand)
 
 
-def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.ndarray:
-    """Choose among bounded geometric candidates using only warped pixels."""
+def _rank_quad_candidates(image: np.ndarray, cand: PlateCandidate, expand: float,
+                          *, include_green_fit: bool = False
+                          ) -> list[tuple[np.ndarray, RectifiedPlate, float]]:
+    """Extract one bounded quad pool, warp each once, and rank by pixel evidence."""
     primary, candidates = _quad_candidates(image, cand, expand)
-    best_quad, best_score = primary, -float('inf')
+    ranked: list[tuple[np.ndarray, RectifiedPlate, float]] = []
     for quad in candidates:
         rect = _warp_quad(image, cand, quad)
         layouts = (7, 8) if rect.layout == 0 else (rect.layout,)
         pixel_score = max(_quad_pixel_quality(rect.image, layout) for layout in layouts)
         score = _quad_rank_score(pixel_score, _quad_iou(primary, quad))
-        if score > best_score:
-            best_quad, best_score = quad, score
-    return best_quad
+        ranked.append((quad, rect, score))
+    # Python's stable sort preserves the historical first-on-tie behavior.
+    ranked.sort(key=lambda item: item[2], reverse=True)
+    if include_green_fit and ranked:
+        fitted, evidence = _green_boundary_quad(image, cand)
+        if fitted is not None and all(_quad_iou(existing[0], fitted) < .995
+                                      for existing in ranked):
+            rect = _warp_quad(image, cand, fitted)
+            glyphs = _quad_glyph_evidence(rect.image)
+            count = int(glyphs['glyph_count'])
+            # Require visible repeated text as well as a stable color boundary;
+            # a green body panel without a plate-like text row cannot compete.
+            if (count >= 4 and glyphs['edge_touch_count'] <= max(1, count//3)
+                    and glyphs['gap_cv'] <= .95 and glyphs['coverage'] >= .35):
+                quality = _quad_pixel_quality(rect.image, 8 if rect.layout == 8 else 7)
+                geometry_iou = _quad_iou(primary, fitted)
+                penalty = 2.*(evidence['top_residual'] + evidence['bottom_residual'])/max(1, cand.bbox[3])
+                score = _quad_rank_score(quality, geometry_iou) + .75*evidence['fit_support'] - penalty
+                alternatives = [*ranked[1:], (fitted, rect, score)]
+                alternatives.sort(key=lambda item: item[2], reverse=True)
+                ranked = [ranked[0], *alternatives]
+    return ranked
 
 
-def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> RectifiedPlate:
+def refine_quad(image: np.ndarray, cand: PlateCandidate, expand: float) -> np.ndarray:
+    """Choose among bounded geometric candidates using only warped pixels."""
+    return _rank_quad_candidates(image, cand, expand)[0][0]
+
+
+def _validate_image_candidate(image: np.ndarray, cand: PlateCandidate) -> np.ndarray:
     if (not isinstance(image, np.ndarray) or image.size == 0 or image.dtype != np.uint8
             or image.ndim not in (2, 3) or (image.ndim == 3 and image.shape[2] not in (1, 3))):
         raise BadInputError('expected nonempty uint8 gray/BGR image')
@@ -231,12 +341,11 @@ def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> Rect
         raise BadInputError('invalid plate candidate')
     if image.ndim == 2 or image.shape[2] == 1:
         image = cv2.cvtColor(image.reshape(image.shape[:2]), cv2.COLOR_GRAY2BGR)
-    quad = refine_quad(image, cand, cfg.expand_ratio)
-    # Classify from a first warp so an unknown proposal can still become L7/L8.
-    target = np.float32([[0, 0], [251, 0], [251, 79], [0, 79]])
-    matrix = cv2.getPerspectiveTransform(quad, target)
-    plate = cv2.warpPerspective(image, matrix, cfg.size_7)
-    color = classify_color(plate)
+    return image
+
+
+def _finalize_warp(rect: RectifiedPlate, cand: PlateCandidate) -> RectifiedPlate:
+    color, plate = rect.color, rect.image
     if color == 'white' and cand.color == 'unknown':
         evidence = _quad_glyph_evidence(plate)
         repeated_text = (evidence['glyph_count'] >= 5
@@ -246,13 +355,30 @@ def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> Rect
         if not repeated_text:
             color = 'unknown'
     layout = 8 if color == 'green' else (7 if color in ('blue', 'yellow') else 0)
-    if layout == 8:
-        width, height = cfg.size_8
-        target = np.float32([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]])
-        matrix = cv2.getPerspectiveTransform(quad, target)
-        plate = cv2.warpPerspective(image, matrix, cfg.size_8)
-    # Residual rotation search is optional (6.3). Omitted so M is exactly source -> image.
-    return RectifiedPlate(plate, layout, color, matrix, cand)
+    return RectifiedPlate(plate, layout, color, rect.homography, cand)
+
+
+def rectify(image: np.ndarray, cand: PlateCandidate, cfg: RectifyConfig) -> RectifiedPlate:
+    image = _validate_image_candidate(image, cand)
+    _, rect, _ = _rank_quad_candidates(image, cand, cfg.expand_ratio)[0]
+    return _finalize_warp(rect, cand)
+
+
+def rectify_candidates(image: np.ndarray, cand: PlateCandidate,
+                       cfg: RectifyConfig) -> list[RectifiedPlate]:
+    """Return at most four pixel-ranked warps, preserving ``rectify`` first.
+
+    The first result uses the same regular contour pool and stable ranking as
+    ``rectify``. Remaining hypotheses come from that bounded pool, with one
+    optional green-mask boundary fit. Pixel evidence and the contour primary
+    provide the ranking; labels, segmentation, and classifier scores do not.
+    """
+    image = _validate_image_candidate(image, cand)
+    ranked = _rank_quad_candidates(image, cand, cfg.expand_ratio, include_green_fit=True)
+    # Green fitting only augments the alternatives; the first regular result
+    # remains exactly the first result from rectify() and shares all regular
+    # contour extraction and warps.
+    return [_finalize_warp(rect, cand) for _, rect, _ in ranked[:4]]
 
 
 def deskew_vertical(rect: RectifiedPlate, max_shear: float = .3,

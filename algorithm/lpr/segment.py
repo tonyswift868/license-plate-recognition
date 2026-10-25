@@ -289,7 +289,7 @@ def _segment_binary(gray: np.ndarray, binary: np.ndarray, layout: int,
     total = np.count_nonzero(binary)
     if total < layout*.002*w*h:
         return failure
-    boxes, chars, ink_counts = [], [], []
+    boxes, ink_counts = [], []
     slots = _aligned_slots(binary, centers, char_w,
                            projection_valleys=projection_valleys,
                            expanded_fit=expanded_fit)
@@ -310,14 +310,6 @@ def _segment_binary(gray: np.ndarray, binary: np.ndarray, layout: int,
         if _crossing_edge_ink(binary, y0, y1, left, right) > .40*ch:
             return failure
         boxes.append((x0, y0, cw, ch))
-        try:
-            # Character training uses the whole fixed slot across the plate's
-            # full height (build_chars.py). Keep that context and aspect ratio
-            # for the classifier; the tight ink box is only the reported
-            # geometry and must not redefine the CNN input crop.
-            chars.append(charnorm.normalize_char(gray[:, left:right]))
-        except (ValueError, cv2.error):
-            return failure
         ink_counts.append(len(xs))
     coverage = min(1., sum(ink_counts)/total)
     if coverage < .85:
@@ -326,6 +318,14 @@ def _segment_binary(gray: np.ndarray, binary: np.ndarray, layout: int,
     if heights.min() < .65*heights.max():
         return failure
     quality = float(np.clip(coverage*(1-heights.std()/max(1, heights.mean())), 0, 1))
+    try:
+        # Character training uses the whole fixed slot across the plate's full
+        # height (build_chars.py). Keep that context and aspect ratio for the
+        # classifier; the tight ink box is only reported geometry. Normalize
+        # only after every slot and plate-level quality gate has passed.
+        chars = [charnorm.normalize_char(gray[:, left:right]) for left, right in slots]
+    except (ValueError, cv2.error):
+        return failure
     return SegmentResult(True, layout, boxes, np.stack(chars), quality)
 
 
@@ -339,8 +339,9 @@ def segment(rect: RectifiedPlate, layout: int, cfg: SegmentConfig) -> SegmentRes
         if len(centers) != layout or char_w <= 0 or not np.isfinite(centers).all():
             return failure
         gray, binary = binary_plate(rect, cfg)
-        # Keep the original path first to preserve prior successes. Only failed
-        # plates try a rim-trimmed mask, then local projection-valley boundaries.
+        # Keep the original path first to preserve prior successes. Normalize
+        # full-height training slots only after all slot and plate-level gates
+        # pass, so a rejected geometry never creates partial classifier inputs.
         result = _segment_binary(gray, binary, layout, centers, char_w)
         if result.ok:
             return result
