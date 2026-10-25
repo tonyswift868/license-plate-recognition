@@ -182,3 +182,72 @@ def test_recognize_many_uses_vote(recognizer, stages, monkeypatch):
     monkeypatch.setattr(pl, "vote", fake_vote)
     r = recognizer.recognize_many([IMG, IMG, IMG])
     assert seen["n"] == 3 and r.frames_used == 3 and r.elapsed_ms > 0
+
+
+class _FakeCornerNet:
+    name, version = "fake_corner", "fake_corner_v0"
+
+    def __init__(self, cands):
+        self.cands = cands
+
+    def detect(self, image, max_candidates):
+        return list(self.cands)
+
+
+class _FakeReader:
+    name, version = "fake_crnn", "fake_crnn_v0"
+
+    def __init__(self, text, confs):
+        self.text, self.confs, self.calls = text, confs, 0
+
+    def read(self, plate_image):
+        self.calls += 1
+        return self.text, list(self.confs)
+
+
+def _recognizer_with(cfg, **nets):
+    from lpr.testing import UniformClassifier
+
+    return pl.PlateRecognizer(cfg, UniformClassifier(), **nets)
+
+
+def test_corner_candidates_go_first_and_dedupe(cfg, stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0), _cand(30)]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.4), _dec(S.LOW_CONFIDENCE, 0.3), _dec(S.LOW_CONFIDENCE, 0.2)]
+    net = _FakeCornerNet([_cand(60), _cand(1)])          # 第二个与传统候选 0 重叠，应被去重
+    rec = _recognizer_with(cfg, corner_detector=net)
+    r = rec.recognize(IMG)
+    assert [c[1] for c in calls if c[0] == "rectify"] == [60, 1, 30]
+    assert "corner" in r.stage_ms and r.model_version.endswith("+fake_corner_v0")
+
+
+def test_plate_reader_rescues_seg_failed(cfg, stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["seg_ok"] = {(0, 7): False}
+    reader = _FakeReader("陕A12345", [0.99] * 7)
+    r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG, debug=True)
+    assert r.status is S.OK and r.plate_no == "陕A12345" and reader.calls == 1
+    assert r.vehicle_type_hint == "small" and "reader" in r.stage_ms
+
+
+def test_plate_reader_not_called_after_segment_ok(cfg, stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["decode"] = [_dec(S.OK, 0.95)]
+    reader = _FakeReader("陕A99999", [0.99] * 7)
+    r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG)
+    assert r.plate_no == "陕A12345" and reader.calls == 0
+
+
+def test_plate_reader_low_conf_and_invalid(cfg, stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["seg_ok"] = {(0, 7): False}
+    r = _recognizer_with(cfg, plate_reader=_FakeReader("陕A12345", [0.99, 0.5] + [0.99] * 5)).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.confidence == 0.5
+    r = _recognizer_with(cfg, plate_reader=_FakeReader("陕I12345", [0.99] * 7)).recognize(IMG)
+    assert r.status is S.INVALID_FORMAT
+    r = _recognizer_with(cfg, plate_reader=_FakeReader("", [])).recognize(IMG)
+    assert r.status is S.SEG_FAILED

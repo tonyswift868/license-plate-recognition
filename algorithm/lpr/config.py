@@ -33,6 +33,8 @@ class RuntimeConfig(_Section):
     model_path: str
     classifier: Literal["cnn", "template", "svm"]
     max_candidates: int
+    corner_model_path: str                               # 空字符串 = 不启用四角点网络
+    plate_reader_model_path: str                         # 空字符串 = 不启用整牌识别
 
 
 class PreprocessConfig(_Section):

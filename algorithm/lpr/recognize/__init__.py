@@ -17,7 +17,7 @@ from typing import Any
 
 from ..charset import CHARSET_SHA
 from ..errors import ModelLoadError
-from .base import CharClassifier
+from .base import CharClassifier, CornerDetector, PlateReader
 
 MANIFEST_NAME = "manifest.json"
 
@@ -95,3 +95,32 @@ def load_classifier(kind: str, model_path: Path) -> CharClassifier:
         raise ModelLoadError(f"分类器 {kind} 尚未实现：{e}") from e
     except Exception as e:
         raise ModelLoadError(f"分类器 {kind} 加载失败：{model_path}：{e}") from e
+
+
+def _load_network(label: str, import_cls, model_path: Path):
+    """四角点网络与整牌识别共用的加载流程：manifest 校验 → from_file；任何失败转为 ModelLoadError。"""
+    entry = verify_model(model_path)
+    try:
+        return import_cls().from_file(Path(model_path), version=entry["version"])
+    except ModelLoadError:
+        raise
+    except NotImplementedError as e:
+        raise ModelLoadError(f"{label}尚未实现：{e}") from e
+    except Exception as e:
+        raise ModelLoadError(f"{label}加载失败：{model_path}：{e}") from e
+
+
+def load_corner_detector(model_path: Path) -> CornerDetector:
+    """加载四角点网络（runtime.corner_model_path）。"""
+    def cls():
+        from ..corner_net import CornerNet
+        return CornerNet
+    return _load_network("四角点网络", cls, model_path)
+
+
+def load_plate_reader(model_path: Path) -> PlateReader:
+    """加载整牌识别 CRNN（runtime.plate_reader_model_path）。"""
+    def cls():
+        from .crnn import CrnnReader
+        return CrnnReader
+    return _load_network("整牌识别网络", cls, model_path)

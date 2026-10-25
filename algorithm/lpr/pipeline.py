@@ -20,10 +20,11 @@ from .config import LprConfig, load_config
 from .errors import DEFAULT_MESSAGES, ERROR_CODES, BadInputError, failure_result
 from .io_utils import decode_image
 from .locate import locate
+from .plate_rules import match_layout, vehicle_type_hint
 from .postprocess import decode
 from .preprocess import preprocess
-from .recognize import load_classifier
-from .recognize.base import CharClassifier
+from .recognize import load_classifier, load_corner_detector, load_plate_reader
+from .recognize.base import CharClassifier, CornerDetector, PlateReader
 from .rectify import rectify
 from .segment import segment
 
@@ -31,7 +32,8 @@ try:                                                     # 可选：同一候选
     from .rectify import rectify_candidates
 except ImportError:
     rectify_candidates = None
-from .types import DecodeResult, RecogStatus, RecognitionResult, RectifiedPlate, SegmentResult
+from .types import (Box, DecodeResult, PlateCandidate, PlateColor, RecogStatus, RecognitionResult,
+                    RectifiedPlate, SegmentResult)
 from .voting import vote
 
 S = RecogStatus
@@ -44,7 +46,7 @@ _BYTES_TYPES = (bytes, bytearray, memoryview)
 class _Attempt:
     dec: DecodeResult
     rect: RectifiedPlate
-    seg: SegmentResult
+    seg: SegmentResult | None                            # 整牌识别（CRNN）的结果没有分割
 
 
 class _StageTimer:
@@ -93,6 +95,53 @@ def _rectifications(image: np.ndarray, cand, cfg) -> list[RectifiedPlate]:
     return [rectify(image, cand, cfg)]
 
 
+def _iou(a: Box, b: Box) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    iw = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    ih = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = iw * ih
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _in_roi(cand: PlateCandidate, roi: Box | None) -> bool:
+    if roi is None:
+        return True
+    x, y, w, h = cand.bbox
+    cx, cy = x + w / 2, y + h / 2
+    rx, ry, rw, rh = roi
+    return rx <= cx < rx + rw and ry <= cy < ry + rh
+
+
+def _merge_candidates(net: list[PlateCandidate], classic: list[PlateCandidate],
+                      limit: int) -> list[PlateCandidate]:
+    """四角点网络的候选在前，传统定位的候选补位；与已选候选 IoU ≥0.5 的视为重复。"""
+    merged: list[PlateCandidate] = []
+    for cand in [*net, *classic]:
+        if len(merged) >= limit:
+            break
+        if all(_iou(cand.bbox, m.bbox) < 0.5 for m in merged):
+            merged.append(cand)
+    return merged
+
+
+def _decode_text(text: str, confs: Sequence[float], color: PlateColor,
+                 min_confidence: float) -> DecodeResult | None:
+    """整牌识别输出 → DecodeResult；状态规则与阶段六一致（5.4、附录 A）。读不出或长度不对返回 None。"""
+    if len(text) not in (7, 8) or len(confs) != len(text):
+        return None
+    name = match_layout(text)
+    conf = float(min(confs))
+    if name is None:
+        status = S.INVALID_FORMAT
+    else:
+        status = S.OK if conf >= min_confidence else S.LOW_CONFIDENCE
+    return DecodeResult(status=status, plate_no=text, layout=len(text), layout_name=name or "",
+                        confidence=conf, char_confidences=[float(c) for c in confs],
+                        candidates=[(text, conf)], vehicle_type_hint=vehicle_type_hint(color, name))
+
+
 def _rank(dec: DecodeResult) -> tuple[int, float]:
     return _STATUS_RANK.get(dec.status, 0), float(dec.confidence)
 
@@ -104,9 +153,13 @@ def _chars_mosaic(chars: np.ndarray) -> np.ndarray:
 class PlateRecognizer:
     """车牌识别器。实例在调用之间没有可变共享状态，可被多线程并发调用。"""
 
-    def __init__(self, config: LprConfig, classifier: CharClassifier) -> None:
+    def __init__(self, config: LprConfig, classifier: CharClassifier, *,
+                 corner_detector: CornerDetector | None = None,
+                 plate_reader: PlateReader | None = None) -> None:
         self.config = config
         self.classifier = classifier
+        self.corner_detector = corner_detector           # 可选：四角点网络（K1 Plan B-1）
+        self.plate_reader = plate_reader                 # 可选：整牌识别 CRNN（K1 Plan B-2）
 
     @classmethod
     def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> "PlateRecognizer":
@@ -117,13 +170,18 @@ class PlateRecognizer:
         import torch                                     # 延迟导入：FakeRecognizer 与 import lpr 不需要 torch
 
         torch.set_num_threads(cfg.runtime.torch_threads)
-        classifier = load_classifier(cfg.runtime.classifier, cfg.resolve_path(cfg.runtime.model_path))
-        return cls(cfg, classifier)
+        rt = cfg.runtime
+        classifier = load_classifier(rt.classifier, cfg.resolve_path(rt.model_path))
+        corner = load_corner_detector(cfg.resolve_path(rt.corner_model_path)) if rt.corner_model_path else None
+        reader = load_plate_reader(cfg.resolve_path(rt.plate_reader_model_path)) if rt.plate_reader_model_path else None
+        return cls(cfg, classifier, corner_detector=corner, plate_reader=reader)
 
     @property
     def version(self) -> str:
-        """例如 "lpr-1.0.0+char_cnn_v1"，写入日志与结果。"""
-        return f"lpr-{__version__}+{self.classifier.version}"
+        """例如 "lpr-1.0.0+char_cnn_v1"，启用网络时追加其版本，写入日志与结果。"""
+        parts = [self.classifier.version]
+        parts += [m.version for m in (self.corner_detector, self.plate_reader) if m is not None]
+        return f"lpr-{__version__}+" + "+".join(parts)
 
     def warmup(self) -> None:
         """用空白图跑一遍，消除首帧延迟。应用启动时调用一次。"""
@@ -228,6 +286,11 @@ class PlateRecognizer:
 
         with timer("locate"):
             candidates = locate(pre, cfg.locate, cfg.runtime.max_candidates)
+        if self.corner_detector is not None:
+            roi = cfg.lane_roi(lane_id)
+            with timer("corner"):
+                net = [c for c in self.corner_detector.detect(image, cfg.runtime.max_candidates) if _in_roi(c, roi)]
+            candidates = _merge_candidates(net, candidates, cfg.runtime.max_candidates)
         if not candidates:
             return failure_result(S.NO_PLATE)
 
@@ -254,6 +317,15 @@ class PlateRecognizer:
                         best = _Attempt(dec, rect, seg)
                     if dec.status == S.OK:               # 提前结束
                         return self._build(best, dbg)
+                if self.plate_reader is not None:        # 分割路线没出 OK：整牌识别兜底
+                    with timer("reader"):
+                        text, confs = self.plate_reader.read(rect.image)
+                    dec = _decode_text(text, confs, rect.color, cfg.postprocess.min_confidence)
+                    if dec is not None:
+                        if best is None or _rank(dec) > _rank(best.dec):
+                            best = _Attempt(dec, rect, None)
+                        if dec.status == S.OK:
+                            return self._build(best, dbg)
 
         if lead_color in _SPECIAL_COLORS:                # 走到这里说明没有 OK 结果
             return failure_result(S.UNSUPPORTED)
@@ -264,7 +336,7 @@ class PlateRecognizer:
     @staticmethod
     def _build(a: _Attempt, dbg: dict[str, np.ndarray] | None) -> RecognitionResult:
         d, cand = a.dec, a.rect.candidate
-        if dbg is not None:
+        if dbg is not None and a.seg is not None:
             dbg["chars"] = _chars_mosaic(a.seg.chars)
         return RecognitionResult(
             status=d.status,
