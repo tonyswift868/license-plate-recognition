@@ -8,7 +8,7 @@ from lpr.preprocess import preprocess
 from lpr.rectify import rectify
 from lpr.segment import (_aligned_slots, _crossing_edge_ink, _fallback_binary_from_gray,
                          _glyph_like_border_component,
-                         _fit_slots_to_text_extent, binary_plate, segment)
+                         _fit_slots_to_text_extent, _segment_binary, binary_plate, segment)
 from lpr.types import RectifiedPlate, PlateCandidate
 from lpr_tools.synth_scenes import draw_plate, make_scene
 from .test_locate import truth_bbox
@@ -226,3 +226,20 @@ def test_slot_edge_counts_only_ink_crossing_cut():
     # A glyph continuing through the same cut is genuinely severed.
     binary[20:60, 50:54] = 255
     assert _crossing_edge_ink(binary, 20, 60, 30, 50) == 40
+
+
+def test_failed_late_slot_does_not_normalize_earlier_slots(cfg, monkeypatch):
+    centers = cfg.segment.layout7_centers
+    binary = np.zeros((80, 252), np.uint8)
+    for center in centers[:-1]:
+        x = round(center*binary.shape[1])
+        binary[20:60, x-6:x+6] = 255
+
+    def unexpected_normalize(_):
+        raise AssertionError('failed geometry must not normalize partial character slots')
+
+    monkeypatch.setattr(charnorm, 'normalize_char', unexpected_normalize)
+    result = _segment_binary(np.zeros_like(binary), binary, 7, centers,
+                             cfg.segment.layout7_char_w)
+    assert not result.ok
+    assert result.chars.shape == (0, 32, 32)

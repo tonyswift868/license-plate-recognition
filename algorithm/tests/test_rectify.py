@@ -5,9 +5,13 @@ import pytest
 from lpr.errors import BadInputError
 from lpr.locate import locate, order_points
 from lpr.preprocess import preprocess
-from lpr.rectify import (_quad_glyph_evidence, _quad_iou, _quad_pixel_quality,
-                         _quad_rank_score, classify_color, refine_quad, rectify)
-from lpr.types import PlateCandidate
+import lpr.rectify as rectify_module
+from lpr.rectify import (_quad_candidates, _rank_quad_candidates,
+                         _green_boundary_quad, _linear_percentile_sorted,
+                         _quad_glyph_evidence, _quad_iou, _quad_pixel_quality,
+                         _quad_rank_score, classify_color, refine_quad, rectify,
+                         rectify_candidates)
+from lpr.types import PlateCandidate, RectifiedPlate
 from lpr_tools.synth_scenes import make_scene
 from .test_locate import truth_bbox
 from lpr.locate import box_iou
@@ -26,6 +30,131 @@ def test_rectify_scene_original_homography(cfg, index):
     mapped = cv2.perspectiveTransform(np.float32(row['quad'])[None], result.homography)[0]
     target = np.float32([[0, 0], [width-1, 0], [width-1, 79], [0, 79]])
     assert np.linalg.norm(mapped-target, axis=1).max() < 12
+
+
+@pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 7, 8])
+def test_rectify_candidates_first_is_exact_rectify_and_bounded(cfg, index):
+    image, row = make_scene(index)
+    candidates = locate(preprocess(image, cfg.preprocess), cfg.locate)
+    cand = max(candidates, key=lambda c: box_iou(c.bbox, truth_bbox(row)))
+
+    expected = rectify(image, cand, cfg.rectify)
+    results = rectify_candidates(image, cand, cfg.rectify)
+
+    assert 1 <= len(results) <= 4
+    assert results[0].layout == expected.layout
+    assert results[0].color == expected.color
+    assert np.array_equal(results[0].image, expected.image)
+    assert np.array_equal(results[0].homography, expected.homography)
+    assert results[0].candidate is expected.candidate or results[0].candidate == expected.candidate
+
+
+def test_rectify_candidates_truncates_sorted_pool_to_four_stably(monkeypatch, cfg):
+    image = np.zeros((120, 240, 3), np.uint8)
+    cand = PlateCandidate([(20, 20), (120, 20), (120, 50), (20, 50)],
+                          (20, 20, 100, 30), 'blue', .8, 'color')
+    quads = [np.float32([[20+i, 20], [120+i, 20], [120+i, 50], [20+i, 50]])
+             for i in range(6)]
+    rects = [RectifiedPlate(np.full((80, 252, 3), i, np.uint8), 7, 'blue',
+                            np.eye(3), cand) for i in range(6)]
+    # All scores tie. The shared ranker must retain contour enumeration order.
+    monkeypatch.setattr(rectify_module, '_quad_candidates',
+                        lambda *_args: (quads[0], quads))
+    monkeypatch.setattr(rectify_module, '_warp_quad',
+                        lambda _image, _cand, quad: rects[next(
+                            i for i, value in enumerate(quads) if value is quad)])
+    monkeypatch.setattr(rectify_module, '_quad_pixel_quality', lambda *_args: 1.)
+    monkeypatch.setattr(rectify_module, '_quad_iou', lambda *_args: 1.)
+    ranked = _rank_quad_candidates(image, cand, cfg.rectify.expand_ratio)
+    assert [item[1] for item in ranked] == rects
+
+    monkeypatch.setattr(rectify_module, '_rank_quad_candidates',
+                        lambda *_args, **_kwargs: ranked)
+    result = rectify_candidates(image, cand, cfg.rectify)
+    assert len(result) == 4
+    assert [item.image[0, 0, 0] for item in result] == [0, 1, 2, 3]
+
+
+def test_quad_candidate_pool_deduplicates_color_and_edge_contours():
+    image = np.zeros((140, 260, 3), np.uint8)
+    cv2.rectangle(image, (50, 40), (210, 95), (180, 65, 15), -1)
+    cand = PlateCandidate([(50, 40), (210, 40), (210, 95), (50, 95)],
+                          (50, 40, 160, 55), 'blue', .8, 'color')
+    _, quads = _quad_candidates(image, cand, .10, max_candidates=40)
+    assert all(_quad_iou(a, b) < .995 for i, a in enumerate(quads)
+               for b in quads[i+1:])
+
+
+def test_green_mask_fit_recovers_supported_trapezoid_and_requires_text():
+    image = np.zeros((240, 460, 3), np.uint8)
+    green = (25, 180, 20)
+    truth = np.float32([[55, 65], [390, 92], [370, 185], [38, 150]])
+    cv2.fillConvexPoly(image, truth.astype(np.int32), green)
+    for i in range(7):
+        x = int(76+i*43)
+        y_top = int(67+i*3.4)
+        y_bottom = int(144+i*3.7)
+        cv2.rectangle(image, (x, y_top), (x+14, y_bottom), (15, 15, 15), -1)
+    candidate = PlateCandidate(truth.tolist(), (38, 65, 352, 121),
+                               'green', .8, 'color')
+    fitted, evidence = _green_boundary_quad(image, candidate)
+    assert fitted is not None and evidence['reason'] == 'accepted'
+    assert cv2.isContourConvex(fitted)
+    assert evidence['fit_support'] >= .45
+
+    # A broad green vehicle panel has color edges, but no repeated text row;
+    # it cannot add an alternative geometry to the rectifier pool.
+    blank = np.zeros_like(image)
+    cv2.fillConvexPoly(blank, truth.astype(np.int32), green)
+    regular = _rank_quad_candidates(blank, candidate, .10)
+    with_fit = _rank_quad_candidates(blank, candidate, .10, include_green_fit=True)
+    assert len(with_fit) == len(regular)
+
+
+def test_green_fit_quad_matching_existing_alternate_is_deduplicated(monkeypatch):
+    image = np.zeros((120, 240, 3), np.uint8)
+    cand = PlateCandidate([(20, 20), (120, 20), (120, 50), (20, 50)],
+                          (20, 20, 100, 30), 'green', .8, 'color')
+    primary = np.float32([[20, 20], [120, 20], [120, 50], [20, 50]])
+    alternate = np.float32([[21, 20], [121, 20], [121, 50], [21, 50]])
+    rect = RectifiedPlate(np.full((80, 276, 3), (50, 160, 60), np.uint8),
+                          8, 'green', np.eye(3), cand)
+    monkeypatch.setattr(rectify_module, '_quad_candidates',
+                        lambda *_args: (primary, [primary, alternate]))
+    monkeypatch.setattr(rectify_module, '_warp_quad', lambda *_args: rect)
+    monkeypatch.setattr(rectify_module, '_quad_pixel_quality', lambda *_args: 5.)
+    monkeypatch.setattr(rectify_module, '_green_boundary_quad',
+                        lambda *_args: (alternate, {'fit_support': .8,
+                            'top_residual': 1., 'bottom_residual': 1.}))
+    monkeypatch.setattr(rectify_module, '_quad_glyph_evidence',
+                        lambda *_args: {'glyph_count': 7, 'edge_touch_count': 0,
+                            'gap_cv': .3, 'coverage': .7})
+    ranked = _rank_quad_candidates(image, cand, .1, include_green_fit=True)
+    assert len(ranked) == 2
+
+
+@pytest.mark.parametrize('n', [1, 2, 7, 30, 83])
+@pytest.mark.parametrize('quantile', [.08, .92])
+def test_sorted_linear_percentile_matches_numpy(n, quantile):
+    values = np.sort(np.random.default_rng(n).integers(0, 80, size=n))
+    assert _linear_percentile_sorted(values, quantile) == pytest.approx(
+        np.percentile(values, quantile*100), abs=1e-12)
+
+
+@pytest.mark.parametrize('channels', [1, 3])
+def test_rectify_candidates_accepts_grayscale_and_single_channel(cfg, channels):
+    gray = np.full((120, 240), 90, np.uint8)
+    image = gray if channels == 1 else gray[..., None]
+    cand = PlateCandidate([(20, 20), (120, 20), (120, 50), (20, 50)],
+                          (20, 20, 100, 30), 'blue', .8, 'color')
+    result = rectify_candidates(image, cand, cfg.rectify)
+    assert 1 <= len(result) <= 4
+    assert result[0].image.shape == (80, 252, 3)
+
+
+def test_rectify_candidates_rejects_invalid_inputs(cfg):
+    with pytest.raises(BadInputError):
+        rectify_candidates(np.empty((0, 0, 3), np.uint8), None, cfg.rectify)
 
 
 def test_rectify_fallback_black_unknown_and_tiny(cfg):
@@ -131,9 +260,11 @@ def test_unknown_neutral_body_texture_is_not_accepted_as_white_plate(cfg):
     candidate = PlateCandidate([(40, 40), (280, 40), (280, 120), (40, 120)],
                                (40, 40, 240, 80), 'unknown', .8, 'edge')
     result = rectify(image, candidate, cfg.rectify)
+    alternatives = rectify_candidates(image, candidate, cfg.rectify)
 
     assert classify_color(result.image) == 'white'
     assert result.color == 'unknown' and result.layout == 0
+    assert all(r.color == 'unknown' and r.layout == 0 for r in alternatives)
 
 
 def test_unknown_candidate_with_repeated_glyphs_remains_white(cfg):
@@ -143,7 +274,9 @@ def test_unknown_candidate_with_repeated_glyphs_remains_white(cfg):
     candidate = PlateCandidate([(40, 40), (280, 40), (280, 120), (40, 120)],
                                (40, 40, 240, 80), 'unknown', .8, 'edge')
     result = rectify(image, candidate, cfg.rectify)
+    alternatives = rectify_candidates(image, candidate, cfg.rectify)
 
     evidence = _quad_glyph_evidence(result.image)
     assert evidence['glyph_count'] >= 5
     assert result.color == 'white' and result.layout == 0
+    assert all(r.color == 'white' and r.layout == 0 for r in alternatives)
