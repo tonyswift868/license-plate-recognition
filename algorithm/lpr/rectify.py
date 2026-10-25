@@ -1,6 +1,8 @@
 """Stage 3: refine a proposal in the original image and warp its four corners."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import cv2
 import numpy as np
 
@@ -294,7 +296,39 @@ def _warp_quad(image: np.ndarray, cand: PlateCandidate, quad: np.ndarray
 def _rank_quad_candidates(image: np.ndarray, cand: PlateCandidate, expand: float,
                           *, include_green_fit: bool = False
                           ) -> list[tuple[np.ndarray, RectifiedPlate, float]]:
-    """Extract one bounded quad pool, warp each once, and rank by pixel evidence."""
+    """Extract bounded quad pools and rank by pixel and geometric evidence."""
+    if cand.source == 'net':
+        # Network corners supply the initial perspective and geometric prior.
+        # Overlapping pixel-supported refinements may improve border accuracy.
+        quad = np.asarray(cand.corners, dtype=np.float32)
+        if not cv2.isContourConvex(quad):
+            raise BadInputError('network corners must form a convex quadrilateral')
+        raw = _warp_quad(image, cand, quad)
+        def quality(rect):
+            layouts = (7, 8) if rect.layout == 0 else (rect.layout,)
+            return max(_quad_pixel_quality(rect.image, layout) for layout in layouts)
+        direct = [(quad, raw, quality(raw))]
+        proxy = replace(cand, source='color', color=raw.color)
+        alternatives = _rank_quad_candidates(image, proxy, max(expand, .25), include_green_fit=True)
+        retained = []
+        for refined, rect, _ in alternatives:
+            overlap = _quad_iou(quad, refined)
+            if overlap < .5:
+                continue
+            if any(_quad_iou(refined, old[0]) >= .995 for old in [*direct, *retained]):
+                continue
+            score = _quad_rank_score(quality(rect), overlap)
+            # Background edges can score better than a uniformly coloured crop;
+            # replacing the network geometry needs actual repeated-text support.
+            if score > direct[0][2] and _quad_glyph_evidence(rect.image)['glyph_count'] < 4:
+                score = direct[0][2] - 1e-6
+            retained.append((refined, replace(rect, candidate=cand), score))
+        retained.sort(key=lambda item: item[2], reverse=True)
+        # Always retain the exact network warp; a refinement can lead only if
+        # its pixel-quality gain outweighs the penalty for changing geometry.
+        ranked = [*direct, *retained[:3]]
+        ranked.sort(key=lambda item: item[2], reverse=True)
+        return ranked
     primary, candidates = _quad_candidates(image, cand, expand)
     ranked: list[tuple[np.ndarray, RectifiedPlate, float]] = []
     for quad in candidates:
@@ -370,7 +404,10 @@ def rectify_candidates(image: np.ndarray, cand: PlateCandidate,
 
     The first result uses the same regular contour pool and stable ranking as
     ``rectify``. Remaining hypotheses come from that bounded pool, with one
-    optional green-mask boundary fit. Pixel evidence and the contour primary
+    optional green-mask boundary fit. Network candidates retain their supplied
+    quad among up to four hypotheses and use it as the geometric prior for
+    pixel-supported refinements. Both APIs choose the same leading hypothesis.
+    Pixel evidence and the contour primary
     provide the ranking; labels, segmentation, and classifier scores do not.
     """
     image = _validate_image_candidate(image, cand)

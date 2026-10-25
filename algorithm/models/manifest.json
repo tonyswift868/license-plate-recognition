@@ -24,5 +24,18 @@
     "val_char_acc": 0.9979585304264325,
     "sha256": "152d9c3e7f3242c31240a73b4533562a3f35bfdb664c5bc19170185eb4bb4943",
     "created_at": "2026-10-26T00:13:57"
+  },
+  "corner_net_v1.pt": {
+    "name": "corner_net_v1.pt",
+    "version": "corner_net_v1",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      512,
+      320
+    ],
+    "train_data": "{\"initialization\": \"random; no external pretrained weights\", \"positive_train\": 12000, \"base\": 6233, \"green\": 5767, \"np_train\": 2400, \"background_per_epoch\": 12000, \"np_partition\": \"exclude frozen/golden/undecodable, sorted normalized paths shuffled random.Random(42), floor80%=2400 train /601 val\", \"coarse_checkpoint_sha256\": \"a7c2587e8808bd5b96ebd1849a61f19978a2c8e3faf421427fff8c4fd712f746\", \"roi_checkpoint_sha256\": \"4cddfbf9fcb3ec025d8877d20545aa08da2afae2efb0818408f1caeb2b4afd60\", \"proposal_threshold\": 0.05, \"final_confidence_threshold\": 0.5, \"roi_padding_per_side\": 0.25, \"coarse_checkpoint\": \"algorithm\\\\out\\\\seventh\\\\checkpoints\\\\coarse_average_5000_5500_5800.pt\", \"roi_checkpoint\": \"algorithm\\\\out\\\\seventh\\\\roi-prototype\\\\aug500\\\\roi_confidence_aug_step500_weights.pt\", \"roi_training\": {\"regression_steps\": 1000, \"confidence_steps\": 400, \"augmented_continuation_steps\": 500, \"np_roi_training_pool\": 512}, \"coarse_averaging\": {\"method\": \"arithmetic mean of equal-weight floating tensors from adjacent checkpoints on one training trajectory\", \"inputs\": {\"algorithm\\\\out\\\\seventh\\\\checkpoints\\\\geom_gather\\\\corner_step_5000.pt\": \"94d6efee01e92cc7992c9f4278d00626757b429a75c202535446c928dfac553f\", \"algorithm\\\\out\\\\seventh\\\\checkpoints\\\\geom_gather\\\\corner_step_5500.pt\": \"5a647a4351a838662446392bc9f1e6f81c5666345d6bf93004bac171270bbf8a\", \"algorithm\\\\out\\\\seventh\\\\checkpoints\\\\geom_gather\\\\corner_step_5800.pt\": \"12aad1849dee53e418fddc1dac4e1f881376fc2910aec86d9c0bf2449f0360d8\"}, \"output\": \"algorithm\\\\out\\\\seventh\\\\checkpoints\\\\coarse_average_5000_5500_5800.pt\", \"sha256\": \"a7c2587e8808bd5b96ebd1849a61f19978a2c8e3faf421427fff8c4fd712f746\", \"external_pretrained_weights\": false}}",
+    "val_char_acc": null,
+    "sha256": "60d5e1fd48243dedaefd639a345c8734e3e0ec295dec0d2c6c3878121d87f20e",
+    "created_at": "2026-10-26T08:41:25"
   }
 }
