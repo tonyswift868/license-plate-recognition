@@ -87,6 +87,17 @@ def test_hard_manifest_round_trip_uses_canonical_encoding_and_columns(tmp_path):
     assert not manifest.read_bytes().startswith(b"\xef\xbb\xbf")
 
 
+@pytest.mark.parametrize(("decoded", "expected"), [(6, 1), (7, 0)])
+def test_recovery_exit_code_reflects_completed_hard_reports(tmp_path, monkeypatch, capsys,
+                                                           decoded, expected):
+    monkeypatch.setattr(daily_module, "recover_hard", lambda _: {
+        "commit": "test", "g1": "deferred; run daily.py --g1-only <run-dir>",
+        "hard_recovery": {"decoded_reports": decoded}})
+    result = daily_module.main(["--recover-hard", str(tmp_path)])
+    capsys.readouterr()
+    assert result == expected
+
+
 def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, monkeypatch):
     root = tmp_path / "project"
     algorithm = root / "algorithm"

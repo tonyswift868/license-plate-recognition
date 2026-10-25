@@ -457,12 +457,12 @@ def main(argv=None):
             summary = daily(args.out_root, args.index, defer_g1=args.defer_g1)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
+    if "hard_recovery" in summary:
+        print(f"hard retry: {summary['hard_recovery']['decoded_reports']}/7 reports; G1 pending")
+        return 0 if summary["hard_recovery"]["decoded_reports"] == 7 else 1
     if summary.get("g1") == "deferred; run daily.py --g1-only <run-dir>":
         print(f"G1 deferred; run={summary['commit']}; pending={summary['g1']}")
         return 0
-    if "hard_recovery" in summary:
-        print(f"hard retry: {summary['decoded_reports'] if 'decoded_reports' in summary else summary['hard_recovery']['decoded_reports']}/7 reports; G1 pending")
-        return 0 if summary["hard_recovery"]["decoded_reports"] == 7 else 1
     print(summary["scoreboard_row"])
     print(f"report={summary['directory']}")
     if summary["comparison"].get("regressions_over_1pp"):
