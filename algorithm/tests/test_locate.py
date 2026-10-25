@@ -73,15 +73,25 @@ def test_locate_roi_coordinates(cfg):
     assert any(box_iou(c.bbox, truth_bbox(row)) >= .5 for c in locate(pre, cfg.locate))
 
 
-def test_locate_edge_fallback_and_limit(cfg):
+def test_locate_edge_fallback_and_limit(cfg, monkeypatch):
     image = np.full((400, 800, 3), 80, np.uint8)
     cv2 = __import__('cv2')
     cv2.rectangle(image, (200, 200), (500, 295), (180, 180, 180), -1)
     cv2.putText(image, 'AB12345', (205, 270), cv2.FONT_HERSHEY_SIMPLEX, 1.7, (0, 0, 0), 4)
-    cs = locate(preprocess(image, cfg.preprocess), cfg.locate, 1)
+    from lpr import locate as locate_module
+    seen = []
+    nms = locate_module._nms
+    def capture(candidates, config, limit):
+        seen.extend(c.source for c in candidates)
+        return nms(candidates, config, limit)
+    monkeypatch.setattr(locate_module, '_nms', capture)
+    pre = preprocess(image, cfg.preprocess)
+    assert 'edge_tight' in locate_module.detection_masks(pre, cfg.locate)
+    cs = locate(pre, cfg.locate, 1)
+    assert 'edge' in seen
     assert len(cs) == 1 and cs[0].source == 'edge' and cs[0].color == 'unknown'
     assert box_iou(cs[0].bbox, (200, 200, 300, 95)) > .5
-    assert locate(preprocess(image, cfg.preprocess), cfg.locate, 0) == []
+    assert locate(pre, cfg.locate, 0) == []
 
 
 def test_locate_empty_black_tiny(cfg):
@@ -94,7 +104,7 @@ def test_locate_empty_black_tiny(cfg):
     assert locate(preprocess(image, cfg.preprocess), cfg.locate) == []
 
 
-def test_nms_merged_geometry_still_suppresses_overlaps(cfg):
+def test_nms_keeps_higher_ranked_geometry_and_suppresses_overlaps(cfg):
     from lpr.locate import _nms
     from lpr.types import PlateCandidate
     def candidate(x, width, score, source):
@@ -103,5 +113,28 @@ def test_nms_merged_geometry_still_suppresses_overlaps(cfg):
     proposals = [candidate(50, 100, .95, 'edge'), candidate(0, 60, .92, 'color'),
                  candidate(0, 180, .90, 'color')]
     result = _nms(proposals, cfg.locate, 3)
-    assert len(result) == 1 and result[0].bbox == (0, 0, 180, 40)
+    assert [candidate.bbox for candidate in result] == [(50, 0, 100, 40), (0, 0, 60, 40)]
     assert result[0].source == 'merged' and result[0].score == .95
+
+
+def test_nms_color_body_evidence_does_not_expand_plate_geometry(cfg):
+    """A broad color region can corroborate a plate without replacing its box."""
+    from lpr.locate import _nms
+    from lpr.types import PlateCandidate
+
+    def candidate(box, score, source):
+        x, y, width, height = box
+        return PlateCandidate([(x, y), (x+width, y), (x+width, y+height), (x, y+height)],
+                              box, 'blue', score, source)
+
+    plate = candidate((100, 100, 160, 50), .95, 'edge')
+    vehicle_color = candidate((70, 90, 250, 80), .90, 'color')
+    other = candidate((450, 100, 100, 40), .70, 'color')
+    result = _nms([vehicle_color, plate, other], cfg.locate, 3)
+
+    assert result[0].bbox == plate.bbox
+    assert result[0].source == 'merged' and result[0].score == plate.score
+    assert [c.score for c in result] == sorted((c.score for c in result), reverse=True)
+    assert len(result) <= 3
+    assert all(box_iou(a.bbox, b.bbox) <= cfg.locate.nms_iou
+               for i, a in enumerate(result) for b in result[i+1:])
