@@ -11,5 +11,18 @@
     "val_char_acc": 0.9964765766787659,
     "sha256": "0d541287c7f3e1ace5d9c9eff968efdd336854e71801d659b5e8d5391157922a",
     "created_at": "2026-10-25T09:37:09"
+  },
+  "char_cnn_v1.pt": {
+    "name": "char_cnn_v1.pt",
+    "version": "char_cnn_v1",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      32,
+      32
+    ],
+    "train_data": "[{\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\v1\", \"weight\": 1.0}, {\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\v0_aux_v1\", \"weight\": 0.1}, {\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\provinces_synth_v0\", \"weight\": 0.05}]",
+    "val_char_acc": 0.9979585304264325,
+    "sha256": "152d9c3e7f3242c31240a73b4533562a3f35bfdb664c5bc19170185eb4bb4943",
+    "created_at": "2026-10-26T00:13:57"
   }
 }
