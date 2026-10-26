@@ -148,12 +148,19 @@ Python/NumPy/Torch 随机状态及抽样生成器状态，读取采用 `weights_
 state_dict，严格检查模型键和形状，并在 checkpoint config 与训练 sidecar
 记录初始化文件的绝对路径和 SHA256。初始化文件不得与任何训练产物同路径。
 `train_seconds` 只计本次训练及逐轮验证，初始化模型既有的训练成本须单列。
-重采样/难例目录只能取训练 split，开发集只供验证，不得把验证裁片加入微调。
+重采样/难例目录只能取训练 split，不得把开发集裁片加入特征微调。
 
 短程微调可设 `--samples-per-epoch 131072`，每轮按既定来源/类别概率有放回抽样
 指定次数；默认仍抽取完整训练集长度。该参数不裁减验证集。训练loss按实际
 抽样数归一化，sidecar记录 `actual_draws_per_epoch`；参数进入断点兼容检查，
 旧断点缺此字段按默认全长度处理。抽样轮次不等于对每张训练图遍历一次。
+
+`calibrate.fit_temperature` 可在明确记录的开发集上拟合单个全局温度，以稳定
+NLL为目标；它不按类别或单张图片修正预测。`apply_temperature` 只把最终线性层
+的权重和偏置除以温度，保留纯Tensor state_dict，推理仍直接softmax。
+应记录原始权重SHA、开发清单、温度、校准前后NLL以及自动通过精度，核验实际
+模型argmax及完整流水线输出；不能将同一开发集上的校准结果宣称为独立测试。
+冻结测试清单与金样例始终不得用于拟合温度；默认置信度门槛不随校准修改。
 
 manifest 的 `train_data` 是包含所有来源 path/weight 的 JSON 字符串。
 CNN 和 SVM 额外生成同名 `.training.json`，其中 `train_seconds` 为明确计时记录：

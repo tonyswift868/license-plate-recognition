@@ -256,6 +256,71 @@ def test_samples_per_epoch_cli_rejects_nonpositive_or_noninteger(monkeypatch, va
     assert exc.value.code == 2
 
 
+def test_temperature_fit_recovers_well_specified_scalar():
+    from lpr_tools.train.calibrate import fit_temperature
+
+    scores = np.tile(np.log([[0.75, 0.25]]), (4, 1))
+    result = fit_temperature(scores, np.array([0, 0, 0, 1], dtype=np.int64))
+    assert result["temperature"] == pytest.approx(1.0, abs=1e-5)
+    assert result["calibrated_nll"] == pytest.approx(result["raw_nll"], abs=1e-10)
+    assert result["samples"] == 4 and result["iterations"] == 40
+
+
+def test_apply_temperature_scales_only_final_linear_layer_without_mutation():
+    from lpr.recognize.cnn_model import CharCNN
+    from lpr_tools.train.calibrate import apply_temperature
+
+    source = CharCNN().state_dict()
+    original = {key: value.clone() for key, value in source.items()}
+    result = apply_temperature(source, 2.0)
+    assert set(result) == set(source)
+    for key, value in source.items():
+        assert torch.equal(value, original[key])
+        if key in {"classifier.5.weight", "classifier.5.bias"}:
+            torch.testing.assert_close(result[key], value / 2.0, rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(result[key], value, rtol=0, atol=0)
+        assert result[key].data_ptr() != value.data_ptr()
+
+
+@pytest.mark.parametrize("scores,labels", [
+    (np.array([[0.0, np.nan]]), np.array([0])),
+    (np.array([[0.0, 1.0]]), np.array([0.0])),
+    (np.array([[0.0, 1.0]]), np.array([2])),
+    (np.array([0.0, 1.0]), np.array([0])),
+])
+def test_temperature_fit_rejects_invalid_scores_or_labels(scores, labels):
+    from lpr_tools.train.calibrate import fit_temperature
+
+    with pytest.raises(ValueError):
+        fit_temperature(scores, labels)
+
+
+@pytest.mark.parametrize("temperature", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_apply_temperature_rejects_invalid_temperature(temperature):
+    from lpr.recognize.cnn_model import CharCNN
+    from lpr_tools.train.calibrate import apply_temperature
+
+    with pytest.raises(ValueError, match="temperature"):
+        apply_temperature(CharCNN().state_dict(), temperature)
+
+
+def test_apply_temperature_rejects_bad_final_layer_shapes_and_nonfinite_weights():
+    from lpr.charset import NUM_CLASSES
+    from lpr.recognize.cnn_model import CharCNN
+    from lpr_tools.train.calibrate import apply_temperature
+
+    state = CharCNN().state_dict()
+    bad_shape = dict(state)
+    bad_shape["classifier.5.weight"] = torch.zeros(NUM_CLASSES, 255)
+    with pytest.raises(ValueError, match="incompatible shapes"):
+        apply_temperature(bad_shape, 1.5)
+    nonfinite = dict(state)
+    nonfinite["classifier.5.bias"] = torch.full_like(state["classifier.5.bias"], float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        apply_temperature(nonfinite, 1.5)
+
+
 @pytest.mark.parametrize("boosts", [["0=0"], ["皖=nan"], ["?=2"], ["0=2", "0=3"]])
 def test_class_boost_cli_rejects_invalid_or_duplicate_values(monkeypatch, boosts):
     from lpr_tools.train import train_cnn as module
