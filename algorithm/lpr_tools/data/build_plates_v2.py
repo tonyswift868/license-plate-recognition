@@ -249,8 +249,9 @@ def _preflight_sources(index, target, identity, known, blocked_paths, blocked_ha
         if row["split"] != "test":
             skipped["unexpected_split"] += 1
             continue
-        p = Path(row["path"]).resolve()
-        if _key(p) in blocked_paths:
+        p = Path(row["path"])
+        p = p if p.is_absolute() else index.parent / p
+        if os.path.normcase(os.path.normpath(str(p))) in blocked_paths:
             skipped["frozen_path"] += 1
             continue
         row["path"] = str(p)
@@ -315,8 +316,20 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
         raise FileNotFoundError(f"corner network model missing: {model_path}")
     blocked_paths, blocked_hashes = _exclusions()
     ledger = json.loads((v1 / "source_hashes.json").read_text(encoding="utf-8"))
+    frozen_digests = {digest for _, digest in blocked_hashes}
     blocked_ledger = {p for p, item in ledger.items()
-                      if _key(p) in blocked_paths or (Path(p).stat().st_size, item["sha256"]) in blocked_hashes}
+                      if os.path.normcase(os.path.normpath(p)) in blocked_paths or item["sha256"] in frozen_digests}
+    v1_root = v1.resolve()
+    available_crops = set()
+    for split in ("train", "val"):
+        folder = v1_root / split
+        if not folder.is_dir():
+            continue
+        if folder.resolve() != v1_root / split:
+            raise ValueError("v1 crop directory escapes corpus")
+        with os.scandir(folder) as entries:
+            available_crops.update(f"{split}/{entry.name}" for entry in entries
+                                   if entry.is_file(follow_symlinks=False))
     base_rows = []
     v1_label_count = 0
     with (v1 / "labels.csv").open(encoding="utf-8", newline="") as f:
@@ -328,9 +341,8 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
             rel = Path(r["file"])
             if rel.is_absolute() or ".." in rel.parts or rel.parts[0] not in {"train", "val"}:
                 raise ValueError(f"unsafe v1 label path: {r['file']}")
-            crop = (v1 / Path(*rel.parts)).resolve()
-            if not crop.is_relative_to(v1.resolve()) or not crop.is_file():
-                raise FileNotFoundError(f"invalid/missing v1 crop: {crop}")
+            if rel.as_posix() not in available_crops:
+                raise FileNotFoundError(f"invalid/missing v1 crop: {r['file']}")
             if r["layout"] not in {"7", "8"} or len(r["plate_no"]) != int(r["layout"]):
                 raise ValueError(f"invalid v1 plate/layout label: {r['file']}")
             if r["orig_path"] not in ledger or ledger[r["orig_path"]]["split"] != rel.parts[0]:
@@ -357,7 +369,7 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
         raise ValueError("no eligible hard-training sources after frozen and duplicate exclusions")
     target.mkdir(parents=True, exist_ok=True); receipt.mkdir(parents=True, exist_ok=True)
     for n, r in enumerate(base_rows, 1):
-        source = (v1 / r[0]).resolve(); dest = target / r[0]
+        source = v1_root / r[0]; dest = target / r[0]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             os.link(source, dest)
