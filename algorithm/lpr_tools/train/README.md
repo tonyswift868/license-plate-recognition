@@ -175,3 +175,43 @@ CNN 累计每轮训练及验证时间（跨断点累计），SVM 记录 fit/校�
 sigmoid 校准，折数为 `min(5, 每类最少训练样本数)`，每类不足 2 个样本时报错。
 此路径不启用 SVC 的 `probability` 参数，消除 sklearn 1.9 的对应弃用提示；
 运行时可加载旧概率 SVC 与新校准器。
+
+## CRNN 整牌兜底（第七批）
+
+`lpr.recognize.crnn.CrnnReader` 将 252×80/276×80 BGR uint8 校正图转为
+128×40 灰度，CNN 提取 32 个时间步，单层双向 GRU 输出 65 字符与 blank 的
+CTC logits。greedy 解码合并连续重复、删除 blank，保留逐位概率；格式、最低
+置信度与状态仍由既有流水线处理。权重从随机初始化训练，不加载预训练模型。
+
+合成工具只写 train，使用 Windows 自带 TrueType 字体；按真实训练 GT 图计数，
+把少于 1000 个独立 GT 样本的省份补足到 1500。这个口径避免把同源候选图
+算成独立样本。蓝牌 7 位，绿牌按 L8S/L8L 规则生成。字体合成只用于训练，
+其清单、字体哈希、种子及数量记录于 `synthetic_manifest.json`。
+
+```powershell
+$env:PYTHONPATH = 'algorithm'
+$env:PYTHONUTF8 = '1'
+.venv\Scripts\python.exe -m lpr_tools.train.synth_plates --help
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --epochs 30 --samples-per-epoch 32768 --batch-size 128 --num-workers 0 --out algorithm/out/models/batch7/crnn_run1/crnn_v1.pt
+.venv\Scripts\python.exe -m lpr_tools.train.eval_crnn --data D:\keshe2\algorithm\data\plates\v1 --model algorithm/models/crnn_v1.pt --out algorithm/out/eval/batch7/crnn-crops
+```
+
+训练前必须根据测试清单、金样例、`devhard_v1.csv`、`val1000_v1.csv` 做原图
+路径和字节哈希隔离；`--exclude-origins` 接受每行一个规范化原图绝对路径，
+只排除对应 train 的所有视图，不删改提供的数据。本批预检发现 27 个同源原图、
+73 个训练裁片需排除；原始 train 294783，实际保留 294710，真实 val 10000 不变。
+排除清单是本批审计产物，复跑时须保留或根据上述清单重新生成，不能省略。
+
+训练采用省份逆频率平方根、上限 8 倍的有放回采样，每轮 32768 次抽样，
+不表示遍历全部训练图片。模糊、噪声、亮度、轻透视和遮挡仅用于 train；
+源/省份/位数的预期抽样概率记录在 checkpoint metadata。CPU 训练线程为 4，
+默认不创建额外数据加载进程。`--stop-after` 在轮次边界停止，用原参数加
+`--resume <model.checkpoint.pt>` 续训，校验来源清单、排除文件、源码哈希与配置；
+逐轮日志追加，随机抽样和增强按 seed/epoch 确定。新训练拒绝覆盖已有输出。
+
+每轮在完整真实 val 上报告 GT、pipeline、总体、省份及逐位字符准确率，
+按总体整牌准确率选择最佳权重。`eval_crnn` 另走真实 `read()` 接口逐图核验，
+输出逐图预测、分来源/省份/位数指标和 CPU 2 线程耗时；字符准确率使用
+逐位匹配数除以 `sum(max(真值长度, 预测长度))`。其自动通过率只是裁片级指标，
+不能代替带四角点网络的完整流水线配对评测。最终模型是否达到 GT 95%、
+pipeline 90%、自动通过精度 99% 和 G1 P95 200 ms，见第七批实测回执。
