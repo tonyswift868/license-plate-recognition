@@ -25,7 +25,8 @@ from lpr.segment import segment
 from lpr.types import PlateCandidate, RectifiedPlate, RecognitionResult, RecogStatus as S
 from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
 from lpr_tools.data.image_health import decode_image
-from .common import add_backend_args, make_recognizer, mode_name
+from .common import (add_backend_args, config_for_args, effective_config_info,
+                     make_recognizer, mode_name)
 from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples,
                            sample_dev_hard, sample_validation)
 from .locate_recall import locate_match, summarize as summarize_location
@@ -114,7 +115,7 @@ def failure_cause(row, result):
 
 def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
              locate_recall=False, sampling=None, stage_trace=None, reuse_stage_trace=None,
-             truth_samples=None):
+             truth_samples=None, effective_config=None):
     # Keep rows with missing or corrupt files in the denominator accounting;
     # they are explicitly recorded as decode errors and skipped below.
     rows = read_manifest(manifest, check_files=False)
@@ -147,9 +148,13 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
     out.mkdir(parents=True, exist_ok=True)
     samples, failures, locations, decode_errors, traces = [], [], [], [], []
     subset_samples = {}
-    locator_cfg = (getattr(recognizer, "config", None) or load_config()) if locate_recall else None
+    locator_cfg = (getattr(recognizer, "config", None) or effective_config or load_config()) if locate_recall else None
     causes = Counter({key:0 for key in ("localization","segmentation","recognition","rejection")})
     oracle_recognizer = OracleRecognizer(recognizer)
+    source_counts = Counter()
+    source_correct = Counter()
+    reader_invoked_images = corner_invoked_images = 0
+    reader_invoked_calls = corner_invoked_calls = 0
     for i,row in enumerate(rows):
         image, decode_error = decode_image(image_path(row, manifest))
         if decode_error:
@@ -157,10 +162,34 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
             traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
                            "decode_error": decode_error})
             continue
+        if hasattr(recognizer, "_reset_observation"):
+            recognizer._reset_observation()
+        else:
+            if hasattr(recognizer, "last_selection"):
+                recognizer.last_selection = None
+            if hasattr(recognizer, "reader_invoked_calls"):
+                recognizer.reader_invoked_calls = 0
+            if hasattr(recognizer, "corner_invoked_calls"):
+                recognizer.corner_invoked_calls = 0
         if oracle and row.category != "np":
             result = oracle_recognizer.recognize(image,row)
         else:
             result = recognizer.recognize(image)
+        # Oracle plated rows bypass the final pipeline attempt; never attribute a previous
+        # per-instance selection to an oracle result.
+        selection = getattr(recognizer, "last_selection", None) if not oracle or row.category == "np" else None
+        if selection is not None:
+            source_counts["selected_result_count"] += 1
+            if selection["crnn_selected"]:
+                source_counts["crnn_selected_count"] += 1
+                source_correct["crnn_selected_correct"] += result.plate_no == row.plate_no
+            if selection["source"] == "net":
+                source_counts["network_candidate_selected_count"] += 1
+                source_correct["network_candidate_selected_correct"] += result.plate_no == row.plate_no
+        reader_invoked_images += "reader" in result.stage_ms
+        corner_invoked_images += "corner" in result.stage_ms
+        reader_invoked_calls += getattr(recognizer, "reader_invoked_calls", 0)
+        corner_invoked_calls += getattr(recognizer, "corner_invoked_calls", 0)
         samples.append((row,result))
         truth = lookup.get(path_key(image_path(row, manifest)))
         if truth is not None:
@@ -178,6 +207,10 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
                         if inherited_row.get("top3_hit") is not None else None)
         traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
                        "prediction": result.plate_no or "", "status": result.status.value,
+                       "selected_source": selection["source"] if selection else None,
+                       "crnn_selected": selection["crnn_selected"] if selection else None,
+                       "reader_invoked": "reader" in result.stage_ms,
+                       "corner_invoked": "corner" in result.stage_ms,
                        "failure_cause": failure_cause(row, result),
                        "segmentation_failed": result.status == S.SEG_FAILED,
                        "top3_hit": location["hit"] if location is not None else None})
@@ -193,6 +226,22 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
             failures.append({"path":row.path, "truth":row.plate_no, "category":row.category,
                              "cause":cause, "image":filename, "result":result.to_dict()})
     report = {"mode":recognizer.version, "oracle":oracle,
+              "evaluation_config": effective_config_info(effective_config, getattr(recognizer, "config_path", None)) if effective_config else None,
+              "network_attribution": {
+                  "selection_source": "observed _Attempt at final _build; no-output rows are not selected",
+                  "invocation_source": "stage_ms key means invoked only; it does not imply selected",
+                  "selected_result_count": source_counts["selected_result_count"],
+                  "crnn_selected_count": source_counts["crnn_selected_count"],
+                  "crnn_selected_correct": source_correct["crnn_selected_correct"],
+                  "crnn_selected_accuracy": _fraction(source_correct["crnn_selected_correct"], source_counts["crnn_selected_count"]),
+                  "network_candidate_selected_count": source_counts["network_candidate_selected_count"],
+                  "network_candidate_selected_correct": source_correct["network_candidate_selected_correct"],
+                  "network_candidate_selected_accuracy": _fraction(source_correct["network_candidate_selected_correct"], source_counts["network_candidate_selected_count"]),
+                  "reader_invoked_images": reader_invoked_images,
+                  "corner_invoked_images": corner_invoked_images,
+                  "reader_invoked_calls": reader_invoked_calls,
+                  "corner_invoked_calls": corner_invoked_calls,
+              },
               "manifest_rows": len(rows), "decoded_rows": len(samples),
               "decode_error_count": len(decode_errors), "decode_errors": decode_errors,
               "oracle_scope":"ground truth quad, color and length; np runs normally" if oracle else None,
@@ -203,6 +252,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
               "subsets": {key: metrics(value) for key, value in sorted(subset_samples.items())},
               "locate_recall": (summarize_location(locations, excluded_np=sum(row.category == "np" for row in rows))
                                 if locate_recall else None),
+              "locate_recall_method": "classic locate() Top-3 candidates; corner network fusion is not included"
+                                     if locate_recall else None,
               "overall_g2":metrics([(r,s) for r,s in samples if r.category in {"clear","night","tilt","dirty"}]),
               "categories":{category:metrics([(r,s) for r,s in samples if r.category == category]) for category in CATEGORIES},
               "failure_causes":dict(causes),"failures":failures}
@@ -215,7 +266,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
     return report
 
 
-def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=None):
+def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=None, config=None,
+                         config_arg=None):
     """Measure Top-3 localization directly from CCPD bbox labels, without a model."""
     rows = read_manifest(manifest, check_files=False)
     if not rows:
@@ -227,7 +279,7 @@ def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=N
               {path_key(sample.row.path): sample for sample in read_samples(index)})
     locations, decode_errors = [], []
     excluded_np = 0
-    cfg = load_config()
+    cfg = config or load_config()
     for row in rows:
         if row.category == "np":
             excluded_np += 1
@@ -241,6 +293,7 @@ def evaluate_locate_only(manifest, index, out, *, sampling=None, truth_samples=N
             continue
         locations.append((sample.stratum, locate_match(image, sample.bbox, cfg)))
     report = {"mode": "locate-only", "oracle": False,
+              "evaluation_config": effective_config_info(cfg, config_arg),
               "attribution": "Top-3 localization recall measured independently; no recognizer loaded",
               "sampling": sampling,
               "locate_recall": summarize_location(locations, excluded_np=excluded_np),
@@ -305,7 +358,7 @@ def append_scoreboard(path, report, *, split, classifier):
         raise ValueError("积分板只追加验证集结果；演示请用 --split manifest-val")
     try:
         commit = subprocess.run(["git","rev-parse","--short","HEAD"],capture_output=True,text=True,
-                                check=True,cwd=ALGORITHM_DIR.parent).stdout.strip()
+                                check=True,cwd=Path(__file__).resolve().parents[3]).stdout.strip()
     except (OSError,subprocess.CalledProcessError):
         commit = "unknown"
     categories = report["categories"]
@@ -366,6 +419,7 @@ def main(argv=None):
     if args.n < 1:
         parser.error("--n must be positive")
     try:
+        cfg = config_for_args(args)
         manifest, sampling, selected = args.manifest, None, None
         if args.split == "val":
             exclusion_manifests = [Path(args.exclude_manifest)]
@@ -386,17 +440,18 @@ def main(argv=None):
             write_manifest(manifest, [sample.row for sample in selected], check_files=False)
         if args.locate_only:
             report = evaluate_locate_only(manifest, args.index, args.out, sampling=sampling,
-                                          truth_samples=selected)
+                                          truth_samples=selected, config=cfg, config_arg=args.config)
             print_report(report)
             print(f"validation_manifest={manifest}")
             print(f"report={Path(args.out)/'report.json'}")
             return 0
-        recognizer = make_recognizer(args, samples_dir=Path(manifest).resolve().parent)
+        recognizer = make_recognizer(args, samples_dir=Path(manifest).resolve().parent, cfg=cfg)
         report = evaluate(manifest, recognizer, args.out, oracle=args.oracle,
                           index=args.index if args.split == "val" or args.locate_recall else None,
                           locate_recall=args.locate_recall, sampling=sampling,
                           stage_trace=args.stage_trace, reuse_stage_trace=args.reuse_stage_trace,
-                          truth_samples=selected)
+                          truth_samples=selected, effective_config=cfg)
+        report["evaluation_config"] = effective_config_info(cfg, args.config)
         print_report(report)
         if args.split == "val":
             print(f"validation_manifest={manifest}")

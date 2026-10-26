@@ -1,35 +1,150 @@
 """Shared offline recognizer selection and benchmark utilities."""
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import platform
 import subprocess
 from pathlib import Path
 import cv2
 import numpy as np
 
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.pipeline import PlateRecognizer
 from lpr.testing import FakeRecognizer, UniformClassifier
+
+
+class AttributedPlateRecognizer(PlateRecognizer):
+    """Observe actual final pipeline selection without changing its arbitration."""
+    def __init__(self, recognizer):
+        super().__init__(recognizer.config, recognizer.classifier,
+                         corner_detector=recognizer.corner_detector,
+                         plate_reader=recognizer.plate_reader)
+        self.last_selection = None
+        self.reader_invoked_calls = 0
+        self.corner_invoked_calls = 0
+        if self.plate_reader is not None:
+            self.plate_reader = _CountingModel(self.plate_reader, "read", self, "reader_invoked_calls")
+        if self.corner_detector is not None:
+            self.corner_detector = _CountingModel(self.corner_detector, "detect", self, "corner_invoked_calls")
+
+    def _reset_observation(self):
+        self.last_selection = None
+        self.reader_invoked_calls = 0
+        self.corner_invoked_calls = 0
+
+    def _recognize_safe(self, image, lane_id, debug):
+        self._reset_observation()
+        return super()._recognize_safe(image, lane_id, debug)
+
+    def _recognize_bytes_safe(self, data, lane_id):
+        self._reset_observation()
+        return super()._recognize_bytes_safe(data, lane_id)
+
+    def _build(self, attempt, dbg):
+        result = super()._build(attempt, dbg)
+        self.last_selection = {
+            "source": attempt.rect.candidate.source,
+            "crnn_selected": attempt.seg is None,
+        }
+        return result
+
+
+class _CountingModel:
+    def __init__(self, model, method, owner, counter):
+        self._model, self._method, self._owner, self._counter = model, method, owner, counter
+
+    @property
+    def version(self):
+        return self._model.version
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def __getattribute__(self, name):
+        if name in {"read", "detect"}:
+            method = object.__getattribute__(self, "_method")
+            if name == method:
+                model = object.__getattribute__(self, "_model")
+                owner = object.__getattribute__(self, "_owner")
+                counter = object.__getattribute__(self, "_counter")
+                def counted(*args, **kwargs):
+                    setattr(owner, counter, getattr(owner, counter) + 1)
+                    return getattr(model, method)(*args, **kwargs)
+                return counted
+        return object.__getattribute__(self, name)
 
 
 def add_backend_args(parser):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--fake", action="store_true", help="integration stub, not model performance")
     group.add_argument("--uniform", action="store_true", help="real pipeline with uniform classifier (no weights)")
-    parser.add_argument("--classifier", choices=("cnn", "template", "svm"), default="cnn")
+    parser.add_argument("--config", default=None, help="runtime TOML config (defaults to LPR_CONFIG/default)")
+    parser.add_argument("--classifier", choices=("cnn", "template", "svm"), default=None)
 
 
-def make_recognizer(args, *, samples_dir=None):
-    if args.fake:
+def config_for_args(args):
+    """Resolve the effective config once; old Namespace callers remain supported."""
+    classifier = getattr(args, "classifier", None)
+    overrides = {"runtime__classifier": classifier} if classifier else {}
+    return load_config(getattr(args, "config", None), **overrides)
+
+
+def model_identity(cfg, field):
+    configured = getattr(cfg.runtime, field)
+    path = cfg.resolve_path(configured) if configured else None
+    exists = bool(path and path.is_file())
+    digest = None
+    version = None
+    if exists:
+        h = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+        # Manifests are optional; do not claim a version when unavailable.
+        manifest = path.parent / "manifest.json"
+        if manifest.is_file():
+            try:
+                version = json.loads(manifest.read_text(encoding="utf-8")).get(path.name, {}).get("version")
+            except (OSError, ValueError, AttributeError):
+                pass
+    return {"configured": bool(configured), "configured_path": configured or None,
+            "path": str(path) if path else None, "exists": exists,
+            "sha256": digest, "version": version}
+
+
+def effective_config_info(cfg, config_arg=None):
+    env = os.environ.get("LPR_CONFIG")
+    chosen = config_arg or env
+    config_path = str(Path(chosen).resolve()) if chosen else str((ALGORITHM_DIR / "config" / "default.toml").resolve())
+    dumped = cfg.model_dump(mode="json")
+    canonical = json.dumps(dumped, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {"config_path": config_path,
+            "effective_config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "effective_config": dumped,
+            "models": {"classifier": model_identity(cfg, "model_path"),
+                       "corner": model_identity(cfg, "corner_model_path"),
+                       "plate_reader": model_identity(cfg, "plate_reader_model_path")}}
+
+
+def make_recognizer(args, *, samples_dir=None, cfg=None):
+    if getattr(args, "fake", False):
         return FakeRecognizer(samples_dir=samples_dir)
-    cfg = load_config(runtime__classifier=args.classifier)
-    if args.uniform:
-        return PlateRecognizer(cfg, UniformClassifier())
-    return PlateRecognizer.from_config(runtime__classifier=args.classifier)
+    cfg = cfg or config_for_args(args)
+    recognizer = (PlateRecognizer(cfg, UniformClassifier()) if getattr(args, "uniform", False)
+                  else PlateRecognizer.from_config(getattr(args, "config", None),
+                       **({"runtime__classifier": getattr(args, "classifier")} if getattr(args, "classifier", None) else {})))
+    return AttributedPlateRecognizer(recognizer)
 
 
 def mode_name(args):
-    return "fake" if args.fake else "uniform" if args.uniform else args.classifier
+    if getattr(args, "fake", False):
+        return "fake"
+    if getattr(args, "uniform", False):
+        return "uniform"
+    return getattr(args, "classifier", None) or config_for_args(args).runtime.classifier
 
 
 def parse_size(value: str) -> tuple[int, int]:
@@ -53,9 +168,9 @@ def letterbox(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return canvas
 
 
-def runtime_info() -> dict:
+def runtime_info(cfg=None) -> dict:
     import torch
-    cfg = load_config()
+    cfg = cfg or load_config()
     torch.set_num_threads(cfg.runtime.torch_threads)
     cpu = platform.processor() or platform.machine()
     if platform.system() == "Windows":
