@@ -333,6 +333,7 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
         write_manifest(manifest, rows, check_files=False)
         evaluate_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
                         str(manifest), "--split", "manifest-val", "--out", str(target),
+                        "--stage-trace", str(target / "trace.jsonl"),
                         "--config", str(config_path)]
         run = _run(evaluate_cmd, ROOT, out / "logs" / f"dev-{subset}.log", env=env)
         hard_status[subset] = run.returncode
@@ -466,6 +467,7 @@ def recover_hard(run_dir: Path):
             log.replace(run_dir / "logs" / f"dev-{subset}-attempt1.log")
         command = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
                    str(manifest), "--split", "manifest-val", "--out", str(target),
+                   "--stage-trace", str(target / "trace.jsonl"),
                    "--config", str(config_path)]
         run = _run(command, ROOT, log, env=env)
         statuses[subset] = run.returncode

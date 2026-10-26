@@ -278,6 +278,9 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     assert "⚠️" not in (dest / "summary.md").read_text(encoding="utf-8")
     effective_path = str(config_path.resolve())
     for command, child_env in observed:
+        if "lpr_tools.eval.eval_accuracy" in command and "manifest-val" in command:
+            assert command[command.index("--stage-trace") + 1].endswith("trace.jsonl")
+            assert command[command.index("--config") + 1] == effective_path
         if "eval_accuracy" in command or "bench_latency" in command:
             assert command[command.index("--config") + 1] == effective_path
         if "eval_accuracy" in command and "--split" in command and "val" in command:
