@@ -186,3 +186,88 @@ def test_execution_change_resume_rejects_core_changes_and_overwrite(tmp_path: Pa
               resume_execution_change=True)
     assert source.is_file() and torch.load(checkpoint, map_location="cpu", weights_only=True)["epoch"] == 1
     assert existing.read_bytes() == b"keep"
+
+
+def test_real_green_boost_is_real_8_char_only():
+    from lpr_tools.train.train_crnn import _build_sampler, _record_draw_counts, _weights
+    rows = [
+        {"plate_no": "皖A12345", "source": "ground_truth", "layout": "7"},
+        {"plate_no": "皖A123456", "source": "ground_truth", "layout": "8"},
+        {"plate_no": "皖A123456", "source": "pipeline_candidate:0:0", "layout": "8"},
+        {"plate_no": "皖A123456", "source": "font_synthetic", "layout": "8"},
+    ]
+    expected = _weights(rows, real_green_boost=8)
+    sampler = _build_sampler(expected, samples_per_epoch=100, seed=42)
+    assert sampler.weights.tolist() == [1.0, 8.0, 8.0, 1.0]
+    assert sampler.num_samples == 100 and sampler.replacement is True
+    counts = {}
+    _record_draw_counts(counts, ("ground_truth", "pipeline_candidate:0:0", "font_synthetic"),
+                        torch.tensor([8, 7, 8]))
+    assert counts == {"ground_truth/layout8": 1, "pipeline_candidate/layout7": 1,
+                      "font_synthetic/layout8": 1}
+
+
+def test_from_scratch_weight_continuation_records_local_lineage_and_fresh_run(tmp_path: Path):
+    import hashlib
+    import torch
+    from lpr.recognize.crnn import CrnnNet
+    from lpr.recognize import read_manifest
+    from lpr_tools.train.train_crnn import train
+
+    data = tmp_path / "plates"
+    _make_tiny_data(data)
+    initial = tmp_path / "run1" / "best.pt"
+    initial.parent.mkdir()
+    torch.save(CrnnNet().state_dict(), initial)
+    original_sha = hashlib.sha256(initial.read_bytes()).hexdigest()
+    output = tmp_path / "run2" / "model.pt"
+    history = train([data], output, version="crnn_run2", epochs=1, batch_size=2,
+                    samples_per_epoch=2, num_workers=0, lr=.0003,
+                    init_weights=initial, init_training_run="algorithm/out/models/batch7/crnn_run1_workers1",
+                    real_green_boost=8)
+    assert len(history) == 1
+    metadata = torch.load(output.with_suffix(".checkpoint.pt"), map_location="cpu",
+                          weights_only=True)["metadata"]
+    assert metadata["initialization"]["kind"] == "local_training_continuation"
+    assert metadata["initialization"]["sha256"] == original_sha
+    assert metadata["initialization"]["source_training_run"].endswith("crnn_run1_workers1")
+    assert metadata["real_green_boost"] == 8.0
+    assert metadata["pretrained_weights"] is None
+    assert read_manifest(output.parent)["model.pt"]["input_size"] == [128, 40]
+    assert hashlib.sha256(initial.read_bytes()).hexdigest() == original_sha
+    train_log = [__import__("json").loads(line) for line in output.with_suffix(".training.json").read_text(encoding="utf-8").splitlines()]
+    assert sum(train_log[0]["actual_draw_counts"].values()) == 2
+    assert train_log[0]["actual_draw_counts"] == {"ground_truth/layout7": 2}
+
+
+def test_local_init_weight_training_resumes_identically(tmp_path: Path):
+    import hashlib
+    import torch
+    from lpr.recognize.crnn import CrnnNet
+    from lpr_tools.train.train_crnn import train
+
+    data = tmp_path / "plates"
+    _make_tiny_data(data)
+    initial = tmp_path / "local_scratch" / "best.pt"
+    initial.parent.mkdir()
+    torch.manual_seed(17)
+    torch.save(CrnnNet().state_dict(), initial)
+    initial_sha = hashlib.sha256(initial.read_bytes()).hexdigest()
+    common = dict(epochs=2, batch_size=2, samples_per_epoch=2, num_workers=0,
+                  lr=.0003, real_green_boost=8)
+    continuous = tmp_path / "continuous_init" / "model.pt"
+    split = tmp_path / "split_init" / "model.pt"
+    train([data], continuous, init_weights=initial, init_training_run="local_scratch", **common)
+    train([data], split, init_weights=initial, init_training_run="local_scratch",
+          stop_after=1, **common)
+    train([data], split, resume=split.with_suffix(".checkpoint.pt"), **common)
+    state_a = torch.load(continuous, map_location="cpu", weights_only=True)
+    state_b = torch.load(split, map_location="cpu", weights_only=True)
+    assert all(torch.equal(state_a[k], state_b[k]) for k in state_a)
+    logs_a = [__import__("json").loads(line) for line in continuous.with_suffix(".training.json").read_text(encoding="utf-8").splitlines()]
+    logs_b = [__import__("json").loads(line) for line in split.with_suffix(".training.json").read_text(encoding="utf-8").splitlines()]
+    assert [row["metrics"] for row in logs_a] == [row["metrics"] for row in logs_b]
+    metadata = torch.load(split.with_suffix(".checkpoint.pt"), map_location="cpu",
+                          weights_only=True)["metadata"]
+    assert metadata["initialization"]["sha256"] == initial_sha
+    assert metadata["real_green_boost"] == 8

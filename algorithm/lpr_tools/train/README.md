@@ -224,3 +224,20 @@ worker 数量/对应训练器实现，显式加 `--resume-execution-change` 并�
 worker 数及训练器 SHA。它不支持模型、训练数据、采样或学习率变更。源断点
 必须沿用 `<name>.checkpoint.pt`，同目录有对应 `<name>.pt` 最佳权重；原始目录
 保持不动。第七批首轮从 0 worker 迁移到 1 worker 的证据见回执。
+
+第七批第二阶段针对真实绿牌不足增加 `--real-green-boost 8`：只乘真实
+`ground_truth` / `pipeline_candidate` 的 8 位车牌采样权重，字体合成数据仍按原
+省份权重采样。权重统计用于实际 sampler；每轮日志另外记录实际
+`source/layout` 抽样数量，不能把预期概率当作已执行抽样次数。
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --init-weights algorithm/out/receipts/batch7/crnn-run1-workers1-epoch7/crnn_v1.pt --init-training-run algorithm/out/models/batch7/crnn_run1_workers1 --version crnn_v1_realgreen --real-green-boost 8 --lr 0.0003 --epochs 12 --samples-per-epoch 32768 --batch-size 128 --num-workers 1 --out algorithm/out/models/batch7/crnn_run2_realgreen_counted/crnn_v1.pt
+```
+
+这里的初始化来源是本批从随机权重训练出的第一阶段最佳第 5 轮模型；
+快照目录记录第 7 轮停止时的 last checkpoint 和此前保留的 best 权重，两者
+不是同一个模型。禁止使用外部预训练权重。`--init-weights` 与
+`--init-training-run` 必须同时提供，前者严格加载有限 Tensor state_dict并记录
+SHA，后者记录本地来源运行。新阶段使用新的优化器和输出路径；它与普通
+`--resume` 互斥。恢复第二阶段时用第二阶段 checkpoint 和原参数，不再次传
+初始化参数；初始化来源由 checkpoint 继承。两阶段耗时和完成轮次分别报告。
