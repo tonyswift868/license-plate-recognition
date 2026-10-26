@@ -39,7 +39,7 @@ def test_reader_invoked_but_not_selected_when_classic_candidate_wins(monkeypatch
         r.candidate.source == "color", 7, [], np.zeros((7, 2, 2), np.uint8), 1.))
     monkeypatch.setattr(pipeline, "decode", lambda *_: DecodeResult(S.OK, "京A12345", 7, "L7", .99, [.99]*7, []))
     # _decode_text remains None, so the reader invocation on the net candidate is not selected.
-    cfg = load_config()
+    cfg = load_config(postprocess__arbitration="first_ok")    # 本测试针对旧规则：分割路线先出 OK 即返回
     reader = Reader()
     base = pipeline.PlateRecognizer(cfg, SimpleNamespace(version="fake", predict_proba=lambda _: None),
                                     corner_detector=Corner(), plate_reader=reader)

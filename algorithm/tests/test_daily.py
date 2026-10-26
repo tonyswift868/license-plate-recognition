@@ -185,7 +185,8 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     classifier = tmp_path / "classifier.pt"
     classifier.write_bytes(b"classifier")
     config_path.write_text(f'[runtime]\nmodel_path = "{classifier.as_posix()}"\n'
-                           'corner_model_path = ""\nplate_reader_model_path = ""\n', encoding="utf-8")
+                           'corner_model_path = ""\nplate_reader_model_path = ""\n'
+                           '[postprocess]\narbitration = "first_ok"\n', encoding="utf-8")  # 不开 CRNN 时须同时用 first_ok
     index = tmp_path / "ccpd_index.csv"
     index.write_text("index", encoding="utf-8")
     fixed_val = tmp_path / "val1000_v1.csv"

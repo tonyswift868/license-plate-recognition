@@ -8,7 +8,7 @@ model_path = "models/char_cnn_v2.pt"     # 相对 algorithm/ 目录；指向 cla
 classifier = "cnn"                        # cnn | template | svm（对比实验用）
 max_candidates = 3
 corner_model_path = "models/corner_net_v1.pt"  # 四角点网络（K1 Plan B-1），空 = 不启用；相对 algorithm/ 目录（10-26 启用）
-plate_reader_model_path = ""              # 整牌识别 CRNN（K1 Plan B-2），空 = 不启用；相对 algorithm/ 目录
+plate_reader_model_path = "models/crnn_v2.pt"  # 整牌识别 CRNN（K1 Plan B-2），空 = 不启用；相对 algorithm/ 目录（10-27 启用 v2）
 
 [preprocess]
 min_side = 120
@@ -54,11 +54,12 @@ char_size = 32                            # 冻结
 min_confidence = 0.80                     # E1 阈值【待调】
 topk = 3
 province_prior = {}                       # 例如 {"陕" = 1.5}，默认关闭
-arbitration = "first_ok"                  # first_ok = 分割路线先出 OK 即返回、CRNN 只兜底；agree = 两条路线读法一致才自动通过（10-26 新增，待 03 定阈值）
-agree_min_confidence = 0.0                # 以下四项只在 agree 且启用 CRNN 时生效【待调】
-solo_min_confidence_segment = 1.01        # >1 = 关闭单边通过
-solo_min_confidence_reader = 1.01
-disagree_prefer = "reader"
+arbitration = "agree"                     # agree = 分割路线与 CRNN 读法一致才自动通过（10-27 启用）；first_ok = 旧规则（分割先出 OK 即返回、CRNN 只兜底）
+agree_min_confidence = 0.8225060701370239 # 以下四项为 03 第十批精确扫描的 99.5% 档：val1000 与 devhard 自动通过精度同时 ≥99.5%
+solo_min_confidence_segment = 0.938401460647583   # 单边通过门槛；>1 = 关闭
+solo_min_confidence_reader = 0.9818063974380493
+disagree_prefer = "segment"
+nonok_fallback = "agreement_then_reader"  # 没有结果自动通过时：同块两路线同文优先，否则取置信度最高的 CRNN 读法（03 第十批）
 
 [voting]
 min_frames = 2

@@ -122,7 +122,8 @@ FROZEN_KEYS = {
     "rectify": {"size_7", "size_8", "expand_ratio", "deskew_max_deg"},
     "segment": {"binarize", "layout7_centers", "layout7_char_w", "layout8_centers", "layout8_char_w", "char_size"},
     "postprocess": {"min_confidence", "topk", "province_prior", "arbitration", "agree_min_confidence",
-                    "solo_min_confidence_segment", "solo_min_confidence_reader", "disagree_prefer"},
+                    "solo_min_confidence_segment", "solo_min_confidence_reader", "disagree_prefer",
+                    "nonok_fallback"},
     "voting": {"min_frames", "agree_frames", "window_s"},
     "dedup": {"window_s", "dhash_max_hamming"},
 }

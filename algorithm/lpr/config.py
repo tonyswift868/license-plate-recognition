@@ -119,6 +119,7 @@ class PostprocessConfig(_Section):
     solo_min_confidence_segment: float                   # agree：读法不一致或缺一边时，单边自动通过门槛；>1 = 关闭
     solo_min_confidence_reader: float
     disagree_prefer: Literal["segment", "reader"]        # agree：不一致且都未单边通过时返回哪一边的读法
+    nonok_fallback: Literal["rank", "agreement_then_reader"]  # agree：没有任何结果自动通过时返回哪个读法
 
     @field_validator("province_prior")
     @classmethod

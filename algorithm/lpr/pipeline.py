@@ -172,6 +172,31 @@ def _arbitrate(seg: _Attempt | None, rd: _Attempt | None, pp) -> _Attempt | None
     return max((a for a in (seg, rd) if a is not None), key=lambda a: _rank(a.dec), default=None)
 
 
+def _fallback_text(pairs: list[tuple[_Attempt | None, _Attempt | None]], best: _Attempt) -> _Attempt:
+    """agree 模式且没有任何结果自动通过时（03 第十批推荐的 agreement_then_reader）：
+    先取同一块校正图上两路线读法相同的一对（按两边置信度较小值最高），否则取置信度最高的合法 CRNN 读法；
+    状态保持原结果（LOW_CONFIDENCE 等），只替换返回的读法。同分取先出现者。"""
+    agreed: tuple[_Attempt, float] | None = None
+    top_reader: _Attempt | None = None
+    for seg, rd in pairs:
+        if rd is None or rd.dec.status == S.INVALID_FORMAT:
+            continue
+        if top_reader is None or rd.dec.confidence > top_reader.dec.confidence:
+            top_reader = rd
+        if seg is not None and seg.dec.status != S.INVALID_FORMAT and seg.dec.plate_no == rd.dec.plate_no:
+            score = min(seg.dec.confidence, rd.dec.confidence)
+            if agreed is None or score > agreed[1]:
+                agreed = (rd, score)
+    pick, conf = (agreed if agreed is not None
+                  else (top_reader, top_reader.dec.confidence) if top_reader is not None else (None, 0.0))
+    if pick is None:
+        return best
+    alts = [c for c in best.dec.candidates if c[0] != pick.dec.plate_no]
+    dec = replace(pick.dec, status=best.dec.status, confidence=float(conf),
+                  candidates=[(pick.dec.plate_no, float(conf)), *alts][:max(len(best.dec.candidates), 1)])
+    return _Attempt(dec, pick.rect, None)
+
+
 def _chars_mosaic(chars: np.ndarray) -> np.ndarray:
     return np.hstack(list(chars)) if len(chars) else np.zeros((32, 32), np.uint8)
 
@@ -322,6 +347,7 @@ class PlateRecognizer:
 
         best: _Attempt | None = None
         agree = cfg.postprocess.arbitration == "agree" and self.plate_reader is not None
+        pairs: list[tuple[_Attempt | None, _Attempt | None]] = []   # agree：每块校正图两路线的结果，供回退选读法
         lead_color = candidates[0].color
         for i, cand in enumerate(candidates[:cfg.runtime.max_candidates]):
             with timer("rectify"):
@@ -355,8 +381,9 @@ class PlateRecognizer:
                     with timer("reader"):
                         text, confs = self.plate_reader.read(rect.image)
                     dec = _decode_text(text, confs, rect.color, cfg.postprocess.min_confidence)
-                    att = _arbitrate(seg_best, _Attempt(dec, rect, None) if dec is not None else None,
-                                     cfg.postprocess)
+                    rd_att = _Attempt(dec, rect, None) if dec is not None else None
+                    pairs.append((seg_best, rd_att))
+                    att = _arbitrate(seg_best, rd_att, cfg.postprocess)
                     if att is not None:
                         if best is None or _rank(att.dec) > _rank(best.dec):
                             best = att
@@ -375,6 +402,8 @@ class PlateRecognizer:
         if lead_color in _SPECIAL_COLORS:                # 走到这里说明没有 OK 结果
             return failure_result(S.UNSUPPORTED)
         if best is not None:
+            if agree and cfg.postprocess.nonok_fallback == "agreement_then_reader":
+                best = _fallback_text(pairs, best)
             return self._build(best, dbg)
         return failure_result(S.SEG_FAILED)
 

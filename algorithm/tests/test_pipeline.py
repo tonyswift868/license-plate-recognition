@@ -232,11 +232,14 @@ def test_plate_reader_rescues_seg_failed(cfg, stages):
     assert r.vehicle_type_hint == "small" and "reader" in r.stage_ms
 
 
-def test_plate_reader_not_called_after_segment_ok(cfg, stages):
+def test_plate_reader_not_called_after_segment_ok(stages):
+    from lpr.config import load_config
+
     plan, _ = stages
     plan["cands"] = [_cand(0)]
     plan["decode"] = [_dec(S.OK, 0.95)]
     reader = _FakeReader("陕A99999", [0.99] * 7)
+    cfg = load_config(postprocess__arbitration="first_ok")    # 旧规则：分割路线先出 OK 即返回
     r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG)
     assert r.plate_no == "陕A12345" and reader.calls == 0
 
@@ -258,7 +261,9 @@ def test_plate_reader_low_conf_and_invalid(cfg, stages):
 def _agree_cfg(**kw):
     from lpr.config import load_config
 
-    return load_config(postprocess={"arbitration": "agree", **kw})
+    base = {"arbitration": "agree", "agree_min_confidence": 0.0, "solo_min_confidence_segment": 1.01,
+            "solo_min_confidence_reader": 1.01, "disagree_prefer": "reader", "nonok_fallback": "rank"}
+    return load_config(postprocess={**base, **kw})
 
 
 def test_agree_mode_both_routes_same_is_ok(stages):
@@ -303,3 +308,54 @@ def test_agree_mode_without_reader_keeps_first_ok(stages):
     plan["decode"] = [_dec(S.OK, 0.95)]
     r = _recognizer_with(_agree_cfg()).recognize(IMG)
     assert r.status is S.OK and calls == [("rectify", 0), ("segment", 0, 7)]
+
+
+class _SeqReader(_FakeReader):
+    """依次返回不同读法，模拟多块校正图上的 CRNN 结果。"""
+
+    def __init__(self, outputs):
+        super().__init__("", [])
+        self.outputs = list(outputs)
+
+    def read(self, plate_image):
+        self.calls += 1
+        return self.outputs.pop(0) if self.outputs else ("", [])
+
+
+def test_fallback_prefers_same_rect_agreement(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0), _cand(1)]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.4, "陕A11111"), _dec(S.LOW_CONFIDENCE, 0.3, "陕A22222")]
+    reader = _SeqReader([("陕A99999", [0.9] * 7), ("陕A22222", [0.6] * 7)])   # 候选 1 两路线同文
+    cfg = _agree_cfg(agree_min_confidence=0.99, nonok_fallback="agreement_then_reader")
+    r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.plate_no == "陕A22222" and r.confidence == 0.3
+    assert r.bbox[0] == 1 and r.candidates[0][0] == "陕A22222"
+
+
+def test_fallback_without_agreement_takes_top_reader(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0), _cand(1)]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.95, "陕A11111"), _dec(S.LOW_CONFIDENCE, 0.95, "陕A22222")]
+    reader = _SeqReader([("陕A33333", [0.5] * 7), ("陕A44444", [0.7] * 7)])
+    cfg = _agree_cfg(nonok_fallback="agreement_then_reader", disagree_prefer="segment")
+    r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.plate_no == "陕A44444" and r.confidence == 0.7
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.95, "陕A11111"), _dec(S.LOW_CONFIDENCE, 0.95, "陕A22222")]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.95, "陕A11111"), _dec(S.LOW_CONFIDENCE, 0.95, "陕A22222")]
+    r = _recognizer_with(_agree_cfg(disagree_prefer="segment"),
+                         plate_reader=_SeqReader([("陕A33333", [0.5] * 7), ("陕A44444", [0.7] * 7)])).recognize(IMG)
+    assert r.plate_no in {"陕A11111", "陕A22222"}                 # rank 回退：仍按旧规则取分割读法
+
+
+def test_fallback_does_not_touch_ok_or_unsupported(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["decode"] = [_dec(S.OK, 0.99)]
+    cfg = _agree_cfg(nonok_fallback="agreement_then_reader")
+    r = _recognizer_with(cfg, plate_reader=_FakeReader("陕A12345", [0.99] * 7)).recognize(IMG)
+    assert r.status is S.OK and r.plate_no == "陕A12345"
+    plan["cands"] = [_cand(0, "white")]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.5)]
+    r = _recognizer_with(cfg, plate_reader=_FakeReader("陕A54321", [0.9] * 7)).recognize(IMG)
+    assert r.status is S.UNSUPPORTED
