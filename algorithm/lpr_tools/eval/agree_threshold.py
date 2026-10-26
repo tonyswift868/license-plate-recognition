@@ -42,6 +42,17 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _validate_e1_model_paths(cfg, expected_reader_model: str) -> None:
+    expected = {"model_path": "char_cnn_v2.pt", "corner_model_path": "corner_net_v1.pt",
+                "plate_reader_model_path": expected_reader_model}
+    if cfg.runtime.classifier != "cnn" or any(
+            not getattr(cfg.runtime, field) or
+            Path(getattr(cfg.runtime, field)).name != filename or
+            not cfg.resolve_path(getattr(cfg.runtime, field)).is_file()
+            for field, filename in expected.items()):
+        raise ValueError(f"E1 trace requires CNNv2 + corner_net_v1 + {expected_reader_model} model paths")
+
+
 def _attempt(dec):
     if dec is None:
         return None
@@ -464,6 +475,9 @@ def main(argv=None):
     parser.add_argument("--repair-invalid-fallbacks", action="store_true")
     parser.add_argument("--stamp-identity", action="store_true")
     parser.add_argument("--max-search-nodes", type=int, default=200_000)
+    parser.add_argument("--expected-reader-model", choices=("crnn_v1.pt", "crnn_v2.pt"),
+                        default="crnn_v1.pt",
+                        help="require this configured reader artifact and record its exact identity")
     parser.add_argument("--seed-file", default=str(ROOT / "algorithm/out/receipts/第九批/e1/root-refined-seeds.json"))
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
@@ -474,14 +488,10 @@ def main(argv=None):
         raise ValueError("trace config must use arbitration=agree and torch_threads=2")
     if cfg.postprocess.min_confidence != 0.8:
         raise ValueError("E1 replay requires fixed postprocess.min_confidence=0.8")
-    expected_models = {"model_path": "char_cnn_v2.pt", "corner_model_path": "corner_net_v1.pt",
-                       "plate_reader_model_path": "crnn_v1.pt"}
-    if cfg.runtime.classifier != "cnn" or any(
-            not getattr(cfg.runtime, field) or
-            Path(getattr(cfg.runtime, field)).name != filename or
-            not cfg.resolve_path(getattr(cfg.runtime, field)).is_file()
-            for field, filename in expected_models.items()):
-        raise ValueError("E1 trace requires CNNv2 + corner_net_v1 + crnn_v1 model paths")
+    _validate_e1_model_paths(cfg, args.expected_reader_model)
+    launch_source_sha = sha256(Path(__file__).resolve())
+    model_manifest = ROOT / "algorithm/models/manifest.json"
+    launch_manifest_sha = sha256(model_manifest)
     env = {"PYTHONPATH": str(ROOT / "algorithm"), "LPR_CONFIG": str(Path(args.config).resolve())}
     os.environ.update(env)
     trace = out / "trace.jsonl"
@@ -537,6 +547,10 @@ def main(argv=None):
             raise ValueError("existing trace effective config differs; refuse scan")
         if identity.get("models") != now_models:
             raise ValueError("existing trace model files differ; refuse scan")
+        if identity.get("expected_reader_model", "crnn_v1.pt") != args.expected_reader_model:
+            raise ValueError("existing trace reader model selector differs; refuse scan")
+        if identity.get("model_manifest_sha256", launch_manifest_sha) != launch_manifest_sha:
+            raise ValueError("existing trace model manifest differs; refuse scan")
         if identity.get("pipeline_sha256") != sha256(ROOT / "algorithm/lpr/pipeline.py"):
             raise ValueError("existing trace pipeline source differs; refuse scan")
         if identity.get("trace_sha256") != sha256(trace):
@@ -576,6 +590,9 @@ def main(argv=None):
                 "models": {field: {"path": str(cfg.resolve_path(getattr(cfg.runtime, field))),
                                    "sha256": sha256(cfg.resolve_path(getattr(cfg.runtime, field)))}
                            for field in ("model_path", "corner_model_path", "plate_reader_model_path")},
+                "expected_reader_model": args.expected_reader_model,
+                "model_manifest_sha256": launch_manifest_sha,
+                "trace_source_sha256_at_launch": launch_source_sha,
                 "manifests": {str(p): sha256(p) for p in (FIXED_VAL_MANIFEST, FIXED_HARD_MANIFEST)},
                 "pipeline_sha256": sha256(ROOT / "algorithm/lpr/pipeline.py"),
                 "path_list_sha256": hashlib.sha256(("\n".join(s.row.path for s in samples) + "\n").encode("utf-8")).hexdigest(),
