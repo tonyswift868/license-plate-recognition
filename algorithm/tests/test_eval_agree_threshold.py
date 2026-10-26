@@ -1,5 +1,6 @@
 import random
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import lpr_tools.eval.agree_threshold as agree_threshold_module
@@ -8,11 +9,36 @@ from lpr.pipeline import _Attempt
 from lpr.types import DecodeResult, RecogStatus
 from lpr_tools.eval.agree_threshold import (arbitrate_pair, exact_branch_bound,
                                             replay_record, threshold_boundaries,
-                                            _compile_records, _fast_counts)
+                                            _compile_records, _fast_counts,
+                                            _validate_e1_model_paths)
 
 
 def _pred(plate, confidence, status="OK", valid=True):
     return {"plate": plate, "confidence": confidence, "status": status, "valid": valid}
+
+
+def test_e1_model_validation_accepts_crnn_v2_only_when_requested(tmp_path):
+    names = ("char_cnn_v2.pt", "corner_net_v1.pt", "crnn_v1.pt", "crnn_v2.pt")
+    paths = {name: tmp_path / name for name in names}
+    for path in paths.values():
+        path.write_bytes(b"fixture")
+
+    class Config:
+        runtime = SimpleNamespace(classifier="cnn", model_path="models/char_cnn_v2.pt",
+                                  corner_model_path="models/corner_net_v1.pt",
+                                  plate_reader_model_path="models/crnn_v2.pt")
+
+        @staticmethod
+        def resolve_path(value):
+            return paths[Path(value).name]
+
+    _validate_e1_model_paths(Config(), "crnn_v2.pt")
+    try:
+        _validate_e1_model_paths(Config(), "crnn_v1.pt")
+    except ValueError as exc:
+        assert "crnn_v1.pt" in str(exc)
+    else:
+        raise AssertionError("expected mismatch rejection for a crnn_v2 config")
 
 
 def test_agreement_precedes_solo_and_uses_minimum_confidence():
