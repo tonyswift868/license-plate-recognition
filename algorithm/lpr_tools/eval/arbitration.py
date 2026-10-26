@@ -5,12 +5,14 @@ This is diagnostic analysis only; it does not change production ordering.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -21,7 +23,7 @@ from lpr.segment import segment
 from lpr.types import RecogStatus as S
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest, write_manifest
-from .common import make_recognizer
+from .common import effective_config_info, make_recognizer
 from .index_samples import DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, sample_validation
 
 
@@ -37,6 +39,9 @@ def replay_attempts(record: dict, threshold: float = 0.80) -> dict:
     """
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be in [0, 1]")
+    if record.get("input_error"):
+        return {"plate_no": None, "status": "BAD_INPUT", "confidence": 0.0,
+                "selected_attempt_index": None, "early_return_attempt_index": None}
     best = None
     selected = None
     early_index = None
@@ -72,8 +77,13 @@ def trace_image(image, recognizer, row):
     cfg = recognizer.config
     pre = preprocess(image, cfg.preprocess, cfg.lane_roi(None))
     candidates = locate(pre, cfg.locate, cfg.runtime.max_candidates)
+    if recognizer.corner_detector is not None:
+        from lpr.pipeline import _in_roi, _merge_candidates
+        roi = cfg.lane_roi(None)
+        net = [c for c in recognizer.corner_detector.detect(image, cfg.runtime.max_candidates)
+               if _in_roi(c, roi)]
+        candidates = _merge_candidates(net, candidates, cfg.runtime.max_candidates)
     attempts = []
-    decoded_slots = []
     lead_color = candidates[0].color if candidates else "unknown"
     for ci, cand in enumerate(candidates[:cfg.runtime.max_candidates]):
         rects = pipeline._rectifications(image, cand, cfg.rectify)
@@ -84,27 +94,37 @@ def trace_image(image, recognizer, row):
                 seg = segment(rect, layout, cfg.segment)
                 item = {"attempt_index": len(attempts), "candidate_index": ci,
                         "rect_index": ri, "layout": layout, "color": rect.color,
+                        "candidate_source": cand.source,
                         "decoded": False, "seg_ok": bool(seg.ok)}
                 if seg.ok:
-                    item.update(decoded=None)
-                    decoded_slots.append((len(attempts), seg.chars, seg.layout, rect.color))
+                    probs = recognizer.classifier.predict_proba(seg.chars)
+                    dec = pipeline.decode(probs, seg.layout, rect.color, cfg.postprocess)
+                    item.update(decoded=True, plate_no=dec.plate_no,
+                                format_valid=dec.status != S.INVALID_FORMAT,
+                                status=dec.status.value, confidence=float(dec.confidence),
+                                char_confidences=[float(x) for x in dec.char_confidences],
+                                candidates=[[p, float(s)] for p, s in dec.candidates])
                 else:
                     item.update(plate_no=None, status="SEG_FAILED", confidence=0.0,
                                 char_confidences=[], candidates=[])
                 attempts.append(item)
-    if decoded_slots:
-        joined = np.concatenate([slot[1] for slot in decoded_slots], axis=0)
-        all_probs = recognizer.classifier.predict_proba(joined)
-        offset = 0
-        for attempt_index, chars, layout, color in decoded_slots:
-            probs = all_probs[offset:offset + layout]
-            offset += layout
-            dec = pipeline.decode(probs, layout, color, cfg.postprocess)
-            attempts[attempt_index].update(decoded=True, plate_no=dec.plate_no,
-                format_valid=dec.status != S.INVALID_FORMAT, status=dec.status.value,
-                confidence=float(dec.confidence),
-                char_confidences=[float(x) for x in dec.char_confidences],
-                candidates=[[p, float(s)] for p, s in dec.candidates])
+            if recognizer.plate_reader is not None:
+                text, confs = recognizer.plate_reader.read(rect.image)
+                reader_decoded = len(text) in (7, 8) and len(confs) == len(text)
+                reader_format_valid = reader_decoded and pipeline.match_layout(text) is not None
+                item = {"attempt_index": len(attempts), "candidate_index": ci,
+                        "rect_index": ri, "layout": len(text) if reader_decoded else 0,
+                        "color": rect.color, "candidate_source": cand.source,
+                        "decoded": bool(reader_decoded),
+                        "seg_ok": False, "reader": True}
+                if reader_decoded:
+                    item.update(plate_no=text, format_valid=reader_format_valid,
+                                confidence=float(min(confs)), char_confidences=[float(x) for x in confs],
+                                candidates=[])
+                else:
+                    item.update(plate_no=None, format_valid=False, confidence=0.0,
+                                char_confidences=[], candidates=[])
+                attempts.append(item)
     return {"path": row.path, "truth": row.plate_no, "category": row.category,
             "truth_color": row.plate_color, "lead_color": lead_color, "candidate_count": len(candidates),
             "attempts": attempts}
@@ -288,10 +308,18 @@ def main(argv=None):
     parser.add_argument("--exclude-manifest", default=r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv")
     parser.add_argument("--n", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--manifest", default=r"D:\keshe2\algorithm\data\index\val1000_v1.csv",
+                        help="fixed ordered validation manifest")
+    parser.add_argument("--config", default=str(Path(__file__).parents[2] / "config" / "default.toml"))
     parser.add_argument("--out", required=True)
     parser.add_argument("--validation-run-dir", help="reuse completed daily val1000 output directory and its sampling report")
     parser.add_argument("--reanalyze", action="store_true", help="recompute summaries from an existing attempts.jsonl without model inference")
     args = parser.parse_args(argv)
+    fixed_manifest = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv").resolve()
+    if Path(args.manifest).resolve() != fixed_manifest:
+        parser.error("--manifest must be the fixed shared val1000_v1.csv")
+    if args.validation_run_dir:
+        parser.error("--validation-run-dir is obsolete; read the fixed val1000 manifest directly")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if args.reanalyze:
@@ -301,7 +329,68 @@ def main(argv=None):
             parser.error("--reanalyze requires existing attempts.jsonl and report.json")
         records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line]
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        manifest = Path(report.get("selection", {}).get("manifest_path", args.manifest))
+        rows = read_manifest(manifest, check_files=True)
+        existing = {path_key(record["path"]): record for record in records}
+        initial_errors = list(report.get("decode_errors", []))
+        errors_by_path = {path_key(row["path"]): row["reason"] for row in initial_errors}
+        reconciled = []
+        recognizer = None
+        replay_matches = 0
+        for row in rows:
+            key = path_key(image_path(row, manifest))
+            if key in existing:
+                record = existing[key]
+                actual, baseline = record.get("actual", {}), record.get("baseline_replay", {})
+                if (actual.get("status") != baseline.get("status")
+                        or actual.get("plate_no") != baseline.get("plate_no")
+                        or float(actual.get("confidence", 0)) != float(baseline.get("confidence", 0))):
+                    raise ValueError(f"stored replay is not exactly equal to production: {row.path}")
+                reconciled.append(record)
+                replay_matches += 1
+                continue
+            image, reason = decode_image(image_path(row, manifest))
+            if key not in errors_by_path:
+                raise ValueError(f"cannot reconcile missing trace row for {row.path}")
+            if image is not None:
+                if recognizer is None:
+                    recognizer = make_recognizer(argparse.Namespace(
+                        fake=False, uniform=False, classifier=None, config=report["config_path"]))
+                actual = recognizer.recognize(image)
+                record = trace_image(image, recognizer, row)
+                outcome = replay_attempts(record, report["config_min_confidence"])
+                record["baseline_replay"] = outcome
+                record["actual"] = {"plate_no": actual.plate_no, "status": actual.status.value,
+                                    "confidence": float(actual.confidence)}
+                if (actual.status.value != outcome["status"] or actual.plate_no != outcome["plate_no"]
+                        or float(actual.confidence) != float(outcome["confidence"])):
+                    raise ValueError(f"retraced validation row does not match production: {row.path}")
+                del errors_by_path[key]
+            else:
+                record = {"path": str(image_path(row, manifest)), "truth": row.plate_no,
+                          "category": row.category, "truth_color": row.plate_color,
+                          "lead_color": "unknown", "candidate_count": 0, "attempts": [],
+                          "input_error": reason}
+                outcome = replay_attempts(record, report["config_min_confidence"])
+                record["baseline_replay"] = outcome
+                record["actual"] = {"plate_no": None, "status": "BAD_INPUT", "confidence": 0.0}
+            replay_matches += 1
+            reconciled.append(record)
+        if len(reconciled) != 1000:
+            raise ValueError("fixed val1000 trace reconciliation did not produce exactly 1000 rows")
+        records = reconciled
         report.update(analyze(records))
+        report["traced_rows"] = len(records)
+        report["decoded_rows"] = len(records) - len(errors_by_path)
+        report["recovered_decode_errors"] = [item for item in initial_errors
+                                              if path_key(item["path"]) not in errors_by_path]
+        report["decode_errors"] = [item for item in report.get("decode_errors", [])
+                                    if path_key(item["path"]) in errors_by_path]
+        report["replay_validation"] = {"n": len(records), "match": replay_matches,
+                                        "decode_error_rows": len(errors_by_path),
+                                        "mismatches": []}
+        trace_path.write_text("".join(json.dumps(record, ensure_ascii=False)+"\n" for record in records),
+                              encoding="utf-8")
         report["trace_sha256"] = hashlib.sha256(trace_path.read_bytes()).hexdigest()
         report["arbitration_source_path"] = str(Path(__file__).resolve())
         report["arbitration_source_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -311,25 +400,15 @@ def main(argv=None):
                           "alternative_rules_at_0_80": report["alternative_rules_at_0_80"]}, ensure_ascii=False, indent=2))
         return 0
     validation_report = None
-    if args.validation_run_dir:
-        validation_dir = Path(args.validation_run_dir)
-        manifest = validation_dir / "val1000" / "validation_manifest.csv"
-        validation_report_path = validation_dir / "val1000" / "report.json"
-        if not manifest.is_file() or not validation_report_path.is_file():
-            parser.error("validation run must contain val1000/validation_manifest.csv and report.json")
-        validation_report = json.loads(validation_report_path.read_text(encoding="utf-8"))
-        sampling = validation_report.get("sampling") or {}
-        rows = read_manifest(manifest)
-        sampling_paths = sampling.get("paths") or []
-        if (sampling.get("split") != "val" or sampling.get("seed") != args.seed
-                or sampling.get("selected_n") != args.n or len(rows) != args.n
-                or len(sampling_paths) != len(rows)
-                or [path_key(p) for p in sampling_paths] != [path_key(row.path) for row in rows]):
-            parser.error("validation run sampling mode/seed/row count does not match requested val run")
-        if not str(validation_report.get("mode", "")).endswith("char_cnn_v1"):
-            parser.error("validation run was not evaluated with the CNN v1 recognizer")
-        from types import SimpleNamespace
-        selected = [SimpleNamespace(row=row) for row in rows]
+    if args.manifest:
+        manifest = Path(args.manifest)
+        rows = read_manifest(manifest, check_files=True)
+        if args.n != 1000 or len(rows) != 1000:
+            parser.error("fixed val1000 manifest must contain exactly 1000 rows; --n must remain 1000")
+        selected = [SimpleNamespace(row=row, split="val", subset=row.source.rsplit("/", 1)[-1]) for row in rows]
+        sampling = {"split": "val", "fixed": True, "selected_n": len(rows),
+                    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    "paths": [row.path for row in rows]}
         (out / "validation_manifest.csv").write_bytes(manifest.read_bytes())
     else:
         selected, sampling = sample_validation(args.index, n=args.n, seed=args.seed,
@@ -337,7 +416,8 @@ def main(argv=None):
                                                    Path(__file__).parents[2] / "tests/data/golden/golden_manifest.csv"])
         manifest = out / "validation_manifest.csv"
         write_manifest(manifest, [s.row for s in selected], check_files=False)
-    recognizer = make_recognizer(argparse.Namespace(fake=False, uniform=False, classifier="cnn"))
+    recognizer = make_recognizer(argparse.Namespace(fake=False, uniform=False, classifier=None,
+                                                     config=args.config))
     records = []
     decode_errors = []
     verify = Counter()
@@ -356,7 +436,7 @@ def main(argv=None):
         verify["max_confidence_abs_diff"] = max(verify["max_confidence_abs_diff"], confidence_diff)
         plate_match = replay["plate_no"] == actual.plate_no
         status_match = replay["status"] == actual.status.value
-        confidence_match = confidence_diff < 1e-6
+        confidence_match = replay["confidence"] == float(actual.confidence)
         verify["plate_match"] += plate_match
         verify["status_match"] += status_match
         verify["confidence_match"] += confidence_match
@@ -375,7 +455,7 @@ def main(argv=None):
     report = analyze(records)
     model_path = recognizer.config.resolve_path(recognizer.config.runtime.model_path)
     algorithm_dir = Path(__file__).parents[2]
-    config_path = Path(os.environ["LPR_CONFIG"]).resolve() if os.environ.get("LPR_CONFIG") else algorithm_dir / "config/default.toml"
+    config_path = Path(args.config).resolve()
     def sha256(path):
         digest = hashlib.sha256()
         with Path(path).open("rb") as source:
@@ -383,17 +463,42 @@ def main(argv=None):
                 digest.update(block)
         return digest.hexdigest()
     selected_keys = [path_key(image_path(s.row, manifest)) for s in selected]
-    frozen = set()
-    for frozen_manifest in (Path(args.exclude_manifest), algorithm_dir / "tests/data/golden/golden_manifest.csv"):
-        if frozen_manifest.is_file():
-            frozen.update(path_key(image_path(r, frozen_manifest)) for r in read_manifest(frozen_manifest))
+    frozen_paths, frozen_hashes = set(), set()
+    exclusion_manifests = [Path(args.exclude_manifest), algorithm_dir / "tests/data/golden/golden_manifest.csv",
+                           Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv"),
+                           Path(r"D:\keshe2\algorithm\data\index\undecodable.csv")]
+    for frozen_manifest in exclusion_manifests:
+        if not frozen_manifest.is_file():
+            raise FileNotFoundError(f"required frozen exclusion list missing: {frozen_manifest}")
+        if frozen_manifest.name == "undecodable.csv":
+            with frozen_manifest.open(encoding="utf-8-sig", newline="") as handle:
+                excluded_rows = [row["path"] for row in csv.DictReader(handle)]
+        else:
+            excluded_rows = [image_path(r, frozen_manifest) for r in read_manifest(frozen_manifest)]
+        frozen_paths.update(path_key(p) for p in excluded_rows)
+        for p in excluded_rows:
+            candidate = Path(p)
+            if not candidate.is_file():
+                raise FileNotFoundError(f"required frozen exclusion image missing: {candidate}")
+            blob = candidate.read_bytes()
+            frozen_hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
+    selected_hashes = set()
+    for sample in selected:
+        image_bytes = Path(image_path(sample.row, manifest)).read_bytes()
+        selected_hashes.add((len(image_bytes), hashlib.sha256(image_bytes).hexdigest()))
+    path_overlap = len(set(selected_keys) & frozen_paths)
+    byte_overlap = len(selected_hashes & frozen_hashes)
+    if path_overlap or byte_overlap:
+        raise ValueError(f"fixed validation list overlaps frozen exclusions: paths={path_overlap}, bytes={byte_overlap}")
     trace_path = out / "attempts.jsonl"
     trace_path.write_text("".join(json.dumps(r, ensure_ascii=False)+"\n" for r in records), encoding="utf-8")
     config_json = json.dumps(recognizer.config.model_dump(mode="json"), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     report.update(sampling={k:v for k,v in sampling.items() if k != "paths"},
-                  selection={"split": "val", "seed": args.seed, "requested_n": args.n,
+                  selection={"split": "val", "fixed": True, "manifest_path": str(manifest.resolve()),
+                             "requested_n": args.n,
                              "selected_n": len(selected), "path_list_sha256": hashlib.sha256(("\n".join(selected_keys)+"\n").encode("utf-8")).hexdigest(),
-                             "frozen_overlap_count": len(set(selected_keys) & frozen),
+                             "frozen_overlap_count": path_overlap, "frozen_byte_overlap_count": byte_overlap,
+                             "frozen_manifests": [{"path": str(p.resolve()), "sha256": sha256(p)} for p in exclusion_manifests],
                              "manifest_sha256": sha256(manifest)},
                   decode_errors=decode_errors,
                   replay_validation=dict(verify), manifest_rows=len(selected), decoded_rows=len(records),
@@ -402,15 +507,21 @@ def main(argv=None):
                   model_path=str(model_path), model_sha256=sha256(model_path),
                   config_path=str(config_path), config_file_sha256=sha256(config_path),
                   effective_config_sha256=hashlib.sha256(config_json.encode("utf-8")).hexdigest(),
+                  effective_config=recognizer.config.model_dump(mode="json"),
+                  effective_config_info=effective_config_info(recognizer.config, args.config),
+                  corner_model_path=(str(recognizer.config.resolve_path(recognizer.config.runtime.corner_model_path))
+                                     if recognizer.config.runtime.corner_model_path else None),
+                  corner_model_sha256=(sha256(recognizer.config.resolve_path(recognizer.config.runtime.corner_model_path))
+                                       if recognizer.config.runtime.corner_model_path else None),
                   pipeline_path=str(algorithm_dir / "lpr/pipeline.py"),
                   pipeline_sha256=sha256(algorithm_dir / "lpr/pipeline.py"),
                   arbitration_source_path=str(Path(__file__).resolve()),
                   arbitration_source_sha256=sha256(Path(__file__).resolve()),
                   trace_path=str(trace_path), trace_sha256=sha256(trace_path),
-                  validation_report_path=str(validation_report_path) if args.validation_run_dir else None,
+                  validation_report_path=None,
                   validation_manifest_path=str(manifest))
     (out / "command.json").write_text(json.dumps({"argv": sys.argv, "cwd": str(Path.cwd()),
-        "validation_run_dir": args.validation_run_dir, "index": args.index,
+        "validation_run_dir": args.validation_run_dir, "index": args.index, "config": args.config,
         "manifest": str(manifest)}, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

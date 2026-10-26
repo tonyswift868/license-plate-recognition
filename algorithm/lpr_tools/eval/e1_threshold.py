@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
+from lpr.config import load_config
 from lpr import PlateRecognizer
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
@@ -62,14 +63,13 @@ def scan(records: list[dict]) -> tuple[list[dict], dict]:
                      "correct_accepted": correct,
                      "auto_pass_rate": accepted / len(records),
                      "auto_pass_precision": correct / accepted if accepted else None})
+    return rows, recommend(rows, .99)
+
+
+def recommend(rows: list[dict], precision_floor: float) -> dict | None:
     eligible = [row for row in rows if row["auto_pass_precision"] is not None
-                and row["auto_pass_precision"] >= .99]
-    if not eligible:
-        recommendation = None
-    else:
-        # At equal coverage choose the smallest threshold that yields it.
-        recommendation = max(eligible, key=lambda row: (row["accepted"], -row["threshold"]))
-    return rows, recommendation
+                and row["auto_pass_precision"] >= precision_floor]
+    return max(eligible, key=lambda row: (row["accepted"], -row["threshold"])) if eligible else None
 
 
 def _metrics_at(records: list[dict], threshold: float) -> dict:
@@ -147,12 +147,19 @@ def validate_provenance(records: list[dict], trace_path: Path, source: dict) -> 
     selection = source.get("selection", {})
     n = len(records)
     replay = source.get("replay_validation", {})
-    if selection.get("split") != "val" or selection.get("seed") != 42 or selection.get("selected_n") != 1000:
-        raise ValueError("source trace must be balanced val 1000 seed=42")
-    if source.get("manifest_rows") != n or source.get("decoded_rows") != n or n != 1000:
-        raise ValueError("source must decode every one of 1000 validation records")
-    if source.get("decode_errors") or selection.get("frozen_overlap_count") != 0:
-        raise ValueError("source contains decode errors or frozen-set overlap")
+    if selection.get("split") != "val" or selection.get("fixed") is not True or selection.get("selected_n") != 1000:
+        raise ValueError("source trace must use the fixed val1000 manifest")
+    decode_errors = source.get("decode_errors", [])
+    if (source.get("manifest_rows") != n or source.get("decoded_rows", 0) + len(decode_errors) != n
+            or n != 1000 or source.get("traced_rows", n) != n):
+        raise ValueError("source trace must account for all 1000 fixed validation rows")
+    error_paths = {path_key(item["path"]) for item in decode_errors}
+    trace_error_paths = {path_key(record["path"]) for record in records if record.get("input_error")}
+    if (error_paths != trace_error_paths or selection.get("frozen_overlap_count") != 0
+            or any(not record.get("truth") for record in records)):
+        raise ValueError("source contains unaccounted decode errors or frozen-set overlap")
+    if selection.get("frozen_byte_overlap_count") != 0:
+        raise ValueError("source fixed validation list has byte-identical frozen exclusions")
     if replay.get("n") != n or replay.get("match") != n:
         raise ValueError("source run must verify every replay against the real pipeline")
     if Path(source.get("trace_path", "")).resolve() != trace_path.resolve():
@@ -164,42 +171,86 @@ def validate_provenance(records: list[dict], trace_path: Path, source: dict) -> 
     if not manifest_path.is_file() or source.get("selection", {}).get("manifest_sha256") != sha256(manifest_path):
         raise ValueError("validation manifest SHA256 differs from the source report")
     sample_paths = [path_key(record["path"]) for record in records]
+    fixed_manifest = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
+    if (Path(selection.get("manifest_path", "")).resolve() != fixed_manifest.resolve()
+            or not fixed_manifest.is_file()
+            or selection.get("manifest_sha256") != sha256(fixed_manifest)
+            or manifest_path.read_bytes() != fixed_manifest.read_bytes()):
+        raise ValueError("trace does not use the current frozen val1000 manifest")
     expected_list_hash = hashlib.sha256(("\n".join(sample_paths) + "\n").encode("utf-8")).hexdigest()
     if len(set(sample_paths)) != n or selection.get("path_list_sha256") != expected_list_hash:
         raise ValueError("trace paths are duplicated or do not match the source selection hash")
     frozen = [Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
-              ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv"]
+              ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv",
+              Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv"),
+              Path(r"D:\keshe2\algorithm\data\index\undecodable.csv")]
+    declared_manifests = {path_key(item["path"]): item["sha256"]
+                          for item in selection.get("frozen_manifests", [])}
     frozen_paths = set()
+    frozen_hashes = set()
     for manifest in frozen:
         if not manifest.is_file():
             raise ValueError(f"frozen exclusion manifest missing: {manifest}")
-        frozen_paths.update(path_key(image_path(row, manifest)) for row in read_manifest(manifest))
-    if set(sample_paths) & frozen_paths:
-        raise ValueError("validation trace overlaps frozen evaluation data")
+        if declared_manifests.get(path_key(manifest.resolve())) != sha256(manifest):
+            raise ValueError(f"frozen exclusion manifest identity mismatch: {manifest}")
+        if manifest.name == "undecodable.csv":
+            with manifest.open(encoding="utf-8-sig", newline="") as handle:
+                exclusion_rows = [row["path"] for row in csv.DictReader(handle)]
+        else:
+            exclusion_rows = [image_path(row, manifest) for row in read_manifest(manifest)]
+        frozen_paths.update(path_key(path) for path in exclusion_rows)
+        for path in exclusion_rows:
+            path = Path(path)
+            if not path.is_file():
+                raise ValueError(f"frozen exclusion image missing: {path}")
+            blob = path.read_bytes()
+            frozen_hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
+    sample_hashes = set()
+    for record in records:
+        blob = Path(record["path"]).read_bytes()
+        sample_hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
+    if set(sample_paths) & frozen_paths or sample_hashes & frozen_hashes:
+        raise ValueError("validation trace overlaps frozen evaluation data by path or bytes")
     for record in records:
         actual, baseline = record.get("actual"), record.get("baseline_replay")
         if not actual or not baseline or actual.get("status") != baseline.get("status") \
                 or actual.get("plate_no") != baseline.get("plate_no") \
-                or abs(float(actual.get("confidence", 0)) - float(baseline.get("confidence", 0))) >= 1e-6:
+                or float(actual.get("confidence", 0)) != float(baseline.get("confidence", 0)):
             raise ValueError("stored baseline differs from the exact pipeline replay")
     config, model = Path(source["config_path"]), Path(source["model_path"])
     config_hash, model_hash = source.get("config_file_sha256"), source.get("model_sha256")
     pipeline = ALGORITHM_DIR / "lpr" / "pipeline.py"
+    corner = Path(source.get("corner_model_path", ""))
     if config_hash != sha256(config) or model_hash != sha256(model):
         raise ValueError("source config/model hash mismatch")
-    if config.resolve() != (ALGORITHM_DIR / "config" / "default.toml").resolve() \
-            or config_hash != sha256(ALGORITHM_DIR / "config" / "default.toml") \
-            or model.resolve() != (ALGORITHM_DIR / "models" / "char_cnn_v1.pt").resolve() \
-            or model_hash != sha256(ALGORITHM_DIR / "models" / "char_cnn_v1.pt") \
-            or source.get("pipeline_path") != str(pipeline) or source.get("pipeline_sha256") != sha256(pipeline):
-        raise ValueError("trace was not produced by current CNN v1/default config")
-    if "cnn_v1" not in source.get("model_version", "").lower():
-        raise ValueError("source recognizer is not CNN v1")
+    expected_config = load_config(ALGORITHM_DIR / "config" / "default.toml")
+    expected_corner = expected_config.resolve_path(expected_config.runtime.corner_model_path)
+    if (config.resolve() != (ALGORITHM_DIR / "config" / "default.toml").resolve()
+            or config_hash != sha256(ALGORITHM_DIR / "config" / "default.toml")
+            or model.resolve() != expected_config.resolve_path(expected_config.runtime.model_path).resolve()
+            or model_hash != sha256(expected_config.resolve_path(expected_config.runtime.model_path))
+            or corner.resolve() != expected_corner.resolve()
+            or not corner.is_file() or source.get("corner_model_sha256") != sha256(corner)
+            or source.get("pipeline_path") != str(pipeline) or source.get("pipeline_sha256") != sha256(pipeline)):
+        raise ValueError("trace was not produced by current CNN v2/corner default config")
+    if "cnn_v2" not in source.get("model_version", "").lower():
+        raise ValueError("source recognizer is not CNN v2")
+    effective = source.get("effective_config")
+    if effective != expected_config.model_dump(mode="json"):
+        raise ValueError("trace effective configuration differs from current default.toml")
+    canonical = json.dumps(effective, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != source.get("effective_config_sha256"):
+        raise ValueError("effective configuration identity does not match the trace report")
+    model_info = source.get("effective_config_info", {}).get("models", {})
+    for key, expected in (("classifier", source["model_sha256"]), ("corner", source["corner_model_sha256"])):
+        if not model_info.get(key, {}).get("exists") or model_info[key].get("sha256") != expected:
+            raise ValueError(f"effective {key} model identity does not match the trace report")
     return {"split": "val", "seed": 42, "n": n, "frozen_overlap": 0,
             "trace_sha256": trace_digest, "path_list_sha256": expected_list_hash,
             "config_file_sha256": config_hash,
             "effective_config_sha256": source.get("effective_config_sha256"),
-            "model_sha256": model_hash, "pipeline_sha256": source["pipeline_sha256"]}
+            "model_sha256": model_hash, "corner_model_sha256": source["corner_model_sha256"],
+            "pipeline_sha256": source["pipeline_sha256"]}
 
 
 def verify_runtime(records: list[dict], manifest: Path, threshold: float) -> dict:
@@ -207,7 +258,8 @@ def verify_runtime(records: list[dict], manifest: Path, threshold: float) -> dic
     rows = read_manifest(manifest)
     if len(rows) != len(records):
         raise ValueError("runtime verification manifest and attempt trace row counts differ")
-    recognizer = PlateRecognizer.from_config(postprocess__min_confidence=threshold)
+    recognizer = PlateRecognizer.from_config(str(ALGORITHM_DIR / "config" / "default.toml"),
+                                               postprocess__min_confidence=threshold)
     mismatches = []
     mismatch_count = 0
     accepted = correct = 0
@@ -215,18 +267,17 @@ def verify_runtime(records: list[dict], manifest: Path, threshold: float) -> dic
         if path_key(image_path(row, manifest)) != path_key(record["path"]):
             raise ValueError(f"runtime verification path/order mismatch at row {i}")
         image, reason = decode_image(image_path(row, manifest))
-        if image is None:
-            raise ValueError(f"validation image decode failed during runtime verification: {row.path}: {reason}")
-        actual = recognizer.recognize(image)
+        actual = (recognizer.recognize(image) if image is not None else
+                  recognizer.recognize_bytes(Path(image_path(row, manifest)).read_bytes()))
         replay = replay_attempts(record, threshold)
         matches = (actual.status.value == replay["status"] and actual.plate_no == replay["plate_no"]
-                   and abs(float(actual.confidence) - float(replay["confidence"])) < 1e-6)
+                   and float(actual.confidence) == float(replay["confidence"]))
         if not matches:
             mismatch_count += 1
             if len(mismatches) < 100:
                 mismatches.append({"row": i, "path": row.path, "truth": record["truth"],
                                    "actual": {"plate_no": actual.plate_no, "status": actual.status.value,
-                                              "confidence": float(actual.confidence)},
+                                              "confidence": float(actual.confidence), "decode_error": reason},
                                    "replay": replay})
         if actual.status.value == "OK":
             accepted += 1
@@ -249,6 +300,7 @@ def run(trace_path: str | Path, out: str | Path, *, runtime_check: bool = False)
     source = json.loads(source_path.read_text(encoding="utf-8"))
     provenance = validate_provenance(records, trace_path, source)
     rows, recommendation = scan(records)
+    conservative = recommend(rows, .995)
     out.mkdir(parents=True, exist_ok=True)
     with (out / "curve.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -263,34 +315,42 @@ def run(trace_path: str | Path, out: str | Path, *, runtime_check: bool = False)
                                 capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         commit = "unknown"
+    conservative = recommend(rows, .995)
     runtime_validation = None
     stable_adjustment = None
-    if runtime_check and recommendation is not None:
-        runtime_validation = verify_runtime(records, manifest, recommendation["threshold"])
-        if (not runtime_validation["verified"]
-                or runtime_validation["auto_pass_precision"] is None
-                or runtime_validation["auto_pass_precision"] < .99
-                or runtime_validation["accepted"] != recommendation["accepted"]
-                or runtime_validation["correct_accepted"] != recommendation["correct_accepted"]):
-            initial_runtime_validation = runtime_validation
-            stable_adjustment = _stable_threshold(records, recommendation)
-            if stable_adjustment is None:
-                (out / "runtime_verification.json").write_text(
-                    json.dumps(initial_runtime_validation, ensure_ascii=False, indent=2), encoding="utf-8")
-                raise ValueError("actual runtime disagrees at recommended threshold and no same-coverage stable interior threshold exists")
-            runtime_validation = verify_runtime(records, manifest, stable_adjustment["threshold"])
-            if (not runtime_validation["verified"]
-                    or runtime_validation["auto_pass_precision"] is None
-                    or runtime_validation["auto_pass_precision"] < .99
-                    or runtime_validation["accepted"] != stable_adjustment["accepted"]
-                    or runtime_validation["correct_accepted"] != stable_adjustment["correct_accepted"]):
-                (out / "runtime_verification.json").write_text(
-                    json.dumps({"initial_cut": initial_runtime_validation, "stable_retry": runtime_validation},
-                               ensure_ascii=False, indent=2), encoding="utf-8")
-                raise ValueError("runtime disagrees at the stable threshold retry")
-            recommendation = stable_adjustment
+    runtime_validations = {}
+    if runtime_check:
+        for name, selected, floor in (("precision_99", recommendation, .99),
+                                      ("precision_995", conservative, .995)):
+            if selected is None:
+                runtime_validations[name] = None
+                continue
+            checked = verify_runtime(records, manifest, selected["threshold"])
+            stable = None
+            if (not checked["verified"] or checked["auto_pass_precision"] is None
+                    or checked["auto_pass_precision"] < floor
+                    or checked["accepted"] != selected["accepted"]
+                    or checked["correct_accepted"] != selected["correct_accepted"]):
+                stable = _stable_threshold(records, selected)
+                if stable is None:
+                    runtime_validations[name] = checked
+                    raise ValueError(f"runtime disagrees at {name} threshold and no equivalent stable cut exists")
+                checked = verify_runtime(records, manifest, stable["threshold"])
+                if (not checked["verified"] or checked["auto_pass_precision"] is None
+                        or checked["auto_pass_precision"] < floor
+                        or checked["accepted"] != stable["accepted"]
+                        or checked["correct_accepted"] != stable["correct_accepted"]):
+                    runtime_validations[name] = checked
+                    raise ValueError(f"runtime disagrees at stable {name} threshold")
+                selected = stable
+            runtime_validations[name] = checked
+            if name == "precision_99":
+                recommendation = selected
+                runtime_validation = checked
+            else:
+                conservative = selected
         (out / "runtime_verification.json").write_text(
-            json.dumps(runtime_validation, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(runtime_validations, ensure_ascii=False, indent=2), encoding="utf-8")
     report = {"dataset": "validation only", "n": len(records), "provenance": provenance,
               "commit": commit,
               "trace": str(trace_path.resolve()), "trace_sha256": sha256(trace_path),
@@ -298,12 +358,21 @@ def run(trace_path: str | Path, out: str | Path, *, runtime_check: bool = False)
               "manifest_sha256": sha256(manifest) if manifest.is_file() else None,
               "config": str(config), "config_sha256": sha256(config),
               "model": str(model), "model_sha256": sha256(model),
+              "corner_model": source["corner_model_path"],
+              "corner_model_sha256": source["corner_model_sha256"],
+              "effective_config_sha256": source["effective_config_sha256"],
+              "effective_config": source["effective_config"],
+              "model_identities": source["effective_config_info"]["models"],
+              "fixed_manifest_sha256": source["selection"]["manifest_sha256"],
+              "recovered_decode_errors": source.get("recovered_decode_errors", []),
               "initial_threshold": source["config_min_confidence"],
               "default_0_80": next((row for row in rows if row["threshold"] == .80), None),
               "candidate_threshold_count": len(rows),
               "recommendation": recommendation,
+              "conservative_recommendation": conservative,
               "stable_threshold_adjustment": stable_adjustment,
               "runtime_validation": runtime_validation,
+              "runtime_validations": runtime_validations,
               "recommendation_caveat": "Empirical precision on this 1000-image validation sample; it does not guarantee 99% precision on future traffic.",
               "artifacts": {"curve_csv": "curve.csv", "curve_svg": "curve.svg"}}
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -316,14 +385,20 @@ def run(trace_path: str | Path, out: str | Path, *, runtime_check: bool = False)
                                f"{recommendation['accepted']}/{recommendation['n']} auto-pass "
                                f"({recommendation['auto_pass_rate']:.2%} coverage).")
     default = report["default_0_80"]
+    conservative_line = ("none" if conservative is None else
+                         f"{conservative['threshold']:.17g}: {conservative['correct_accepted']}/"
+                         f"{conservative['accepted']} accepted correct, "
+                         f"{conservative['auto_pass_precision']:.4%} precision, "
+                         f"{conservative['auto_pass_rate']:.2%} auto-pass")
     (out / "summary.md").write_text(
         "# E1 confidence threshold scan\n\n"
         f"{recommendation_line}\n\n"
         f"At the current 0.80 threshold: {default['correct_accepted']}/{default['accepted']} "
         f"accepted plates correct ({default['auto_pass_precision']:.2%} precision), "
         f"{default['accepted']}/{default['n']} auto-pass ({default['auto_pass_rate']:.2%} coverage).\n\n"
+        f"Conservative precision >=99.5% recommendation: {conservative_line}.\n\n"
         f"Scanned {report['candidate_threshold_count']} exact confidence cuts on {report['n']} "
-        "balanced val images (seed 42). The recommendation is an empirical result on this sample; "
+        "fixed val images. The recommendation is an empirical result on this sample; "
         "it does not guarantee 99% precision on future traffic. The architecture owner decides whether "
         "to adopt it.\n\n"
         "Runtime verification on the same ordered images: "

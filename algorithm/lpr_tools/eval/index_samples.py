@@ -4,12 +4,14 @@ from __future__ import annotations
 import math
 import os
 import random
+import csv
+import hashlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 from lpr.plate_rules import match_layout
-from lpr_tools.data.ccpd import read_index
+from lpr_tools.data.ccpd import INDEX_FIELDS, read_index
 from lpr_tools.data.manifest import COLORS, ManifestRow, image_path, parse_quad, read_manifest
 
 DEFAULT_VALIDATION_N = 300
@@ -22,6 +24,16 @@ SUBSET_CATEGORIES = {
 }
 HARD_SUBSETS = ("ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
                 "ccpd_fn", "ccpd_challenge", "ccpd_weather")
+FIXED_VAL_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
+FIXED_HARD_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv")
+FIXED_VAL_N = 1000
+FIXED_HARD_N = 2100
+FIXED_HARD_PER_SUBSET = 300
+FROZEN_DAILY_MANIFESTS = (
+    Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
+    Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden\golden_manifest.csv"),
+    Path(r"D:\keshe2\algorithm\data\index\undecodable.csv"),
+)
 
 
 @dataclass(frozen=True)
@@ -75,7 +87,7 @@ def _bbox(value: str) -> tuple[float, float, float, float]:
     return values
 
 
-def read_samples(index_path: str | Path) -> list[IndexSample]:
+def read_samples(index_path: str | Path, *, only_paths: set[str] | None = None) -> list[IndexSample]:
     """Skip unsupported labels; reject duplicate paths, including cross-split aliases.
 
     Relative image paths are relative to the index file, never the current cwd.
@@ -84,7 +96,20 @@ def read_samples(index_path: str | Path) -> list[IndexSample]:
     index_path = Path(index_path).resolve()
     seen = set()
     samples = []
-    for raw in read_index(index_path):
+    if only_paths is None:
+        raw_rows = read_index(index_path)
+    else:
+        raw_rows = []
+        with index_path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames != list(INDEX_FIELDS):
+                raise ValueError("invalid CCPD index columns")
+            for raw in reader:
+                raw_path = Path(raw["path"])
+                raw_path = raw_path if raw_path.is_absolute() else index_path.parent / raw_path
+                if path_key(raw_path) in only_paths:
+                    raw_rows.append(raw)
+    for raw in raw_rows:
         if None in raw or any(v is None for v in raw.values()) or not raw["path"].strip():
             raise ValueError("malformed CCPD index row")
         image = Path(raw["path"])
@@ -116,6 +141,85 @@ def read_samples(index_path: str | Path) -> list[IndexSample]:
         samples.append(IndexSample(row, raw["dataset"], raw["subset"], raw["split"],
                                    None if np_sample else _bbox(raw["bbox"])))
     return samples
+
+
+def fixed_manifest_samples(index_path: str | Path, manifest_path: str | Path, *,
+                           purpose: str) -> tuple[list[IndexSample], dict]:
+    """Load an ordered, versioned daily manifest and verify it against CCPD/index exclusions."""
+    if purpose not in {"val", "dev-hard"}:
+        raise ValueError("fixed manifest purpose must be val or dev-hard")
+    manifest_path = Path(manifest_path).resolve()
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"fixed {purpose} manifest missing: {manifest_path}")
+    rows = read_manifest(manifest_path, check_files=True)
+    expected = FIXED_VAL_N if purpose == "val" else FIXED_HARD_N
+    if len(rows) != expected:
+        raise ValueError(f"fixed {purpose} manifest must contain exactly {expected} rows; got {len(rows)}")
+    manifest_keys = {path_key(image_path(row, manifest_path).resolve()) for row in rows}
+    samples = read_samples(index_path, only_paths=manifest_keys)
+    by_path = {path_key(s.row.path): s for s in samples}
+    if set(by_path) != manifest_keys:
+        raise ValueError(f"fixed {purpose} manifest has paths missing from CCPD index")
+    selected = []
+    seen = set()
+    for row in rows:
+        key = path_key(image_path(row, manifest_path).resolve())
+        if key in seen:
+            raise ValueError(f"duplicate path in fixed {purpose} manifest: {key}")
+        seen.add(key)
+        sample = by_path.get(key)
+        if sample is None:
+            raise ValueError(f"fixed {purpose} image is absent from supported CCPD index: {key}")
+        if (row.plate_no, row.plate_color, row.category, row.source, row.quad) != (
+                sample.row.plate_no, sample.row.plate_color, sample.row.category,
+                sample.row.source, sample.row.quad):
+            raise ValueError(f"fixed {purpose} label/metadata differs from CCPD index: {key}")
+        if purpose == "val" and sample.split != "val":
+            raise ValueError(f"fixed validation image is not in official val split: {key}")
+        if purpose == "dev-hard" and sample.subset not in HARD_SUBSETS:
+            raise ValueError(f"fixed dev-hard manifest contains an unsupported subset: {sample.subset}")
+        selected.append(sample)
+    if purpose == "dev-hard":
+        counts = Counter(sample.subset for sample in selected)
+        if any(counts[subset] != FIXED_HARD_PER_SUBSET for subset in HARD_SUBSETS):
+            raise ValueError(f"fixed dev-hard manifest must contain exactly {FIXED_HARD_PER_SUBSET} rows per hard subset: {dict(counts)}")
+
+    blocked_paths = set()
+    blocked_hashes = set()
+    manifests = [*FROZEN_DAILY_MANIFESTS, FIXED_HARD_MANIFEST if purpose == "val" else FIXED_VAL_MANIFEST]
+    for frozen in manifests:
+        if not frozen.is_file():
+            raise FileNotFoundError(f"required daily exclusion manifest missing: {frozen}")
+        if frozen.suffix.lower() == ".csv":
+            with frozen.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames or "path" not in reader.fieldnames:
+                    raise ValueError(f"daily exclusion manifest needs a path column: {frozen}")
+                for raw in reader:
+                    if raw.get("path", "").strip():
+                        candidate = Path(raw["path"].strip())
+                        candidate = candidate if candidate.is_absolute() else frozen.parent / candidate
+                        candidate = candidate.resolve()
+                        if not candidate.is_file():
+                            raise FileNotFoundError(f"required daily exclusion image missing: {candidate}")
+                        blocked_paths.add(path_key(candidate))
+                        blob = candidate.read_bytes()
+                        blocked_hashes.add((len(blob), hashlib.sha256(blob).hexdigest()))
+        else:
+            raise ValueError(f"unsupported daily exclusion manifest format: {frozen}")
+    for selected_sample in selected:
+        source = Path(selected_sample.row.path)
+        blob = source.read_bytes()
+        digest = (len(blob), hashlib.sha256(blob).hexdigest())
+        if path_key(source) in blocked_paths or digest in blocked_hashes:
+            raise ValueError(f"fixed {purpose} image overlaps a frozen exclusion by path or bytes: {source}")
+    return selected, {"mode": "fixed_manifest", "purpose": purpose, "manifest": str(manifest_path),
+                      "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                      "selected_n": len(selected), "paths_sha256": hashlib.sha256(
+                          ("\n".join(path_key(sample.row.path) for sample in selected) + "\n").encode("utf-8")).hexdigest(),
+                      "excluded_manifests": [str(path.resolve()) for path in manifests],
+                      "selected_by_subset": dict(sorted(Counter(s.stratum for s in selected).items())),
+                      "paths": [s.row.path for s in selected]}
 
 
 def sample_validation(index_path: str | Path, *, n: int = DEFAULT_VALIDATION_N,

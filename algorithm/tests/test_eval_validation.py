@@ -41,11 +41,11 @@ def isolate_eval_defaults(tmp_path, monkeypatch):
     monkeypatch.setattr(ev, "make_recognizer", guarded_make_recognizer)
     read_samples_impl = index_samples_module.read_samples
 
-    def guarded_read_samples(index_path):
+    def guarded_read_samples(index_path, **kwargs):
         index_path = Path(index_path).resolve()
         assert index_path.is_relative_to(tmp_path.resolve()), \
             f"unit test attempted to read a non-temporary index: {index_path}"
-        return read_samples_impl(index_path)
+        return read_samples_impl(index_path, **kwargs)
 
     monkeypatch.setattr(index_samples_module, "read_samples", guarded_read_samples)
     monkeypatch.setattr(ev, "read_samples", guarded_read_samples)
@@ -163,6 +163,83 @@ def test_exclusion_manifest_union_deduplicates_canonical_aliases(tmp_path):
     remaining={path_key(sample.row.path) for sample in selected}
     assert path_key(canonical) not in remaining
     assert path_key(second_path) not in remaining
+
+
+def test_fixed_daily_manifest_preserves_order_and_rejects_byte_aliases(tmp_path, monkeypatch):
+    index, _ = index_fixture(tmp_path / "source")
+    candidates, _ = sample_validation(index, n=4)
+    selected = candidates[:2]
+    fixed = tmp_path / "val1000_v1.csv"
+    write_manifest(fixed, [sample.row for sample in selected], check_files=False)
+    exclusions = []
+    for i in range(3):
+        path = tmp_path / f"excluded-{i}.csv"
+        write_manifest(path, [], check_files=False)
+        exclusions.append(path)
+    counterpart = tmp_path / "hard.csv"
+    write_manifest(counterpart, [], check_files=False)
+    monkeypatch.setattr(index_samples_module, "FIXED_VAL_N", 2)
+    monkeypatch.setattr(index_samples_module, "FIXED_HARD_MANIFEST", counterpart)
+    monkeypatch.setattr(index_samples_module, "FROZEN_DAILY_MANIFESTS", tuple(exclusions))
+
+    loaded, metadata = index_samples_module.fixed_manifest_samples(index, fixed, purpose="val")
+    assert loaded == selected
+    assert metadata["selected_n"] == 2
+    assert metadata["manifest_sha256"] and metadata["paths_sha256"]
+
+    missing_source = tmp_path / "missing-exclusion.png"
+    write_manifest(exclusions[1], [replace(selected[0].row, path=str(missing_source))],
+                   check_files=False)
+    with pytest.raises(FileNotFoundError, match="required daily exclusion image missing"):
+        index_samples_module.fixed_manifest_samples(index, fixed, purpose="val")
+    write_manifest(exclusions[1], [], check_files=False)
+
+    duplicate = tmp_path / "byte-copy.png"
+    duplicate.write_bytes(Path(selected[0].row.path).read_bytes())
+    write_manifest(exclusions[0], [replace(selected[0].row, path=str(duplicate))], check_files=False)
+    with pytest.raises(ValueError, match="overlaps a frozen exclusion"):
+        index_samples_module.fixed_manifest_samples(index, fixed, purpose="val")
+
+
+def test_fixed_devhard_requires_every_hard_subset_at_expected_size(tmp_path, monkeypatch):
+    index, raw = index_fixture(tmp_path / "source")
+    source_root = index.parent
+    for subset in ("ccpd_blur", "ccpd_tilt", "ccpd_rotate", "ccpd_fn", "ccpd_challenge", "ccpd_weather"):
+        relative = f"images/ccpd2019/{subset}/train/0.png"
+        imwrite(source_root / relative, np.full((240, 400, 3), 90, np.uint8))
+        row = dict.fromkeys(INDEX_FIELDS, "")
+        row.update(path=relative, dataset="ccpd2019", subset=subset, split="train",
+                   has_plate="1", plate_no="陕A12345", layout="7", plate_color="blue",
+                   bbox="120 150 140 35", quad="120 150 260 150 260 185 120 185",
+                   brightness="20", skip_reason="")
+        raw.append(row)
+    save_index(index, raw)
+    indexed = read_samples(index)
+    by_subset = {}
+    for sample in indexed:
+        if sample.subset in index_samples_module.HARD_SUBSETS:
+            by_subset.setdefault(sample.subset, []).append(sample)
+    rows = [by_subset[subset][0].row for subset in index_samples_module.HARD_SUBSETS]
+    fixed = tmp_path / "devhard_v1.csv"
+    write_manifest(fixed, rows, check_files=False)
+    val = tmp_path / "val.csv"
+    write_manifest(val, [], check_files=False)
+    exclusions = []
+    for i in range(3):
+        path = tmp_path / f"excluded-hard-{i}.csv"
+        write_manifest(path, [], check_files=False)
+        exclusions.append(path)
+    monkeypatch.setattr(index_samples_module, "FIXED_HARD_N", 7)
+    monkeypatch.setattr(index_samples_module, "FIXED_HARD_PER_SUBSET", 1)
+    monkeypatch.setattr(index_samples_module, "FIXED_VAL_MANIFEST", val)
+    monkeypatch.setattr(index_samples_module, "FROZEN_DAILY_MANIFESTS", tuple(exclusions))
+    selected, _ = index_samples_module.fixed_manifest_samples(index, fixed, purpose="dev-hard")
+    assert [sample.subset for sample in selected] == list(index_samples_module.HARD_SUBSETS)
+
+    malformed = [*rows[:-1], by_subset[index_samples_module.HARD_SUBSETS[0]][1].row]
+    write_manifest(fixed, malformed, check_files=False)
+    with pytest.raises(ValueError, match="exactly 1 rows per hard subset"):
+        index_samples_module.fixed_manifest_samples(index, fixed, purpose="dev-hard")
 
 
 def test_duplicate_path_split_alias_and_skipped_labels(tmp_path):

@@ -15,6 +15,7 @@ from pathlib import Path
 from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
 from lpr_tools.data.manifest import read_manifest, write_manifest
 from .common import effective_config_info, model_identity
+from .index_samples import FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST
 
 ROOT = ALGORITHM_DIR.parent
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -48,10 +49,21 @@ def _verify_marker_config(marker):
     saved = marker.get("effective_config")
     if not saved:
         raise ValueError("daily marker has no effective config identity; refusing to mix run configurations")
-    path, current = _effective_config(Path(saved["config_path"]))
+    selected_config, current = _effective_config(Path(saved["config_path"]))
     if current != saved:
         raise ValueError("effective config/model identity changed since daily validation; refusing to mix configurations")
-    return path
+    fixed = marker.get("fixed_manifests", {})
+    if fixed:
+        for name, manifest_path in (("val", FIXED_VAL_MANIFEST), ("dev-hard", FIXED_HARD_MANIFEST)):
+            identity = fixed.get(name, {})
+            if not manifest_path.is_file() or _sha(manifest_path) != identity.get("sha256"):
+                raise ValueError(f"fixed {name} manifest changed since daily validation; refusing to resume")
+        run_dir = Path(marker.get("run_dir", ""))
+        for rel, expected in marker.get("run_manifests", {}).items():
+            artifact = run_dir / rel
+            if not artifact.is_file() or _sha(artifact) != expected:
+                raise ValueError(f"daily run manifest changed since validation: {artifact}")
+    return selected_config
 
 
 def _attribution(reports):
@@ -103,11 +115,14 @@ def _scoreboard_line(date, commit, val, hard, bench):
     recall = location["overall"]["recall"] if location else None
     p95 = (bench.get("wall_time") or {}).get("p95_ms")
     attr = val.get("network_attribution", {})
+    input_errors = val.get("decode_error_count", 0) + sum(
+        report.get("decode_error_count", 0) for report in hard.get("reports", {}).values())
     note = (f"daily; val n={metrics['n']}; auto-pass={_fmt(metrics.get('auto_pass_rate'))}; "
             f"CRNN selected={attr.get('crnn_selected_count', 0)} "
             f"accuracy={_fmt(attr.get('crnn_selected_accuracy'))}; "
             f"network candidate selected={attr.get('network_candidate_selected_count', 0)}; "
-            f"dev-hard 7x300; golden={hard.get('golden_correct', 'N/A')}/20")
+            f"Top-3 classic-only; dev-hard 7x300; fixed-list decode errors={input_errors}; "
+            f"golden={hard.get('golden_correct', 'N/A')}/20")
     mode = val.get("mode", "cnn")
     classifier = "cnn v1" if "char_cnn_v1" in mode else mode
     values = [date, commit, classifier,
@@ -241,15 +256,15 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     config_path, effective_config = _effective_config(config_path)
     env = _child_env(config_path)
     val_out = out / "val1000"
-    val_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--split", "val", "--n", "1000",
-               "--seed", "42", "--locate-recall", "--index", str(index), "--out", str(val_out),
+    val_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--split", "val",
+               "--fixed-manifest", str(FIXED_VAL_MANIFEST), "--locate-recall", "--index", str(index), "--out", str(val_out),
                "--stage-trace", str(out / "val1000" / "trace.jsonl"), "--config", str(config_path)]
     val_run = _run(val_cmd, ROOT, out / "logs" / "val1000.log", env=env)
     if val_run.returncode:
         raise RuntimeError(f"val1000 failed ({val_run.returncode}); see {out / 'logs' / 'val1000.log'}")
     val_report = _read_json(val_out / "report.json")
-    if val_report.get("decoded_rows") != 1000 or val_report.get("decode_error_count"):
-        raise RuntimeError("val1000 incomplete or contains decode errors; see report.json")
+    if val_report.get("manifest_rows") != 1000 or val_report.get("scored_rows") != 1000:
+        raise RuntimeError("fixed val1000 manifest did not score all 1000 rows; see report.json")
 
     hard_reports = {}
     hard_status = {}
@@ -258,14 +273,12 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     sample_all = hard_out / "all-hard-manifest.csv"
     sample_meta = hard_out / "sampling.json"
     command = [str(PYTHON), "-c",
-               "from pathlib import Path; import sys,json; from lpr_tools.eval.index_samples import sample_dev_hard; "
+               "from pathlib import Path; import sys,json; from lpr_tools.eval.index_samples import fixed_manifest_samples; "
                "from lpr_tools.data.manifest import write_manifest; "
-               "selected,meta=sample_dev_hard(sys.argv[1],n=300,seed=42,exclude_manifest=[Path(sys.argv[2]),Path(sys.argv[3])]); "
-               "write_manifest(sys.argv[4],[s.row for s in selected],check_files=False); "
-               "Path(sys.argv[5]).write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')",
-               str(index), str(INDEX.parent / "testset_manifest_v1.csv"),
-               str(ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv"),
-               str(sample_all), str(sample_meta)]
+               "selected,meta=fixed_manifest_samples(sys.argv[1],sys.argv[2],purpose='dev-hard'); "
+               "write_manifest(sys.argv[3],[s.row for s in selected],check_files=False); "
+               "Path(sys.argv[4]).write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')",
+               str(index), str(FIXED_HARD_MANIFEST), str(sample_all), str(sample_meta)]
     sample_run = _run(command, ROOT, out / "logs" / "sample-hard.log", env=env)
     if sample_run.returncode:
         raise RuntimeError(f"dev-hard sampling failed; see {out / 'logs' / 'sample-hard.log'}")
@@ -288,9 +301,14 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
         hard_status[subset] = run.returncode
         if run.returncode == 0:
             report = _read_json(target / "report.json")
-            if report.get("decoded_rows") != 300 or report.get("decode_error_count"):
-                raise RuntimeError(f"{subset} incomplete or contains decode errors")
+            if report.get("manifest_rows") != 300 or report.get("scored_rows") != 300:
+                raise RuntimeError(f"{subset} did not score all 300 fixed rows")
             hard_reports[subset] = report
+    if len(hard_reports) != 7:
+        raise RuntimeError("fixed dev-hard evaluation incomplete")
+    val_input_errors = val_report.get("decode_error_count", 0)
+    hard_input_errors = sum(report.get("decode_error_count", 0) for report in hard_reports.values())
+    input_error_count = val_input_errors + hard_input_errors
 
     golden = _run([str(PYTHON), "-m", "pytest", "algorithm/tests/test_golden.py", "-q"], ROOT,
                   out / "logs" / "golden.log", env=env)
@@ -311,8 +329,16 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
             golden_pass = False
     if defer_g1:
         marker = {"date": date, "commit": commit, "effective_config": effective_config,
+                  "run_dir": str(out.resolve()),
+                  "fixed_manifests": {"val": {"path": str(FIXED_VAL_MANIFEST), "sha256": _sha(FIXED_VAL_MANIFEST)},
+                                      "dev-hard": {"path": str(FIXED_HARD_MANIFEST), "sha256": _sha(FIXED_HARD_MANIFEST)}},
+                  "run_manifests": {"val1000/validation_manifest.csv": _sha(val_out / "validation_manifest.csv"),
+                                    "dev-hard/all-hard-manifest.csv": _sha(sample_all)},
+                  "hard_sampling": _read_json(sample_meta),
                   "golden_exit": golden.returncode,
                   "golden_pass": golden_pass, "golden_correct": golden_count,
+                  "input_errors": input_error_count,
+                  "val_input_errors": val_input_errors, "hard_input_errors": hard_input_errors,
                   "hard_status": hard_status, "hard_reports": sorted(hard_reports),
                   "g1": "deferred; run daily.py --g1-only <run-dir>"}
         (out / "pre-g1.json").write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -332,14 +358,19 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     hard_metrics = {subset: report["overall_g2"] for subset, report in hard_reports.items()}
     metrics = _subset_metrics(val_report)
     metrics.update({f"dev-hard/{k}": v for k, v in hard_metrics.items()})
+    val_sampling = _read_json(val_out / "report.json").get("sampling", {})
+    hard_sampling = _read_json(sample_meta)
     comparison_key = {"model_sha256": effective_config["classifier_model"]["sha256"],
                       "config_sha256": effective_config["config_sha256"],
                       "effective_config_sha256": effective_config["effective_config_sha256"],
-                      "val_sampling": {"mode": "val", "n": 1000, "seed": 42},
-                      "hard_sampling": {"subsets": list(hard_reports), "n_each": 300, "seed": 42},
+                      "val_sampling": {"mode": "fixed_manifest", "manifest_sha256": val_sampling.get("manifest_sha256"),
+                                       "paths_sha256": val_sampling.get("paths_sha256")},
+                      "hard_sampling": {"mode": "fixed_manifest", "manifest_sha256": hard_sampling.get("manifest_sha256"),
+                                        "paths_sha256": hard_sampling.get("paths_sha256"),
+                                        "subsets": list(hard_reports)},
                       "metric_definition": "plate positional metrics v1"}
-    comparison_key["val_sampling"]["paths_sha256"] = _sha(val_out / "validation_manifest.csv")
-    comparison_key["hard_sampling"]["paths_sha256"] = _sha(sample_all)
+    comparison_key["val_sampling"]["run_manifest_sha256"] = _sha(val_out / "validation_manifest.csv")
+    comparison_key["hard_sampling"]["run_manifest_sha256"] = _sha(sample_all)
     comparison = _compare({"comparison_key": comparison_key, "metrics": metrics,
                            "effective_config": effective_config}, out_root)
     line = _scoreboard_line(date, commit, val_report, {**hard_status, "reports": hard_reports}, bench)
@@ -350,12 +381,14 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
                "scoreboard_row": line, "metrics": metrics, "hard_status": hard_status,
                "source_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                                 capture_output=True, text=True, check=True).stdout.strip(),
+               "input_errors": input_error_count,
+               "val_input_errors": val_input_errors, "hard_input_errors": hard_input_errors,
                "hard_completed": sorted(hard_reports), "golden_exit": golden.returncode,
                "g1": bench, "comparison_key": comparison_key, "comparison": comparison,
                **error_analysis,
-               "status": "PASS" if golden_pass and golden_count is not None and golden_count >= 12
-               and bench["wall_time"]["p95_ms"] <= 300
-               and len(hard_reports) == 7 else "PARTIAL_FAILURE"}
+               "status": "INPUT_ERRORS" if input_error_count else
+               ("PASS" if golden_pass and golden_count is not None and golden_count >= 12
+                and bench["wall_time"]["p95_ms"] <= 300 and len(hard_reports) == 7 else "PARTIAL_FAILURE")}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "scoreboard-row.md").write_text("| " + " | ".join(SCOREBOARD_HEADER) + " |\n" +
                                            "| " + " | ".join("---" for _ in SCOREBOARD_HEADER) + " |\n" +
@@ -400,8 +433,8 @@ def recover_hard(run_dir: Path):
         statuses[subset] = run.returncode
         if run.returncode == 0:
             report = _read_json(target / "report.json")
-            if report.get("decoded_rows") != 300 or report.get("decode_error_count"):
-                raise RuntimeError(f"{subset}: expected 300 decoded rows without errors")
+            if report.get("manifest_rows") != 300 or report.get("scored_rows") != 300:
+                raise RuntimeError(f"{subset}: expected all 300 fixed rows to be scored")
             reports[subset] = report
     marker["hard_status"] = statuses
     marker["hard_reports"] = sorted(reports)
@@ -435,14 +468,22 @@ def finish_g1(run_dir: Path):
                        golden_correct=marker["golden_correct"])
     metrics = _subset_metrics(val_report)
     metrics.update({f"dev-hard/{k}": report["overall_g2"] for k, report in hard_reports.items()})
+    val_input_errors = val_report.get("decode_error_count", 0)
+    hard_input_errors = sum(report.get("decode_error_count", 0) for report in hard_reports.values())
+    input_error_count = val_input_errors + hard_input_errors
     effective_config = marker["effective_config"]
+    val_sampling = _read_json(run_dir / "val1000" / "report.json").get("sampling", {})
+    hard_sampling = marker.get("hard_sampling", {})
     key = {"model_sha256": effective_config["classifier_model"]["sha256"],
            "config_sha256": effective_config["config_sha256"],
            "effective_config_sha256": effective_config["effective_config_sha256"],
-           "val_sampling": {"mode": "val", "n": 1000, "seed": 42,
-                            "paths_sha256": _sha(run_dir / "val1000" / "validation_manifest.csv")},
-           "hard_sampling": {"subsets": marker["hard_reports"], "n_each": 300, "seed": 42,
-                             "paths_sha256": _sha(run_dir / "dev-hard" / "all-hard-manifest.csv")},
+           "val_sampling": {"mode": "fixed_manifest", "manifest_sha256": val_sampling.get("manifest_sha256"),
+                            "paths_sha256": val_sampling.get("paths_sha256"),
+                            "run_manifest_sha256": _sha(run_dir / "val1000" / "validation_manifest.csv")},
+           "hard_sampling": {"mode": "fixed_manifest", "manifest_sha256": hard_sampling.get("manifest_sha256"),
+                             "paths_sha256": hard_sampling.get("paths_sha256"),
+                             "subsets": marker["hard_reports"],
+                             "run_manifest_sha256": _sha(run_dir / "dev-hard" / "all-hard-manifest.csv")},
            "metric_definition": "plate positional metrics v1"}
     out_root = run_dir.parent
     comparison = _compare({"comparison_key": key, "metrics": metrics,
@@ -458,10 +499,12 @@ def finish_g1(run_dir: Path):
                "comparison": comparison,
                "source_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                                 capture_output=True, text=True, check=True).stdout.strip(),
+               "input_errors": input_error_count,
+               "val_input_errors": val_input_errors, "hard_input_errors": hard_input_errors,
                **_error_analysis(run_dir / "val1000" / "trace.jsonl"),
-               "status": "PASS" if marker["golden_pass"] and marker["golden_correct"] >= 12
-               and bench["wall_time"]["p95_ms"] <= 300
-               and len(hard_reports) == 7 else "PARTIAL_FAILURE"}
+               "status": "INPUT_ERRORS" if marker.get("input_errors", 0) else
+               ("PASS" if marker["golden_pass"] and marker["golden_correct"] >= 12
+                and bench["wall_time"]["p95_ms"] <= 300 and len(hard_reports) == 7 else "PARTIAL_FAILURE")}
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "scoreboard-row.md").write_text("| " + " | ".join(SCOREBOARD_HEADER) + " |\n" +
         "| " + " | ".join("---" for _ in SCOREBOARD_HEADER) + " |\n" + line + "\n", encoding="utf-8")
@@ -521,7 +564,9 @@ def _format_summary(summary):
             f"{summary['g1'].get('decoded')}/{summary['g1'].get('requested')} 张已解码；"
             f"达到300ms门槛：{summary['g1'].get('wall_time', {}).get('p95_ms', float('inf')) <= 300}\n"
             f"- val 自动通过率 {_fmt(summary['metrics']['val/overall'].get('auto_pass_rate'))}，"
-            f"精度 {_fmt(summary['metrics']['val/overall'].get('auto_pass_precision'))}\n"
+            f"精度 {_fmt(summary['metrics']['val/overall'].get('auto_pass_precision'))}；"
+            f"固定清单坏图：val {summary.get('val_input_errors', 0)}/1000，"
+            f"dev-hard {summary.get('hard_input_errors', 0)}/2100；均按 BAD_INPUT 纳入对应分母\n"
             f"{alert}\n{summary['scoreboard_row']}\n\n"
             f"详细表：[`subsets.md`](subsets.md)、[`errors.md`](errors.md)、"
             f"[`comparison.md`](comparison.md)。\n")

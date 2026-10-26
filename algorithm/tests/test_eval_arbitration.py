@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
+from lpr.types import PlateCandidate, RecogStatus
+from lpr_tools.eval import arbitration
 from lpr_tools.eval.arbitration import _rank_rule, replay_attempts
 
 
@@ -65,3 +70,52 @@ def test_analyze_distinguishes_decode_beam_from_other_attempts():
     result = analyze([record])
     assert result['wrong_with_other_correct_attempt']['wrong_with_correct_attempt'] == 0
     assert result['decoder_topk_diagnostic']['wrong_with_truth_in_any_decode_topk'] == 1
+
+
+def test_trace_uses_corner_merge_order_per_seg_classifier_calls_and_reader_position(monkeypatch):
+    events = []
+
+    def candidate(x, source):
+        return PlateCandidate(corners=[(x, 0), (x+10, 0), (x+10, 5), (x, 5)],
+                              bbox=(x, 0, 10, 5), color="blue", score=.9, source=source)
+
+    net, classic = candidate(0, "net"), candidate(30, "color")
+    config = SimpleNamespace(preprocess=object(), locate=object(), rectify=object(), segment=object(),
+                             postprocess=object(), runtime=SimpleNamespace(max_candidates=2),
+                             lane_roi=lambda lane: None)
+    class Corner:
+        def detect(self, image, max_candidates):
+            events.append("corner")
+            return [net]
+    class Classifier:
+        def predict_proba(self, chars):
+            events.append(("classifier", chars.shape[0]))
+            return np.zeros((chars.shape[0], 65), dtype=np.float32)
+    class Reader:
+        def __init__(self): self.results = [("", []), ("京A12345", [.9]*7)]
+        def read(self, image):
+            events.append("reader")
+            return self.results.pop(0)
+    recognizer = SimpleNamespace(config=config, corner_detector=Corner(),
+                                 plate_reader=Reader(), classifier=Classifier())
+    monkeypatch.setattr(arbitration, "preprocess", lambda *args: object())
+    monkeypatch.setattr(arbitration, "locate", lambda *args: [classic])
+    monkeypatch.setattr(arbitration.pipeline, "_rectifications",
+                        lambda image, cand, cfg: [SimpleNamespace(layout=7, color="blue", candidate=cand,
+                                                                  image=np.zeros((80, 252, 3), dtype=np.uint8))])
+    monkeypatch.setattr(arbitration, "segment", lambda *args: SimpleNamespace(
+        ok=True, layout=7, chars=np.zeros((7, 32, 32), dtype=np.uint8)))
+    monkeypatch.setattr(arbitration.pipeline, "decode", lambda *args: SimpleNamespace(
+        status=RecogStatus.LOW_CONFIDENCE, plate_no="京A12346", confidence=.4,
+        char_confidences=[.4]*7, candidates=[]))
+
+    record = arbitration.trace_image(np.zeros((100, 100, 3), dtype=np.uint8), recognizer,
+                                     SimpleNamespace(path="val.jpg", plate_no="京A12345",
+                                                     category="clear", plate_color="blue"))
+
+    assert events == ["corner", ("classifier", 7), "reader", ("classifier", 7), "reader"]
+    assert [item["candidate_source"] for item in record["attempts"]] == ["net", "net", "color", "color"]
+    assert [item.get("reader", False) for item in record["attempts"]] == [False, True, False, True]
+    assert record["attempts"][1]["decoded"] is False
+    assert replay_attempts(record, .8)["plate_no"] == "京A12345"
+    assert replay_attempts(record, .8)["selected_attempt_index"] == 3
