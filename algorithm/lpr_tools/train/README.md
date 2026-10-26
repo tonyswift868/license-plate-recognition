@@ -179,7 +179,7 @@ sigmoid 校准，折数为 `min(5, 每类最少训练样本数)`，每类不足 
 ## CRNN 整牌兜底（第七批）
 
 `lpr.recognize.crnn.CrnnReader` 将 252×80/276×80 BGR uint8 校正图转为
-128×40 灰度，CNN 提取 32 个时间步，单层双向 GRU 输出 65 字符与 blank 的
+160×40 灰度，CNN 提取 40 个时间步，单层双向 GRU 输出 65 字符与 blank 的
 CTC logits。greedy 解码合并连续重复、删除 blank，保留逐位概率；格式、最低
 置信度与状态仍由既有流水线处理。权重从随机初始化训练，不加载预训练模型。
 
@@ -241,3 +241,15 @@ worker 数及训练器 SHA。它不支持模型、训练数据、采样或学习
 SHA，后者记录本地来源运行。新阶段使用新的优化器和输出路径；它与普通
 `--resume` 互斥。恢复第二阶段时用第二阶段 checkpoint 和原参数，不再次传
 初始化参数；初始化来源由 checkpoint 继承。两阶段耗时和完成轮次分别报告。
+
+第二阶段的最佳 checkpoint 为第 11 轮，但 pipeline 候选准确率仍未达到 90%。
+第三阶段沿用本地从零训练的第二阶段最佳纯权重，保持网络层和 state_dict 键不变，
+只把共享推理/训练输入宽度提高到 160；输入预处理尺寸写入模型 manifest 与
+训练 metadata。训练 4 轮、学习率 0.0001、绿牌真实样本权重 8，使用新的输出目录：
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --init-weights algorithm/out/models/batch7/crnn_run2_realgreen_counted/crnn_v1.pt --init-training-run algorithm/out/models/batch7/crnn_run2_realgreen_counted --version crnn_v1_realgreen_width160 --real-green-boost 8 --lr 0.0001 --epochs 4 --samples-per-epoch 32768 --batch-size 128 --num-workers 1 --out algorithm/out/models/batch7/crnn_run3_width160/crnn_v1.pt
+```
+
+评估时必须以该模型自身的 160×40 manifest 输入尺寸加载；若完整 `read()` 或流水线验收
+不优于 128×40 的第二阶段最佳模型，发布候选应回选第二阶段权重及其 128×40 预处理。

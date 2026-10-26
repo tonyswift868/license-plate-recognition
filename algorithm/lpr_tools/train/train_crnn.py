@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from lpr.charset import CHARSET, CHAR_TO_INDEX, PROVINCES
 from lpr.recognize import write_manifest_entry
-from lpr.recognize.crnn import BLANK, CrnnNet
+from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet
 
 
 def _read_rows(root: Path, split: str, excluded_origins: set[str] | None = None) -> list[dict[str, str]]:
@@ -66,7 +66,7 @@ class PlateDataset(Dataset):
             rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, i]))
             image = _augment(image, rng)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (128, 40), interpolation=cv2.INTER_AREA)
+        gray = cv2.resize(gray, INPUT_SIZE, interpolation=cv2.INTER_AREA)
         tensor = torch.from_numpy(np.ascontiguousarray(gray)).float().div_(255).sub_(0.5).div_(0.5)
         target = torch.tensor([CHAR_TO_INDEX[c] for c in row["plate_no"]], dtype=torch.long)
         return tensor.unsqueeze(0), target, len(target), row["source"]
@@ -253,6 +253,7 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
     out.parent.mkdir(parents=True, exist_ok=True)
     metadata = {"version": version, "seed": seed, "epochs": epochs, "batch_size": batch_size,
                 "samples_per_epoch": samples_per_epoch, "num_workers": num_workers, "lr": lr,
+                "input_size": list(INPUT_SIZE),
                 "data": [{"path": str(p.resolve()), "labels_sha256": _hash(p / "labels.csv")} for p in data],
                 "validation": {"path": str(data[0].resolve()), "split": "val", "labels_sha256": _hash(data[0] / "labels.csv")},
                 "train_rows": len(train_rows), "val_rows": len(val_rows),
@@ -352,7 +353,7 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
             print(json.dumps(entry, ensure_ascii=False), flush=True)
     best_metrics = max(history, key=lambda item: item["metrics"]["all"]["accuracy"] or 0)["metrics"]
     write_manifest_entry(out, version=version, train_data=json.dumps(metadata, ensure_ascii=False),
-                         val_char_acc=best_metrics["characters"]["accuracy"], input_size=(128, 40))
+                         val_char_acc=best_metrics["characters"]["accuracy"], input_size=INPUT_SIZE)
     return history
 
 

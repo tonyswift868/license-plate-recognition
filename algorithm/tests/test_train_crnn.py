@@ -232,8 +232,10 @@ def test_from_scratch_weight_continuation_records_local_lineage_and_fresh_run(tm
     assert metadata["initialization"]["sha256"] == original_sha
     assert metadata["initialization"]["source_training_run"].endswith("crnn_run1_workers1")
     assert metadata["real_green_boost"] == 8.0
+    assert metadata["input_size"] == [160, 40]
     assert metadata["pretrained_weights"] is None
-    assert read_manifest(output.parent)["model.pt"]["input_size"] == [128, 40]
+    from lpr.recognize.crnn import INPUT_SIZE
+    assert read_manifest(output.parent)["model.pt"]["input_size"] == list(INPUT_SIZE)
     assert hashlib.sha256(initial.read_bytes()).hexdigest() == original_sha
     train_log = [__import__("json").loads(line) for line in output.with_suffix(".training.json").read_text(encoding="utf-8").splitlines()]
     assert sum(train_log[0]["actual_draw_counts"].values()) == 2

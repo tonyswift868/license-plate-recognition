@@ -10,6 +10,7 @@ from torch import nn
 from ..charset import CHARSET, NUM_CLASSES
 
 BLANK = NUM_CLASSES
+INPUT_SIZE = (160, 40)  # width, height; tuned continuation input for small candidate text
 
 
 class CrnnNet(nn.Module):
@@ -30,7 +31,7 @@ class CrnnNet(nn.Module):
         self.classifier = nn.Linear(192, NUM_CLASSES + 1)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        # N,1,40,128 → N,T,192 → T,N,66
+        # N,1,40,W → N,T,192 → T,N,66
         features = self.features(images).squeeze(2).transpose(1, 2)
         sequence, _ = self.sequence(features.transpose(0, 1))
         return self.classifier(sequence)
@@ -61,7 +62,6 @@ class CrnnReader:
 
     @classmethod
     def from_file(cls, path: Path, *, version: str) -> "CrnnReader":
-        torch.set_num_threads(2)
         state = torch.load(path, map_location="cpu", weights_only=True)
         if not isinstance(state, dict) or not state or any(
                 not isinstance(k, str) or not isinstance(v, torch.Tensor) or not torch.isfinite(v).all()
@@ -78,7 +78,7 @@ class CrnnReader:
                 or plate_image.shape[0] != 80 or plate_image.shape[1] not in (252, 276)):
             return "", []
         gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
-        image = cv2.resize(gray, (128, 40), interpolation=cv2.INTER_AREA)
+        image = cv2.resize(gray, INPUT_SIZE, interpolation=cv2.INTER_AREA)
         tensor = torch.from_numpy(np.ascontiguousarray(image)).float().div_(255).sub_(0.5).div_(0.5)
         with torch.inference_mode():
             logits = self.model(tensor[None, None])[..., :NUM_CLASSES + 1]
