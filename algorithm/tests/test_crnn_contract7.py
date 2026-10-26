@@ -75,3 +75,17 @@ def test_state_loading_rejects_nonfinite_malformed_or_non_tensor_weights(tmp_pat
     torch.save(state, path)
     with pytest.raises((ValueError, RuntimeError, TypeError)):
         CrnnReader.from_file(path, version="invalid")
+
+
+def test_loading_preserves_caller_torch_thread_count(tmp_path):
+    original_threads = torch.get_num_threads()
+    path = tmp_path / 'valid.pt'
+    torch.save(CrnnNet().state_dict(), path)
+    try:
+        torch.set_num_threads(1)
+        reader = CrnnReader.from_file(path, version='caller-threads')
+        assert torch.get_num_threads() == 1
+        assert reader.version == 'caller-threads'
+        assert not reader.model.training
+    finally:
+        torch.set_num_threads(original_threads)
