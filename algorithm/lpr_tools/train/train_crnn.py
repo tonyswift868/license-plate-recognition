@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import time
 from collections import Counter
 from pathlib import Path
@@ -99,6 +100,14 @@ def _collate(batch):
     return torch.stack(images), torch.cat(targets), torch.tensor(lengths), sources
 
 
+def _worker_init(worker_id: int) -> None:
+    seed = torch.initial_seed() % (2**32)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.set_num_threads(1)
+    cv2.setNumThreads(1)
+
+
 def _weights(rows: list[dict[str, str]]) -> torch.DoubleTensor:
     counts = Counter(r["plate_no"][0] for r in rows)
     # Province-balanced plate draws, capped at 8x to retain realistic variety.
@@ -160,8 +169,9 @@ def _eval(model, rows, batch_size=256):
 
 
 def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_size=128,
-          samples_per_epoch=32768, seed=42, num_workers=0, lr=.001, resume=None, exclude_origins=None, stop_after=None):
-    if (not 0 <= num_workers <= 8 or epochs < 1 or batch_size < 1 or samples_per_epoch < 1
+          samples_per_epoch=32768, seed=42, num_workers=0, lr=.001, resume=None, exclude_origins=None,
+          stop_after=None, resume_execution_change=False):
+    if (not 0 <= num_workers <= 4 or epochs < 1 or batch_size < 1 or samples_per_epoch < 1
             or (stop_after is not None and stop_after < 1)):
         raise ValueError("invalid training limits")
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -179,6 +189,12 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
     log_path = out.with_suffix(".training.json")
     if resume is None and any(path.exists() for path in (out, checkpoint_path, log_path)):
         raise FileExistsError("training outputs already exist; choose a new path or resume checkpoint")
+    if resume_execution_change and resume is None:
+        raise ValueError("execution-change resume requires an explicit source checkpoint")
+    if resume_execution_change and Path(resume).resolve() == checkpoint_path.resolve():
+        raise ValueError("execution-change resume requires a distinct output checkpoint path")
+    if resume_execution_change and any(path.exists() for path in (out, checkpoint_path, log_path)):
+        raise FileExistsError("execution-change resume requires a new output directory")
     out.parent.mkdir(parents=True, exist_ok=True)
     metadata = {"version": version, "seed": seed, "epochs": epochs, "batch_size": batch_size,
                 "samples_per_epoch": samples_per_epoch, "num_workers": num_workers, "lr": lr,
@@ -192,14 +208,44 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
                 "excluded_origins_sha256": _hash(Path(exclude_origins)) if exclude_origins else None,
                 "excluded_origin_count": len(excluded), "trainer_sha256": _hash(Path(__file__)),
                 "model_code_sha256": _hash(Path(__file__).resolve().parents[2] / "lpr" / "recognize" / "crnn.py"),
-                "pretrained_weights": None}
+                "execution_lineage": [], "pretrained_weights": None}
     model = CrnnNet()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     start = 0; history = []; elapsed = 0.0; best = -1.0
     if resume:
         ckpt = torch.load(resume, map_location="cpu", weights_only=True)
-        if ckpt["metadata"] != metadata:
-            raise ValueError("resume training provenance/config differs")
+        old_metadata = ckpt["metadata"]
+        old_lineage = old_metadata.get("execution_lineage", [])
+        if resume_execution_change:
+            ignored = {"num_workers", "trainer_sha256", "execution_lineage"}
+            old_core = {k: v for k, v in old_metadata.items() if k not in ignored}
+            new_core = {k: v for k, v in metadata.items() if k not in ignored}
+            if old_core != new_core or (old_metadata["num_workers"] == num_workers
+                                        and old_metadata["trainer_sha256"] == metadata["trainer_sha256"]):
+                raise ValueError("execution-only resume permits only worker count and trainer implementation changes")
+            source_best = Path(resume).with_name(Path(resume).name.removesuffix(".checkpoint.pt") + ".pt")
+            source_log = Path(resume).with_name(Path(resume).name.removesuffix(".checkpoint.pt") + ".training.json")
+            if not source_best.is_file():
+                raise FileNotFoundError(f"source best checkpoint model is missing: {source_best}")
+            metadata["execution_lineage"] = old_lineage + [{
+                "checkpoint_sha256": _hash(Path(resume)),
+                "source_best_path": str(source_best.resolve()), "source_best_sha256": _hash(source_best),
+                "source_log_sha256": _hash(source_log) if source_log.is_file() else None,
+                "from_num_workers": old_metadata["num_workers"], "to_num_workers": num_workers,
+                "from_trainer_sha256": old_metadata["trainer_sha256"],
+                "to_trainer_sha256": metadata["trainer_sha256"],
+            }]
+            shutil.copy2(source_best, out)
+            if source_log.is_file() and source_log.stat().st_size:
+                shutil.copy2(source_log, log_path)
+            else:
+                with log_path.open("w", encoding="utf-8") as history_log:
+                    for item in ckpt["history"]:
+                        history_log.write(json.dumps(item, ensure_ascii=False) + "\n")
+        else:
+            metadata["execution_lineage"] = old_lineage
+            if old_metadata != metadata:
+                raise ValueError("resume training provenance/config differs")
         model.load_state_dict(ckpt["model"]); optimizer.load_state_dict(ckpt["optimizer"])
         start, history, elapsed, best = ckpt["epoch"], ckpt["history"], ckpt["train_seconds"], ckpt["best"]
         torch.set_rng_state(ckpt["torch_rng"])
@@ -212,7 +258,9 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
             sampler = WeightedRandomSampler(_weights(train_rows), samples_per_epoch, replacement=True,
                                             generator=torch.Generator().manual_seed(seed + epoch))
             loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers,
-                                collate_fn=_collate, persistent_workers=False)
+                                collate_fn=_collate, worker_init_fn=_worker_init if num_workers else None,
+                                generator=torch.Generator().manual_seed(seed + epoch + 100_000),
+                                persistent_workers=False)
             model.train(); began = time.perf_counter(); total = 0.0; batches = 0
             for images, targets, lengths, _sources in loader:
                 optimizer.zero_grad(set_to_none=True)
@@ -259,14 +307,17 @@ def main():
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--exclude-origins", type=Path)
     parser.add_argument("--stop-after", type=int)
+    parser.add_argument("--resume-execution-change", action="store_true")
     args = parser.parse_args()
     train(args.data, args.out, version=args.version, epochs=args.epochs, batch_size=args.batch_size,
           samples_per_epoch=args.samples_per_epoch, seed=args.seed, num_workers=args.num_workers,
-          lr=args.lr, resume=args.resume, exclude_origins=args.exclude_origins, stop_after=args.stop_after)
+          lr=args.lr, resume=args.resume, exclude_origins=args.exclude_origins, stop_after=args.stop_after,
+          resume_execution_change=args.resume_execution_change)
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
