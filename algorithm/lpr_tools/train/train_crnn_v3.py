@@ -147,10 +147,16 @@ class Crops(Dataset):
 
 
 def eligible(tune, val, baseline_tune, baseline_val):
-    # The requested GT/green non-regression gates precede the unchanged v2 lexicographic rule.
+    # Acceptance reporting only; it must not alter the dispatch's v2 checkpoint ranking.
     return (tune['GT']['correct'] >= baseline_tune['GT']['correct']
             and val['all']['accuracy'] >= baseline_val['all']['accuracy']-.005
             and val['layout8']['accuracy'] >= baseline_val['layout8']['accuracy']-.005)
+
+
+def select_best_trained(history):
+    if not history:
+        raise ValueError('no trained checkpoints')
+    return max(history,key=lambda r:v2.selection_score(r['tune'],r['val']))
 
 
 def stop_reason(history, baseline_pipeline, maximum):
@@ -187,7 +193,7 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
         train_rows=len(rows),tune_rows=len(tune_rows),val_rows=len(val_rows),
         source_sha256={str(p.relative_to(Path(__file__).resolve().parents[3])).replace('\\','/'):file_sha256(p)
             for p in (Path(__file__).resolve(),Path(v2.__file__).resolve(),Path(__file__).with_name('train_crnn.py').resolve(),Path(__file__).resolve().parents[2]/'lpr/recognize/crnn.py')},
-        selection='GT count non-regression; safe-val overall and layout8 >= baseline-.005; then v2 lexicographic minimum GT, macro GT, safe val exact',
+        selection='unchanged v2 lexicographic minimum GT, macro GT, safe val exact; trained rounds only; GT/green acceptance reported separately',
         stop_loss=f'after round4, current pipeline gain <.03; otherwise maximum{epochs}, or pipeline>=.82 with eligibility',
         learning_rate_schedule='initial LR through round4, half from round5')
     out.mkdir(parents=True,exist_ok=True)
@@ -209,8 +215,7 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
         torch.set_rng_state(old['torch_rng'])
     else:
         baseline_tune,baseline_val=v2.evaluate(model,tune_rows),v2.evaluate(model,val_rows)
-        history,start,best_score,best_epoch=[],0,v2.selection_score(baseline_tune,baseline_val),0
-        v2._atomic_save(model.state_dict(),best_path)
+        history,start,best_score,best_epoch=[],0,(-1.,-1.,-1.),0
         (out/'baseline.json').write_text(json.dumps(dict(tune=baseline_tune,val=baseline_val),indent=2),encoding='utf-8')
     metadata_path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
     end = epochs if stop_after is None else min(epochs,start+stop_after)
@@ -238,7 +243,7 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
         if sum(counts.values()) != samples_per_epoch: raise RuntimeError('draw count mismatch')
         tune,val=v2.evaluate(model,tune_rows),v2.evaluate(model,val_rows)
         qualifies=eligible(tune,val,baseline_tune,baseline_val); score=v2.selection_score(tune,val)
-        if qualifies and score>best_score:
+        if score>best_score:
             best_score,best_epoch=score,epoch+1; v2._atomic_save(model.state_dict(),best_path)
         record=dict(epoch=epoch+1,loss=sum(losses)/len(losses),lr=current_lr,tune=tune,val=val,
             eligible=qualifies,actual_draw_counts=dict(counts),epoch_seconds=time.perf_counter()-began,best_epoch=best_epoch)

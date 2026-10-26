@@ -134,6 +134,8 @@ def test_resume_replays_model_optimizer_rng_and_baseline_selection(tmp_path):
     for key in ('model','optimizer','torch_rng','baseline_tune','baseline_val','best_score','best_epoch'):
         _assert_tree_equal(a[key],b[key])
     assert a['epoch']==b['epoch']==2
+    assert a['best_epoch']>=1
+    assert a['best_epoch']==v3.select_best_trained(a['history'])['epoch']
 
 
 
@@ -144,3 +146,14 @@ def test_audit_rejects_partition_overlap(tmp_path):
     data['content_checks']['partition_pairwise_sha256_overlap']['train_tune']=1
     path.write_text(json.dumps(data))
     with pytest.raises(ValueError,match='leakage'): v3.validate_audit(index)
+
+
+def test_selection_ranks_trained_rounds_without_acceptance_filter_or_initializer():
+    def record(epoch,minimum,macro,accepted):
+        values=[minimum]+[(macro*7-minimum)/6]*6
+        tune={s+'_GT':{'accuracy':v} for s,v in zip(v3.SUBSETS,values)}
+        return dict(epoch=epoch,tune=tune,val={'all':{'accuracy':.93}},eligible=accepted)
+    first=record(1,.72,.857,False)
+    second=record(2,.713,.859,True)
+    assert v3.select_best_trained([first,second]) is first
+    with pytest.raises(ValueError):v3.select_best_trained([])
