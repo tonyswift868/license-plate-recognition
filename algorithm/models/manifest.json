@@ -89,5 +89,18 @@
     "val_char_acc": null,
     "sha256": "1c4770e29fe8fc8881c8df65732c75bb1faf1d58b3061610688dd608eaf7da35",
     "created_at": "2026-10-27T00:47:01"
+  },
+  "crnn_v2.pt": {
+    "name": "crnn_v2.pt",
+    "version": "crnn_v2",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      160,
+      40
+    ],
+    "train_data": "{\"training\": {\"version\": \"crnn_v2_raw\", \"epochs\": 12, \"samples_per_epoch\": 65536, \"batch_size\": 128, \"lr\": 0.0003, \"seed\": 42, \"num_workers\": 1, \"torch_threads\": 4, \"opencv_threads\": 1, \"loader_threads_each\": 1, \"initialization\": {\"path\": \"D:\\\\keshe2\\\\workers\\\\01\\\\algorithm\\\\models\\\\crnn_v1.pt\", \"sha256\": \"d50c656f671a882244b2688596e85e97d7eb37a5cadaf947802e96dbfcccca48\", \"kind\": \"own_crnn_v1_continuation\"}, \"data_audit_sha256\": \"f51bbf01a7a76d4cc7d156040073f0d60278837cc093c1aaa397a724b6d331ee\", \"indices_sha256\": {\"train\": \"8ed6c92a40d28eb8e4b8cd4b4a37a7b31c1beada77d3b5f6bd10f2bb9d599ee4\", \"tune\": \"0404a271abe0ae8baebb2e1c5af5c000fee2ec7c94beecbe834f5ba4563ddc7d\", \"val\": \"89788bd5bbc01b14a7771d77ee9fd3c3972d730c7b7283b738bccdede11005a5\", \"holdout_origins\": \"ba783ddde7d1875a17374ac149f918e94d05799e8a82dede2995aa3a2b399ecd\"}, \"synthetic_labels_sha256\": \"71009ea01c4003bc92dd0176dcbb8068ef21c2981e4cc4c06006011f01acf858\", \"synthetic_root\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\plates_synth\\\\v2_seed42\", \"trainer_sha256\": \"e0e3f9a3a0e18b2f8b9a1d583933bb8ef3b641e42273441b7c4f91e0156de0eb\", \"reader_sha256\": \"ddedcd105ec7febb4894c4071b1355da3d255268d310eeeb2d980169fc21a0d2\", \"helper_sha256\": \"125df45caf1ec16c53ddfb222472953c6a001d8d41cdbd4f53e79aa5c4d96696\", \"selection\": \"lexicographic minimum hard GT, macro hard GT, filtered val exact plate\", \"stop_loss\": \"after >=6 epochs, any subset best<.90 and no new best for3 complete epochs\", \"mixture\": {\"db\": 0.1, \"blur\": 0.1, \"tilt\": 0.1, \"rotate\": 0.1, \"fn\": 0.1, \"challenge\": 0.1, \"weather\": 0.1, \"base7\": 0.12, \"real8\": 0.1, \"font\": 0.08}, \"gt_share_within_real_group\": 0.65, \"province_cap\": 4, \"train_rows\": 533744, \"tune_rows\": 3957, \"val_rows\": 7617}, \"training_result\": {\"best_epoch\": 9, \"best_score\": [0.7133333333333334, 0.8595238095238095, 0.9283182355257975], \"epochs_completed\": 10, \"stop_reason\": \"fn: best GT accuracy 0.893333 < .90, no new best in 3 epochs\", \"best_sha256\": \"9fe0a1c8915290ce16ce99721021ab55f2a0cfdf5baba959d7385c7d1059a934\"}, \"calibration_report_sha256\": \"57872dfe02d9eeb2e08d75a2db42d14c3f290822aa65c272d6ddf777aa8bb161\", \"calibration_fit\": {\"temperature\": 0.9672914147377014, \"optimized_temperature_float64\": 0.9672914275947635, \"fit_nll_before\": 1.1984904062938904, \"fit_nll_after\": 1.1969068653619084, \"n\": 1967, \"lower_bound\": 0.05, \"upper_bound\": 10.0}, \"calibration_index_sha256\": \"0404a271abe0ae8baebb2e1c5af5c000fee2ec7c94beecbe834f5ba4563ddc7d\", \"calibration_source_sha256\": \"d9d8db0fa22c49957a73f9513fdc3cf67004f52be4ea2a824b241642ff75c5d4\"}",
+    "val_char_acc": 0.9741870844339193,
+    "sha256": "02527ecc66797e82cb1b18eb24d998e421c30ef4fc97b2cb0beaf1f7e0242599",
+    "created_at": "2026-10-27T01:47:09"
   }
 }
