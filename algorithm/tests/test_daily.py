@@ -249,7 +249,7 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
         if any("test_golden.py" in item for item in command):
             return subprocess.CompletedProcess(command, 0, "1 passed in 1s\n", "")
         if "-c" in command:
-            return subprocess.CompletedProcess(command, 0, "12/20\n", "")
+            return subprocess.CompletedProcess(command, 0, "13/20\n", "")
         if any("bench_latency" in item for item in command):
             bench = {"acceptance_eligible": True, "requested": 320, "decoded": 320,
                      "wall_time": {"p50_ms": 40.0, "p95_ms": 70.0, "max_ms": 80.0}}
