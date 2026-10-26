@@ -177,7 +177,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
                     locations.append((truth.stratum, {"hit": False, "best_iou": 0., "candidates": 0}))
             causes["rejection"] += 1
             traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
-                           "prediction": "", "status": S.BAD_INPUT.value, "decode_error": decode_error,
+                           "prediction": "", "plate_no": result.plate_no, "confidence": result.confidence,
+                           "status": S.BAD_INPUT.value, "decode_error": decode_error,
                            "failure_cause": "rejection", "top3_hit": False if locate_recall else None})
             continue
         if hasattr(recognizer, "_reset_observation"):
@@ -224,7 +225,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
             location = ({"hit": inherited_row["top3_hit"]}
                         if inherited_row.get("top3_hit") is not None else None)
         traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
-                       "prediction": result.plate_no or "", "status": result.status.value,
+                       "prediction": result.plate_no or "", "plate_no": result.plate_no,
+                       "confidence": result.confidence, "status": result.status.value,
                        "selected_source": selection["source"] if selection else None,
                        "crnn_selected": selection["crnn_selected"] if selection else None,
                        "reader_invoked": "reader" in result.stage_ms,
@@ -433,8 +435,8 @@ def main(argv=None):
         parser.error("--dev-hard requires --split val")
     if args.locate_only and (args.scoreboard or args.oracle):
         parser.error("--locate-only cannot be combined with --scoreboard or --oracle")
-    if args.stage_trace and not (args.locate_recall or args.reuse_stage_trace):
-        parser.error("--stage-trace requires --locate-recall or --reuse-stage-trace")
+    # Decision traces also serve exact arbitration replay; unmeasured Top-3
+    # remains None rather than requiring a separate localization evaluation.
     if args.reuse_stage_trace and not args.oracle:
         parser.error("--reuse-stage-trace is intended for --oracle runs")
     if args.subset and args.dev_hard:

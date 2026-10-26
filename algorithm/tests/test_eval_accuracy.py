@@ -79,12 +79,41 @@ def test_fixed_validation_decode_error_is_scored_as_bad_input(tmp_path, monkeypa
     rows = read_manifest(manifest)
     write_manifest(manifest, [rows[0]], check_files=False)
     monkeypatch.setattr(ev, "decode_image", lambda _path: (None, "decode_failed"))
-    report = evaluate(manifest, FakeRecognizer(samples_dir=tmp_path), tmp_path / "bad-input")
+    trace = tmp_path / "bad-trace.jsonl"
+    report = evaluate(manifest, FakeRecognizer(samples_dir=tmp_path), tmp_path / "bad-input", stage_trace=trace)
     assert report["manifest_rows"] == report["scored_rows"] == 1
     assert report["decoded_rows"] == 0 and report["decode_error_count"] == 1
     assert report["overall_g2"]["n"] == 1
     assert report["overall_g2"]["correct"] == report["overall_g2"]["auto_pass"] == 0
     assert report["failure_causes"]["rejection"] == 1
+    row = json.loads(trace.read_text(encoding="utf-8"))
+    assert row["plate_no"] is None and row["confidence"] == 0
+    assert row["status"] == "BAD_INPUT"
+
+
+def test_stage_trace_preserves_exact_text_confidence_and_failure_state(tmp_path):
+    manifest = fixture_manifest(tmp_path)
+    rec = FakeRecognizer(samples_dir=tmp_path)
+    trace = tmp_path / "trace.jsonl"
+    evaluate(manifest, rec, tmp_path / "out", stage_trace=trace)
+    from lpr.io_utils import imread
+    for traced, row in zip(map(json.loads, trace.read_text(encoding="utf-8").splitlines()), read_manifest(manifest)):
+        result = rec.recognize(imread(tmp_path / row.path))
+        assert traced["plate_no"] == result.plate_no
+        assert traced["confidence"] == result.confidence
+        assert traced["status"] == result.status.value
+
+
+def test_manifest_cli_can_record_decisions_without_localization_measurement(tmp_path, capsys):
+    manifest = fixture_manifest(tmp_path)
+    trace = tmp_path / "decisions.jsonl"
+    assert main(["--manifest", str(manifest), "--split", "manifest-val", "--fake",
+                 "--out", str(tmp_path / "out"), "--stage-trace", str(trace)]) == 0
+    capsys.readouterr()
+    rows = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == len(read_manifest(manifest))
+    assert all(row["top3_hit"] is None for row in rows)
+    assert all("plate_no" in row and "confidence" in row for row in rows)
 
 
 def test_cli_and_scoreboard(tmp_path,capsys):

@@ -32,6 +32,8 @@ def _effective_config(config_path: Path | None = None):
     """Resolve one config identity for a daily run and its child processes."""
     selected = Path(config_path or os.environ.get("LPR_CONFIG") or DEFAULT_CONFIG_PATH).resolve()
     cfg = load_config(selected)
+    if cfg.postprocess.arbitration == "agree" and not cfg.runtime.plate_reader_model_path:
+        raise ValueError("agree daily requires a configured plate reader; runtime would otherwise use first_ok")
     info = effective_config_info(cfg, str(selected))
     info.update(config_sha256=_sha(selected), classifier=cfg.runtime.classifier,
                 classifier_model=model_identity(cfg, "model_path"))
@@ -98,7 +100,33 @@ def _fmt(value):
     return "N/A" if value is None else f"{value:.1%}"
 
 
-def _scoreboard_line(date, commit, val, hard, bench):
+def _decision_policy(info):
+    pp = info.get("effective_config", {}).get("postprocess", {})
+    mode = pp.get("arbitration", "first_ok")
+    return {"arbitration": mode, "g1_p95_limit_ms": 200 if mode == "agree" else 300,
+            "auto_pass_precision_min": .99 if mode == "agree" else None,
+            "thresholds": {k: pp.get(k) for k in ("min_confidence", "agree_min_confidence",
+                "solo_min_confidence_segment", "solo_min_confidence_reader", "disagree_prefer")}}
+
+
+def _acceptance(info, val, reports, bench, golden_pass, golden_correct, input_errors):
+    policy = _decision_policy(info)
+    accepted = sum(r["overall_g2"].get("auto_pass", 0) for r in reports.values())
+    correct = sum(r["overall_g2"].get("auto_pass_correct", 0) for r in reports.values())
+    vm = val["overall_g2"]
+    vp, vc = vm.get("auto_pass", 0), vm.get("auto_pass_correct", 0)
+    precision_ok = policy["arbitration"] != "agree" or (
+        vp > 0 and accepted > 0 and vc * 100 >= vp * 99 and correct * 100 >= accepted * 99)
+    passed = (golden_pass and golden_correct is not None and golden_correct >= 13
+              and bench["wall_time"]["p95_ms"] <= policy["g1_p95_limit_ms"]
+              and len(reports) == 7 and precision_ok)
+    return {"policy": policy, "dual_precision_pass": precision_ok,
+            "hard_auto_pass": accepted, "hard_auto_pass_correct": correct,
+            "hard_auto_pass_precision": correct / accepted if accepted else None,
+            "status": "INPUT_ERRORS" if input_errors else ("PASS" if passed else "PARTIAL_FAILURE")}
+
+
+def _scoreboard_line(date, commit, val, hard, bench, effective_config=None):
     cats = {name: [] for name in ("clear", "night", "tilt", "dirty")}
     cats["clear"].append(val["categories"]["clear"])
     for subset, category in (("ccpd_db", "night"), ("ccpd_tilt", "tilt"),
@@ -123,6 +151,15 @@ def _scoreboard_line(date, commit, val, hard, bench):
             f"network candidate selected={attr.get('network_candidate_selected_count', 0)}; "
             f"Top-3 classic-only; dev-hard 7x300; fixed-list decode errors={input_errors}; "
             f"golden={hard.get('golden_correct', 'N/A')}/20")
+    policy = _decision_policy(effective_config or {})
+    hard_n = sum(r["overall_g2"].get("n", 0) for r in hard.get("reports", {}).values())
+    hard_pass = sum(r["overall_g2"].get("auto_pass", 0) for r in hard.get("reports", {}).values())
+    hard_correct = sum(r["overall_g2"].get("auto_pass_correct", 0) for r in hard.get("reports", {}).values())
+    note += (f"; arbitration={policy['arbitration']}; hard auto-pass={_fmt(hard_pass / hard_n if hard_n else None)}"
+             f" precision={_fmt(hard_correct / hard_pass if hard_pass else None)}; "
+             f"G1 limit={policy['g1_p95_limit_ms']}ms")
+    if policy["arbitration"] == "agree":
+        note += "; " + ", ".join(f"{k}={v}" for k, v in policy["thresholds"].items())
     mode = val.get("mode", "cnn")
     classifier = "cnn v1" if "char_cnn_v1" in mode else mode
     values = [date, commit, classifier,
@@ -296,6 +333,7 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
         write_manifest(manifest, rows, check_files=False)
         evaluate_cmd = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
                         str(manifest), "--split", "manifest-val", "--out", str(target),
+                        "--stage-trace", str(target / "trace.jsonl"),
                         "--config", str(config_path)]
         run = _run(evaluate_cmd, ROOT, out / "logs" / f"dev-{subset}.log", env=env)
         hard_status[subset] = run.returncode
@@ -310,7 +348,8 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     hard_input_errors = sum(report.get("decode_error_count", 0) for report in hard_reports.values())
     input_error_count = val_input_errors + hard_input_errors
 
-    golden = _run([str(PYTHON), "-m", "pytest", "algorithm/tests/test_golden.py", "-q"], ROOT,
+    golden = _run([str(PYTHON), "-m", "pytest", "algorithm/tests/test_golden.py", "-q",
+                   "--basetemp", str(out / "pytest-temp")], ROOT,
                   out / "logs" / "golden.log", env=env)
     golden_pass = golden.returncode == 0 and "passed" in golden.stdout and "skipped" not in golden.stdout
     golden_count = None
@@ -373,7 +412,9 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
     comparison_key["hard_sampling"]["run_manifest_sha256"] = _sha(sample_all)
     comparison = _compare({"comparison_key": comparison_key, "metrics": metrics,
                            "effective_config": effective_config}, out_root)
-    line = _scoreboard_line(date, commit, val_report, {**hard_status, "reports": hard_reports}, bench)
+    line = _scoreboard_line(date, commit, val_report, {**hard_status, "reports": hard_reports}, bench, effective_config)
+    acceptance = _acceptance(effective_config, val_report, hard_reports, bench,
+                             golden_pass, golden_count, input_error_count)
     error_analysis = _error_analysis(out / "val1000" / "trace.jsonl")
     summary = {"date": date, "commit": commit, "directory": str(out), "scoreboard_header": SCOREBOARD_HEADER,
                "effective_config": effective_config,
@@ -386,9 +427,7 @@ def daily(out_root: Path, index: Path = INDEX, *, date: str | None = None, commi
                "hard_completed": sorted(hard_reports), "golden_exit": golden.returncode,
                "g1": bench, "comparison_key": comparison_key, "comparison": comparison,
                **error_analysis,
-               "status": "INPUT_ERRORS" if input_error_count else
-               ("PASS" if golden_pass and golden_count is not None and golden_count >= 12
-                and bench["wall_time"]["p95_ms"] <= 300 and len(hard_reports) == 7 else "PARTIAL_FAILURE")}
+               "acceptance": acceptance, "status": acceptance["status"]}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "scoreboard-row.md").write_text("| " + " | ".join(SCOREBOARD_HEADER) + " |\n" +
                                            "| " + " | ".join("---" for _ in SCOREBOARD_HEADER) + " |\n" +
@@ -428,6 +467,7 @@ def recover_hard(run_dir: Path):
             log.replace(run_dir / "logs" / f"dev-{subset}-attempt1.log")
         command = [str(PYTHON), "-m", "lpr_tools.eval.eval_accuracy", "--manifest",
                    str(manifest), "--split", "manifest-val", "--out", str(target),
+                   "--stage-trace", str(target / "trace.jsonl"),
                    "--config", str(config_path)]
         run = _run(command, ROOT, log, env=env)
         statuses[subset] = run.returncode
@@ -489,7 +529,9 @@ def finish_g1(run_dir: Path):
     comparison = _compare({"comparison_key": key, "metrics": metrics,
                            "effective_config": marker["effective_config"]}, out_root)
     line = _scoreboard_line(marker["date"], marker["commit"], val_report,
-                            {**hard_status, "reports": hard_reports}, bench)
+                            {**hard_status, "reports": hard_reports}, bench, effective_config)
+    acceptance = _acceptance(effective_config, val_report, hard_reports, bench,
+                             marker["golden_pass"], marker["golden_correct"], input_error_count)
     summary = {"date": marker["date"], "commit": marker["commit"], "directory": str(run_dir),
                "effective_config": effective_config,
                "network_attribution": _attribution([val_report, *hard_reports.values()]),
@@ -502,9 +544,7 @@ def finish_g1(run_dir: Path):
                "input_errors": input_error_count,
                "val_input_errors": val_input_errors, "hard_input_errors": hard_input_errors,
                **_error_analysis(run_dir / "val1000" / "trace.jsonl"),
-               "status": "INPUT_ERRORS" if marker.get("input_errors", 0) else
-               ("PASS" if marker["golden_pass"] and marker["golden_correct"] >= 12
-                and bench["wall_time"]["p95_ms"] <= 300 and len(hard_reports) == 7 else "PARTIAL_FAILURE")}
+               "acceptance": acceptance, "status": acceptance["status"]}
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "scoreboard-row.md").write_text("| " + " | ".join(SCOREBOARD_HEADER) + " |\n" +
         "| " + " | ".join("---" for _ in SCOREBOARD_HEADER) + " |\n" + line + "\n", encoding="utf-8")
@@ -543,6 +583,8 @@ def _format_summary(summary):
     alert = ("\n⚠️ **检测到超过1个百分点的退步。**\n" if regressions else "")
     cfg = summary.get("effective_config", {})
     attr = summary.get("network_attribution", {})
+    policy = _decision_policy(cfg)
+    gate = policy["g1_p95_limit_ms"]
     def model_text(name):
         model = cfg.get("models", {}).get(name, {})
         return (f"{model.get('path') or 'disabled'} (SHA256 {model.get('sha256') or 'N/A'}, "
@@ -553,16 +595,19 @@ def _format_summary(summary):
             f"分类器 `{cfg.get('classifier', 'N/A')}`；分类器模型 `{cfg.get('classifier_model', {}).get('path', 'N/A')}`"
             f" SHA256 `{cfg.get('classifier_model', {}).get('sha256', 'N/A')}`\n"
             f"- 网络权重: corner {model_text('corner')}；plate reader {model_text('plate_reader')}\n"
-            f"- 网络贡献（val + hard）：CRNN最终兜底 {attr.get('crnn_selected_count', 0)}，"
+            f"- 仲裁：`{policy['arbitration']}`；参数 `{policy['thresholds']}`\n"
+            f"- 网络贡献（val + hard）：最终采用CRNN读法 {attr.get('crnn_selected_count', 0)}，"
             f"准确率 {_fmt(attr.get('crnn_selected_accuracy'))}；网络候选最终选中 "
             f"{attr.get('network_candidate_selected_count', 0)}；reader调用 "
             f"{attr.get('reader_invoked_calls', 0)} 次（覆盖 {attr.get('reader_invoked_images', 0)} 图），"
             f"corner调用 {attr.get('corner_invoked_calls', 0)} 次（覆盖 {attr.get('corner_invoked_images', 0)} 图）\n"
             f"- 状态: **{summary['status']}**；golden {summary['hard_status'].get('golden_correct')}/20，"
-            f"门槛 12/20；hard 子集完成 {len(summary['hard_completed'])}/7\n"
+            f"门槛 13/20；hard 子集完成 {len(summary['hard_completed'])}/7\n"
             f"- G1: P95 {summary['g1'].get('wall_time', {}).get('p95_ms', float('nan')):.1f} ms；"
             f"{summary['g1'].get('decoded')}/{summary['g1'].get('requested')} 张已解码；"
-            f"达到300ms门槛：{summary['g1'].get('wall_time', {}).get('p95_ms', float('inf')) <= 300}\n"
+            f"达到{gate}ms门槛：{summary['g1'].get('wall_time', {}).get('p95_ms', float('inf')) <= gate}\n"
+            f"- dev-hard 自动通过精度 {_fmt(summary.get('acceptance', {}).get('hard_auto_pass_precision'))}；"
+            f"agree双集合≥99%检查：{summary.get('acceptance', {}).get('dual_precision_pass', 'N/A')}\n"
             f"- val 自动通过率 {_fmt(summary['metrics']['val/overall'].get('auto_pass_rate'))}，"
             f"精度 {_fmt(summary['metrics']['val/overall'].get('auto_pass_precision'))}；"
             f"固定清单坏图：val {summary.get('val_input_errors', 0)}/1000，"

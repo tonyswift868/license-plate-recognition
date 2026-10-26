@@ -249,7 +249,7 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
         if any("test_golden.py" in item for item in command):
             return subprocess.CompletedProcess(command, 0, "1 passed in 1s\n", "")
         if "-c" in command:
-            return subprocess.CompletedProcess(command, 0, "12/20\n", "")
+            return subprocess.CompletedProcess(command, 0, "13/20\n", "")
         if any("bench_latency" in item for item in command):
             bench = {"acceptance_eligible": True, "requested": 320, "decoded": 320,
                      "wall_time": {"p50_ms": 40.0, "p95_ms": 70.0, "max_ms": 80.0}}
@@ -278,6 +278,9 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     assert "⚠️" not in (dest / "summary.md").read_text(encoding="utf-8")
     effective_path = str(config_path.resolve())
     for command, child_env in observed:
+        if "lpr_tools.eval.eval_accuracy" in command and "manifest-val" in command:
+            assert command[command.index("--stage-trace") + 1].endswith("trace.jsonl")
+            assert command[command.index("--config") + 1] == effective_path
         if "eval_accuracy" in command or "bench_latency" in command:
             assert command[command.index("--config") + 1] == effective_path
         if "eval_accuracy" in command and "--split" in command and "val" in command:
