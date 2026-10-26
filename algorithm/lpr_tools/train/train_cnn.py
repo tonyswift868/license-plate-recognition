@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+from numbers import Integral
 from pathlib import Path
 import random
 import time
@@ -148,12 +149,17 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
           log_path: Path | None = None, data_weights=None,
           class_boosts=None,
           init_weights: Path | None = None,
+          samples_per_epoch: int | None = None,
           resume: Path | None = None, checkpoint_path: Path | None = None,
           max_epochs_this_run: int | None = None) -> list[dict]:
     if (epochs < 1 or batch_size < 1 or not np.isfinite(lr) or lr <= 0
             or not np.isfinite(weight_decay) or weight_decay < 0
             or num_workers not in (0, 1, 2)):
         raise ValueError("epochs/batch_size/lr must be positive; num_workers must be 0..2")
+    if (samples_per_epoch is not None
+            and (isinstance(samples_per_epoch, bool) or not isinstance(samples_per_epoch, Integral)
+                 or samples_per_epoch < 1)):
+        raise ValueError("samples_per_epoch must be a positive integer or None")
     if init_weights is not None and resume is not None:
         raise ValueError("init_weights and resume are mutually exclusive")
     out = Path(out)
@@ -174,7 +180,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
               "weight_decay": weight_decay, "seed": seed, "num_workers": num_workers,
               "data_weights": weights_by_source,
               "class_boosts": {str(k): class_boosts[k] for k in sorted(class_boosts)},
-              "init_weights": init_metadata}
+              "init_weights": init_metadata,
+              "samples_per_epoch": int(samples_per_epoch) if samples_per_epoch is not None else None}
     signature = _data_signature(sources)
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     torch.set_num_threads(2); torch.use_deterministic_algorithms(True); cv2.setNumThreads(1)
@@ -184,9 +191,11 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     val_images, val_labels, _ = _load_sources(sources, weights_by_source, "val", seed=seed, require_all=False)
     train_data = CharacterDataset(train_images, train_labels, seed=seed, augment=True)
     val_data = CharacterDataset(val_images, val_labels, seed=seed, augment=False)
+    actual_draws_per_epoch = (len(train_data) if samples_per_epoch is None
+                             else int(samples_per_epoch))
     loader_generator = torch.Generator().manual_seed(seed)
     sampler_generator = torch.Generator().manual_seed(seed + 1)
-    sampler = WeightedRandomSampler(torch.as_tensor(sampling_weights), len(train_data), replacement=True,
+    sampler = WeightedRandomSampler(torch.as_tensor(sampling_weights), actual_draws_per_epoch, replacement=True,
                                     generator=sampler_generator)
     train_loader = DataLoader(train_data, batch_size=batch_size, sampler=sampler,
                               generator=loader_generator, num_workers=num_workers, worker_init_fn=seed_worker)
@@ -233,6 +242,7 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         saved_config.setdefault("class_boosts", {})
         # Older checkpoints did not record an initial inference state_dict.
         saved_init_metadata = saved_config.setdefault("init_weights", None)
+        saved_config.setdefault("samples_per_epoch", None)
         # On resume, inherit provenance without loading initial weights again.
         init_metadata = saved_init_metadata
         config["init_weights"] = saved_init_metadata
@@ -299,7 +309,7 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
             alnum_accuracy = alnum_correct / alnum_count if alnum_count else None
             accuracy = correct / len(val_data)
             score = (accuracy, province_accuracy if province_accuracy is not None else -1.0)
-            row = {"epoch": epoch + 1, "loss": loss_total / len(train_data),
+            row = {"epoch": epoch + 1, "loss": loss_total / actual_draws_per_epoch,
                    "val_char_acc": accuracy, "val_province_acc": province_accuracy,
                    "val_alnum_acc": alnum_accuracy, "lr": optimizer.param_groups[0]["lr"],
                    "epoch_seconds": epoch_seconds, "train_seconds": elapsed_total}
@@ -347,7 +357,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
                     "val_char_acc": best_accuracy, "val_province_acc": best_province_accuracy,
                     "val_alnum_acc": best_alnum_accuracy,
                     "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()},
-                    "init_weights": init_metadata},
+                    "init_weights": init_metadata,
+                    "actual_draws_per_epoch": actual_draws_per_epoch},
         indent=2) + "\n", encoding="utf-8")
     print(f"saved={out.as_posix()} version={version} log={log_path.as_posix()} "
           f"best={best_path.as_posix()} best_epoch={best_epoch} "
@@ -375,12 +386,16 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, help="resume from a training checkpoint")
     parser.add_argument("--init-weights", type=Path,
                         help="warm-start from a safe CharCNN inference state_dict; starts fresh optimizer/scheduler")
+    parser.add_argument("--samples-per-epoch", type=int,
+                        help="number of weighted training draws per epoch (default: full training-set length)")
     parser.add_argument("--checkpoint", type=Path, help="training checkpoint path (separate from inference weights)")
     parser.add_argument("--stop-after", type=int,
                         help="optional maximum epochs in this invocation; checkpoints at epoch boundaries")
     args = parser.parse_args()
     if args.resume is not None and args.init_weights is not None:
         parser.error("--resume and --init-weights are mutually exclusive")
+    if args.samples_per_epoch is not None and args.samples_per_epoch < 1:
+        parser.error("--samples-per-epoch must be a positive integer")
     class_boosts = {}
     for item in args.class_boost:
         try:
@@ -399,6 +414,7 @@ def main() -> None:
           weight_decay=args.weight_decay, log_path=args.log, data_weights=args.data_weight,
           class_boosts=class_boosts,
           init_weights=args.init_weights, resume=args.resume,
+          samples_per_epoch=args.samples_per_epoch,
           checkpoint_path=args.checkpoint, max_epochs_this_run=args.stop_after)
 
 

@@ -150,6 +150,11 @@ state_dict，严格检查模型键和形状，并在 checkpoint config 与训练
 `train_seconds` 只计本次训练及逐轮验证，初始化模型既有的训练成本须单列。
 重采样/难例目录只能取训练 split，开发集只供验证，不得把验证裁片加入微调。
 
+短程微调可设 `--samples-per-epoch 131072`，每轮按既定来源/类别概率有放回抽样
+指定次数；默认仍抽取完整训练集长度。该参数不裁减验证集。训练loss按实际
+抽样数归一化，sidecar记录 `actual_draws_per_epoch`；参数进入断点兼容检查，
+旧断点缺此字段按默认全长度处理。抽样轮次不等于对每张训练图遍历一次。
+
 manifest 的 `train_data` 是包含所有来源 path/weight 的 JSON 字符串。
 CNN 和 SVM 额外生成同名 `.training.json`，其中 `train_seconds` 为明确计时记录：
 CNN 累计每轮训练及验证时间（跨断点累计），SVM 记录 fit/校准时间；

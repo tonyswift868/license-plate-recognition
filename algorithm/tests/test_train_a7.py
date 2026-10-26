@@ -81,6 +81,7 @@ def test_resume_accepts_pre_boost_checkpoint_without_boosts(tmp_path):
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     state["config"].pop("class_boosts")
     state["config"].pop("init_weights")
+    state["config"].pop("samples_per_epoch")
     torch.save(state, checkpoint)
     history = train_cnn(data, out, version="v", epochs=2, batch_size=130,
                         checkpoint_path=checkpoint, resume=checkpoint)
@@ -186,6 +187,70 @@ def test_init_weights_cli_rejects_resume_combination(monkeypatch):
     monkeypatch.setattr("sys.argv", ["train_cnn", "--data", "unused", "--out", "unused.pt",
                                       "--version", "v", "--resume", "checkpoint.pt",
                                       "--init-weights", "model.pt"])
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
+
+
+def test_samples_per_epoch_controls_sampler_and_loss_normalization(tmp_path, monkeypatch):
+    from lpr_tools.train import train_cnn as module
+
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=404)
+    captured = {}
+    original_sampler = module.WeightedRandomSampler
+
+    def recording_sampler(weights, num_samples, *args, **kwargs):
+        captured["num_samples"] = num_samples
+        return original_sampler(weights, num_samples, *args, **kwargs)
+
+    class ConstantLoss:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self, _logits, _labels):
+            return torch.tensor(2.5, requires_grad=True)
+
+    monkeypatch.setattr(module, "WeightedRandomSampler", recording_sampler)
+    monkeypatch.setattr(module.nn, "CrossEntropyLoss", ConstantLoss)
+    out = tmp_path / "sampled.pt"
+    checkpoint = tmp_path / "sampled.checkpoint.pt"
+    train_cnn(data, out, version="sampled", epochs=1, batch_size=8,
+              samples_per_epoch=17, checkpoint_path=checkpoint)
+    assert captured["num_samples"] == 17
+    with out.with_suffix(".train.csv").open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert float(row["loss"]) == pytest.approx(2.5)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    assert state["config"]["samples_per_epoch"] == 17
+    sidecar = json.loads(out.with_suffix(".training.json").read_text(encoding="utf-8"))
+    assert sidecar["actual_draws_per_epoch"] == 17
+
+
+def test_resume_rejects_changed_samples_per_epoch(tmp_path):
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=405)
+    out = tmp_path / "sampled.pt"
+    checkpoint = tmp_path / "sampled.checkpoint.pt"
+    train_cnn(data, out, version="sampled", epochs=2, batch_size=130,
+              samples_per_epoch=17, checkpoint_path=checkpoint, max_epochs_this_run=1)
+    with pytest.raises(ValueError, match="hyperparameters"):
+        train_cnn(data, out, version="sampled", epochs=2, batch_size=130,
+                  samples_per_epoch=18, checkpoint_path=checkpoint, resume=checkpoint)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "17", True])
+def test_samples_per_epoch_api_rejects_nonpositive_or_noninteger(value, tmp_path):
+    with pytest.raises(ValueError, match="positive integer"):
+        train_cnn([], tmp_path / "bad.pt", version="bad", samples_per_epoch=value)
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "1.5", "invalid"])
+def test_samples_per_epoch_cli_rejects_nonpositive_or_noninteger(monkeypatch, value):
+    from lpr_tools.train import train_cnn as module
+
+    monkeypatch.setattr("sys.argv", ["train_cnn", "--data", "unused", "--out", "unused.pt",
+                                      "--version", "v", "--samples-per-epoch", value])
     with pytest.raises(SystemExit) as exc:
         module.main()
     assert exc.value.code == 2
