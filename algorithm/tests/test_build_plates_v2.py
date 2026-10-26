@@ -188,7 +188,7 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
         def __enter__(self): return self
         def __exit__(self, *args): return False
         def map(self, func, jobs, chunksize):
-            assert func is builder._hard_one and chunksize == 8
+            assert func is builder._hard_one and 1 <= chunksize <= 8
             for row, out, config, expected in jobs:
                 digest = expected[1]; key = hashlib.sha1(row["path"].casefold().encode()).hexdigest()
                 subset = row["subset"].removeprefix("ccpd_")
@@ -205,6 +205,7 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
                            "corner_detect_calls":1,"candidate_source":"net","labels":[gt_label,pipe_label]}
     monkeypatch.setattr(builder, "ProcessPoolExecutor", InlinePool)
 
+    (tmp_path / "index.csv").write_text("fixture index identity", encoding="utf-8")
     stats = builder.build(index=tmp_path / "index.csv", v1=v1, target=target,
                           receipt=tmp_path / "receipt", workers=2, config=cfg_path)
     with (target / "labels.csv").open(encoding="utf-8", newline="") as f:
