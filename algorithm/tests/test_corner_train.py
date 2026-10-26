@@ -15,6 +15,10 @@ from lpr_tools.train_corner import (
     _focal_heatmap_loss,
     _checkpoint,
     _load_checkpoint,
+    _balanced_hard_rows,
+    _verify_selected_source_rows,
+    _verify_selected_image_bytes,
+    _verify_np_decode_lineage,
     _safe_negative_crop,
     calibrate_threshold,
     center_cell,
@@ -217,6 +221,165 @@ def test_safe_checkpoint_can_resume_model_optimizer_and_step(tmp_path: Path) -> 
     assert (epoch, step, history) == (2, 17, [{"step": 17}])
     for key, value in expected.items():
         torch.testing.assert_close(restored.state_dict()[key], value)
+
+
+def test_hard_sampling_balances_each_subset_with_fixed_cap_and_seed() -> None:
+    rows = [{"subset": subset, "id": f"{subset}-{index}"}
+            for subset, count in (("ccpd_db", 5), ("ccpd_fn", 2), ("ccpd_tilt", 4))
+            for index in range(count)]
+    first = _balanced_hard_rows(rows, per_subset=3, seed=42)
+    second = _balanced_hard_rows(rows, per_subset=3, seed=42)
+    assert [row["id"] for row in first] == [row["id"] for row in second]
+    counts = {subset: sum(row["subset"] == subset for row in first)
+              for subset in {row["subset"] for row in first}}
+    assert counts == {"ccpd_db": 3, "ccpd_fn": 2, "ccpd_tilt": 3}
+
+
+def test_selected_source_audit_rejects_forged_hard_membership_and_quad(tmp_path: Path) -> None:
+    source = tmp_path / "index.csv"
+    source.write_text(
+        "path,split,subset,has_plate,quad\n"
+        "D:/data/good.jpg,train,ccpd_db,1,1 2 9 2 9 5 1 5\n",
+        encoding="utf-8")
+    forged = {"path": "D:/data/good.jpg", "split": "train", "source_split": "train",
+              "subset": "ccpd_fn", "has_plate": "1", "quad": "1 2 9 2 9 5 1 5"}
+    with pytest.raises(ValueError, match="membership/label mismatch"):
+        _verify_selected_source_rows([forged], source)
+    forged["subset"] = "ccpd_db"
+    forged["quad"] = "1 2 9 2 9 6 1 5"
+    with pytest.raises(ValueError, match="quad differs"):
+        _verify_selected_source_rows([forged], source)
+    forged["quad"] = "1 2 9 2 9 5 1 5"
+    forged["source_split"] = "val"
+    with pytest.raises(ValueError, match="membership/label mismatch"):
+        _verify_selected_source_rows([forged], source)
+
+
+def test_selected_image_audit_rejects_byte_identical_devhard_copy(tmp_path: Path) -> None:
+    protected_image = tmp_path / "fixed.jpg"
+    copied_image = tmp_path / "renamed-copy.jpg"
+    protected_image.write_bytes(b"same image bytes")
+    copied_image.write_bytes(b"same image bytes")
+    manifest = tmp_path / "devhard.csv"
+    with manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["path"])
+        writer.writeheader()
+        writer.writerow({"path": str(protected_image)})
+    copied_row = {"path": str(copied_image)}
+    with pytest.raises(ValueError, match="byte-identical"):
+        _verify_selected_image_bytes([manifest], [copied_row], [])
+
+
+def test_selected_image_audit_reports_protected_byte_hash_reads(tmp_path: Path) -> None:
+    protected = tmp_path / "protected.jpg"
+    selected = tmp_path / "selected.jpg"
+    protected.write_bytes(b"protected bytes")
+    selected.write_bytes(b"safe bytes")
+    manifest = tmp_path / "protected.csv"
+    with manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["path"])
+        writer.writeheader()
+        writer.writerow({"path": str(protected)})
+    audit = _verify_selected_image_bytes(
+        [manifest], [{"path": str(selected)}], [])
+    assert audit["excluded_manifest_paths_hashed"] == 1
+    assert audit["excluded_manifest_unique_content_hashes"] == 1
+    assert audit["excluded_manifest_image_hash_count"] == 1
+
+
+def test_hard_pool_loader_consumes_audited_schema_and_reservoir(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "shared"
+    (root / "index").mkdir(parents=True)
+    manifests = {
+        "frozen": tmp_path / "frozen.csv", "golden": tmp_path / "golden.csv",
+        "devhard": root / "index" / "devhard_v1.csv",
+        "undecodable": root / "index" / "undecodable.csv",
+    }
+    content_paths = []
+    for name, manifest in manifests.items():
+        image = tmp_path / f"{name}.jpg"
+        image.write_bytes(f"protected {name}".encode())
+        content_paths.append(image)
+        with manifest.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["path"])
+            writer.writeheader()
+            writer.writerow({"path": str(image)})
+    monkeypatch.setattr(train_corner_module, "FROZEN_MANIFEST", manifests["frozen"])
+    monkeypatch.setattr(train_corner_module, "GOLDEN_MANIFEST", manifests["golden"])
+    monkeypatch.setattr(train_corner_module, "UNDECODABLE_MANIFEST", manifests["undecodable"])
+    monkeypatch.setattr(train_corner_module, "DATA_ROOT", root)
+    train_csv, val_csv = tmp_path / "hard_pool_train.csv", tmp_path / "hard_tuning_holdout.csv"
+    fields = ["path", "split", "has_plate", "quad", "skip_reason", "subset", "source_split"]
+    train_rows = [
+        {"path": f"D:/hard/{i}.jpg", "split": "train", "has_plate": "1",
+         "quad": "1 2 9 2 9 5 1 5", "skip_reason": "", "subset": "ccpd_db",
+         "source_split": "test"}
+        for i in range(3)]
+    holdout = [{"path": "D:/hard/holdout.jpg", "split": "val", "has_plate": "1",
+                "quad": "1 2 9 2 9 5 1 5", "skip_reason": "", "subset": "ccpd_db",
+                "source_split": "train"}]
+    for path, rows in ((train_csv, train_rows), (val_csv, holdout)):
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+    audit = {"manifest_sha256": {key: train_corner_module._file_sha256(path)
+                                  for key, path in manifests.items()},
+             "csv_sha256": {"train": train_corner_module._file_sha256(train_csv),
+                            "holdout": train_corner_module._file_sha256(val_csv)},
+             "content_hash_exclusion_verified": True}
+    (tmp_path / "hard_pool_audit.json").write_text(json.dumps(audit), encoding="utf-8")
+
+    selected, selected_val, audit_result = train_corner_module._read_audited_hard_pools(
+        train_csv, val_csv, per_subset=1, seed=42)
+    assert len(selected) == 1 and len(selected_val) == 1
+    assert audit_result["available_counts_by_subset"]["ccpd_db"] == 3
+    assert selected[0]["source_split"] == "test"
+
+
+def test_safe_np_audit_requires_matching_decoded_source_and_partition_subset(
+        tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / "seventh-data"
+    data_dir.mkdir()
+    monkeypatch.setattr(train_corner_module, "DATA_DIR", data_dir)
+    fields = ["path", "split", "has_plate", "quad", "skip_reason", "subset", "source_split"]
+    source_train = [{"path": "D:/np/train.jpg", "split": "train", "has_plate": "0",
+                     "quad": "", "skip_reason": "no_plate", "subset": "ccpd_np",
+                     "source_split": "test"}]
+    source_val = [{"path": "D:/np/val.jpg", "split": "val", "has_plate": "0",
+                   "quad": "", "skip_reason": "no_plate", "subset": "ccpd_np",
+                   "source_split": "test"}]
+    source_csvs = {"train": data_dir / "np_train.csv", "val": data_dir / "np_val.csv"}
+    for path, rows in ((source_csvs["train"], source_train), (source_csvs["val"], source_val)):
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+    csv_hashes = {key: train_corner_module._file_sha256(path) for key, path in source_csvs.items()}
+    source_audit_path = data_dir / "np-split-audit.json"
+    source_audit = {"all_selected_decoded_valid": True,
+                    "csv": {"np_train.csv_sha256": csv_hashes["train"],
+                            "np_val.csv_sha256": csv_hashes["val"]}}
+    source_audit_path.write_text(json.dumps(source_audit), encoding="utf-8")
+    lineage = {"path": str(source_audit_path),
+               "sha256": train_corner_module._file_sha256(source_audit_path),
+               "train_source_csv_sha256": csv_hashes["train"],
+               "val_source_csv_sha256": csv_hashes["val"],
+               "audit_train_csv_sha256": csv_hashes["train"],
+               "audit_val_csv_sha256": csv_hashes["val"]}
+    np_audit = {"all_selected_decoded_valid": True, "inherited_decode_audit": lineage}
+    safe_train = [dict(source_train[0])]
+    safe_val = [dict(source_val[0])]
+
+    result = _verify_np_decode_lineage(np_audit, tmp_path / "safe-audit.json",
+                                       tmp_path / "np_train_safe.csv", tmp_path / "np_val_safe.csv",
+                                       safe_train, safe_val)
+    assert result["safe_train_paths_subset"] and result["safe_val_paths_subset"]
+    safe_val[0]["path"] = "D:/np/unlisted-copy.jpg"
+    with pytest.raises(ValueError, match="subset"):
+        _verify_np_decode_lineage(np_audit, tmp_path / "safe-audit.json",
+                                  tmp_path / "np_train_safe.csv", tmp_path / "np_val_safe.csv",
+                                  safe_train, safe_val)
 
 
 def test_validation_threshold_uses_negative_false_positive_rate() -> None:
@@ -428,6 +591,26 @@ def test_roi_letterbox_and_geometric_augmentation_are_seed_deterministic() -> No
     assert np.isfinite(first[1]).all() and np.all((first[1] >= 0) & (first[1] <= 1))
 
 
+def test_positive_roi_perspective_warp_uses_float32_points(monkeypatch) -> None:
+    image = np.zeros((120, 240, 3), dtype=np.uint8)
+    row = {"path": "fixture.jpg", "quad": "75 48 160 48 160 74 75 74",
+           "bbox": "75 48 85 26"}
+    original = cv2.getPerspectiveTransform
+    calls = []
+
+    def checked_transform(src, dst):
+        calls.append((src.dtype, dst.dtype))
+        return original(src, dst)
+
+    monkeypatch.setattr(train_corner_module.cv2, "getPerspectiveTransform", checked_transform)
+    for seed in range(1000):
+        train_corner_module._positive_roi(image, row, np.random.default_rng(seed), geometric=True)
+        if calls:
+            break
+    assert calls, "seed scan did not exercise the perspective-warp branch"
+    assert calls[0] == (np.dtype(np.float32), np.dtype(np.float32))
+
+
 def test_roi_negative_placeholder_quad_has_no_regression_gradient() -> None:
     predicted = torch.tensor([[.1] * 8, [.9] * 8], requires_grad=True)
     targets = torch.tensor([[.2] * 8, [0.] * 8])
@@ -461,6 +644,39 @@ def test_roi_source_quad_outside_image_is_classified_and_bounded_resampled(
     assert counters == {"source_quad_resample_draws": 1, "source_quad_retry_exhaustions": 0}
     assert tensor.shape == (3, 96, 256)
     assert torch.isfinite(target).all()
+
+
+def test_gt_exterior_negative_retries_when_plate_box_fills_source(monkeypatch) -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    full = {"path": "full.jpg", "quad": "0 0 99 0 99 79 0 79", "bbox": "0 0 99 79"}
+    small = {"path": "small.jpg", "quad": "42 30 58 30 58 42 42 42", "bbox": "42 30 16 12"}
+    choices = iter([full, small])
+    monkeypatch.setattr(train_corner_module.random, "choice", lambda _rows: next(choices))
+    monkeypatch.setattr(train_corner_module, "imread", lambda _path: image)
+    counters = {"gt_exterior_resample_draws": 0, "gt_exterior_retry_exhaustions": 0,
+                "gt_exterior_resample_paths": []}
+    crop = train_corner_module._sample_gt_exterior_crop(
+        [full, small], np.random.default_rng(7), counters)
+    assert crop.ndim == 3 and crop.size > 0
+    assert counters == {"gt_exterior_resample_draws": 1,
+                        "gt_exterior_retry_exhaustions": 0,
+                        "gt_exterior_resample_paths": [_path_key("full.jpg")]}
+
+
+def test_gt_exterior_negative_bounded_retries_fail_when_all_sources_fill_image(monkeypatch) -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    full = {"path": "full.jpg", "quad": "0 0 99 0 99 79 0 79", "bbox": "0 0 99 79"}
+    monkeypatch.setattr(train_corner_module.random, "choice", lambda _rows: full)
+    monkeypatch.setattr(train_corner_module, "imread", lambda _path: image)
+    counters = {"gt_exterior_resample_draws": 0, "gt_exterior_retry_exhaustions": 0,
+                "gt_exterior_resample_paths": []}
+    with pytest.raises(RuntimeError, match="bounded positive-image retries"):
+        train_corner_module._sample_gt_exterior_crop(
+            [full], np.random.default_rng(7), counters)
+    assert counters["gt_exterior_resample_draws"] == train_corner_module.ROI_POSITIVE_RETRY_LIMIT
+    assert counters["gt_exterior_retry_exhaustions"] == 1
+    assert counters["gt_exterior_resample_paths"] == [
+        _path_key("full.jpg")] * train_corner_module.ROI_POSITIVE_RETRY_LIMIT
 
 
 def test_strong_roi_geometry_transforms_image_markers_with_ordered_corners() -> None:

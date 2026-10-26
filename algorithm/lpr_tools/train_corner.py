@@ -1,4 +1,4 @@
-"""从零训练 CornerNet；数据仅取安全 train/val CSV，CPU线程受限。"""
+"""以本项目权重训练/续训 CornerNet；支持安全train与本批授权hard/NP池，CPU线程受限。"""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +12,7 @@ import random
 import sys
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,109 @@ def _path_set_sha256(paths: set[str]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_selected_source_rows(rows: list[dict[str, str]], index_path: Path) -> None:
+    """Check source split, subset, label, and quad for precisely the selected rows."""
+    wanted = {_path_key(row["path"]) for row in rows}
+    sources: dict[str, dict[str, str]] = {}
+    with index_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for source in csv.DictReader(handle):
+            key = _path_key(source["path"])
+            if key in wanted:
+                prior = sources.get(key)
+                signature = (source["split"], source["subset"], source["has_plate"], source["quad"])
+                if prior and signature != (prior["split"], prior["subset"], prior["has_plate"], prior["quad"]):
+                    raise ValueError(f"conflicting source index rows for {source['path']}")
+                sources[key] = source
+    for row in rows:
+        key = _path_key(row["path"])
+        source = sources.get(key)
+        if source is None:
+            raise ValueError(f"selected path is missing from source index: {row['path']}")
+        expected_split = row.get("source_split", row["split"])
+        if (source["split"] != expected_split or source["subset"] != row["subset"]
+                or source["has_plate"] != row["has_plate"]):
+            raise ValueError(f"selected row source membership/label mismatch: {row['path']}")
+        if row["has_plate"] == "1":
+            try:
+                source_quad = np.asarray([float(value) for value in source["quad"].split()])
+                selected_quad = np.asarray([float(value) for value in row["quad"].split()])
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"invalid selected/source quad: {row['path']}") from exc
+            if (source_quad.shape != (8,) or selected_quad.shape != (8,)
+                    or not np.allclose(source_quad, selected_quad, rtol=0., atol=.01)):
+                raise ValueError(f"selected quad differs from source index: {row['path']}")
+
+
+def _verify_selected_image_bytes(exclusion_manifests: list[Path],
+                                 train_rows: list[dict[str, str]],
+                                 val_rows: list[dict[str, str]], *,
+                                 hash_threads: int = 4) -> dict[str, Any]:
+    """Reject path or byte-identical exclusion hits and any train/val byte overlap."""
+    if hash_threads < 1:
+        raise ValueError("hash thread count must be positive")
+    excluded_paths: set[str] = set()
+    blocked_hashes: set[str] = set()
+    excluded_manifest_paths_hashed = 0
+    for manifest in exclusion_manifests:
+        paths = _manifest_paths(manifest)
+        excluded_paths.update(paths)
+        image_paths = []
+        with manifest.open("r", encoding="utf-8-sig", newline="") as handle:
+            for item in csv.DictReader(handle):
+                path = Path(item["path"]) if item.get("path") else None
+                if path is None:
+                    continue
+                if not path.is_file():
+                    raise FileNotFoundError(f"cannot verify excluded image bytes: {path}")
+                image_paths.append(path)
+        excluded_manifest_paths_hashed += len(image_paths)
+        with ThreadPoolExecutor(max_workers=hash_threads) as pool:
+            blocked_hashes.update(pool.map(_file_sha256, image_paths))
+
+    def hashes(rows: list[dict[str, str]], label: str) -> set[str]:
+        result = set()
+        paths = []
+        for row in rows:
+            path = Path(row["path"])
+            key = _path_key(row["path"])
+            if key in excluded_paths:
+                raise ValueError(f"selected path appears in protected manifest: {row['path']}")
+            if not path.is_file():
+                raise FileNotFoundError(f"selected {label} image missing: {path}")
+            paths.append((row["path"], path))
+        with ThreadPoolExecutor(max_workers=hash_threads) as pool:
+            digests = list(pool.map(_file_sha256, [path for _, path in paths]))
+        for (display_path, _path), digest in zip(paths, digests):
+            if digest in blocked_hashes:
+                raise ValueError(f"selected {label} image is byte-identical to protected image: {display_path}")
+            result.add(digest)
+        return result
+
+    train_hashes = hashes(train_rows, "training")
+    val_hashes = hashes(val_rows, "validation")
+    overlap = train_hashes & val_hashes
+    if overlap:
+        raise ValueError(f"selected training and validation images share {len(overlap)} byte hashes")
+    return {"excluded_manifest_image_hash_count": len(blocked_hashes),
+            "excluded_manifest_unique_content_hashes": len(blocked_hashes),
+            "excluded_manifest_paths_hashed": excluded_manifest_paths_hashed,
+            "selected_train_unique_content_hashes": len(train_hashes),
+            "selected_validation_unique_content_hashes": len(val_hashes),
+            "selected_train_content_membership_sha256": _path_set_sha256(train_hashes),
+            "selected_validation_content_membership_sha256": _path_set_sha256(val_hashes),
+            "selected_train_validation_content_intersection": 0,
+            "checked_selected_train_rows": len(train_rows),
+            "checked_selected_validation_rows": len(val_rows)}
+
+
 def _input_csv_provenance(train_csv: Path, val_csv: Path,
                           sampling_audit: dict[str, Any]) -> dict[str, Any]:
     train_csv, val_csv = Path(train_csv), Path(val_csv)
@@ -96,16 +200,18 @@ def _verify_index_split_membership(train_rows: list[dict[str, str]],
                                    authorized_np_val: set[str] | None = None) -> dict[str, Any]:
     """Verify declared split/labels against source index; NP rows must use the audited override."""
     index_path = index_path or DATA_ROOT / "index" / "ccpd_index.csv"
-    with index_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        index_rows = list(csv.DictReader(handle))
+    requested = {_path_key(row["path"]) for row in train_rows + val_rows + np_train + np_val}
     by_path: dict[str, dict[str, str]] = {}
-    for row in index_rows:
-        key = _path_key(row["path"])
-        old = by_path.get(key)
-        if old is not None and (old["split"], old["has_plate"], old["subset"]) != (
-                row["split"], row["has_plate"], row["subset"]):
-            raise ValueError(f"conflicting source index rows for {row['path']}")
-        by_path[key] = row
+    with index_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            key = _path_key(row["path"])
+            if key not in requested:
+                continue
+            old = by_path.get(key)
+            if old is not None and (old["split"], old["has_plate"], old["subset"]) != (
+                    row["split"], row["has_plate"], row["subset"]):
+                raise ValueError(f"conflicting source index rows for {row['path']}")
+            by_path[key] = row
 
     def check(rows: list[dict[str, str]], declared_split: str, source_split: str,
               has_plate: str, require_np_override: bool = False) -> set[str]:
@@ -140,7 +246,7 @@ def _verify_index_split_membership(train_rows: list[dict[str, str]],
     if authorized_np_val is not None and not val_np_keys.issubset(authorized_np_val):
         raise ValueError("NP validation input includes paths outside the audited safe NP validation partition")
     return {"index_path": str(index_path.resolve()),
-            "index_sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+            "index_sha256": _file_sha256(index_path),
             "train_positive_membership_sha256": _path_set_sha256(train_keys),
             "val_positive_membership_sha256": _path_set_sha256(val_keys),
             "np_train_membership_sha256": _path_set_sha256(train_np_keys),
@@ -386,6 +492,140 @@ def read_rows(path: Path, expected_split: str, expected_has_plate: str = "1") ->
     return rows
 
 
+HARD_SUBSETS = {"ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
+                "ccpd_fn", "ccpd_challenge", "ccpd_weather"}
+
+
+def _read_audited_hard_pools(train_csv: Path, val_csv: Path, *, per_subset: int,
+                             seed: int
+                             ) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, Any]]:
+    """Stream and balance hard train rows after binding their safety audit."""
+    val_rows = read_rows(val_csv, "val")
+    if per_subset < 1:
+        raise ValueError("hard per-subset sample cap must be positive")
+    if any(row["subset"] not in HARD_SUBSETS for row in val_rows):
+        raise ValueError("hard holdout contains a row outside the seven allowed subsets")
+    audit_path = train_csv.with_name("hard_pool_audit.json")
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    manifest_paths = {
+        "frozen": FROZEN_MANIFEST,
+        "golden": GOLDEN_MANIFEST,
+        "devhard": DATA_ROOT / "index" / "devhard_v1.csv",
+        "undecodable": UNDECODABLE_MANIFEST,
+    }
+    manifest_hashes = {key: _file_sha256(path)
+                       for key, path in manifest_paths.items()}
+    audited_manifest_values = set((audit.get("manifest_sha256") or {}).values())
+    if set(manifest_hashes.values()) != audited_manifest_values:
+        raise ValueError("hard-pool audit manifest hashes do not match current exclusion lists")
+    csv_hashes = {"train": _file_sha256(train_csv), "holdout": _file_sha256(val_csv)}
+    audited_csv_values = set((audit.get("csv_sha256") or {}).values())
+    if not set(csv_hashes.values()).issubset(audited_csv_values):
+        raise ValueError("hard-pool CSV hashes do not match safety audit")
+    val_keys = {_path_key(row["path"]) for row in val_rows}
+    excluded = set().union(*(_manifest_paths(path) for path in manifest_paths.values()))
+    if val_keys & excluded:
+        raise ValueError("hard-pool paths intersect a protected manifest")
+    # The data-preparation audit checks byte-identical copies against all four
+    # manifests before publishing these CSVs; bind that proof to the run.
+    if not audit.get("content_hash_exclusion_verified"):
+        raise ValueError("hard-pool audit has no verified content-hash exclusion proof")
+    reservoirs: dict[str, list[dict[str, str]]] = {subset: [] for subset in HARD_SUBSETS}
+    counts: Counter[str] = Counter()
+    seen_train_paths: set[str] = set()
+    rngs = {subset: random.Random(seed + index) for index, subset in enumerate(sorted(HARD_SUBSETS))}
+    required = {"path", "split", "has_plate", "quad", "skip_reason", "subset", "source_split"}
+    with train_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            raise ValueError("hard train CSV is missing source provenance columns")
+        for row in reader:
+            subset = row["subset"]
+            if subset not in HARD_SUBSETS or row["split"] != "train" or row["has_plate"] != "1" \
+                    or row["skip_reason"].strip() or len(row["quad"].split()) != 8:
+                raise ValueError(f"malformed hard-pool train row: {row.get('path')}")
+            key = _path_key(row["path"])
+            if key in seen_train_paths:
+                raise ValueError(f"duplicate hard train path: {row['path']}")
+            seen_train_paths.add(key)
+            if key in excluded:
+                raise ValueError(f"hard train path appears in protected manifest: {row['path']}")
+            if key in val_keys:
+                raise ValueError(f"hard train path overlaps tuning holdout: {row['path']}")
+            counts[subset] += 1
+            group = reservoirs[subset]
+            rng = rngs[subset]
+            if len(group) < per_subset:
+                group.append(row)
+            else:
+                chosen = rng.randrange(counts[subset])
+                if chosen < per_subset:
+                    group[chosen] = row
+    train_rows = [row for subset in sorted(HARD_SUBSETS) for row in reservoirs[subset]]
+    return train_rows, val_rows, {"audit_sha256": hashlib.sha256(audit_path.read_bytes()).hexdigest(),
+        "csv_sha256": csv_hashes, "manifest_sha256": manifest_hashes,
+        "train_rows": sum(counts.values()), "selected_train_rows": len(train_rows),
+        "holdout_rows": len(val_rows), "available_counts_by_subset": dict(counts),
+        "subset_counts_train": dict(Counter(row["subset"] for row in train_rows)),
+        "subset_counts_holdout": dict(Counter(row["subset"] for row in val_rows)),
+        "content_hash_exclusion_verified": True}
+
+
+def _balanced_hard_rows(rows: list[dict[str, str]], per_subset: int,
+                        seed: int) -> list[dict[str, str]]:
+    if per_subset < 1:
+        raise ValueError("hard per-subset sample cap must be positive")
+    sampled = []
+    rng = np.random.default_rng(seed)
+    for subset in sorted(HARD_SUBSETS):
+        group = [row for row in rows if row["subset"] == subset]
+        order = rng.permutation(len(group))
+        sampled.extend(group[int(i)] for i in order[:min(per_subset, len(group))])
+    return sampled
+
+
+def _verify_np_decode_lineage(np_audit: dict[str, Any], audit_path: Path,
+                              np_train_csv: Path, np_val_csv: Path,
+                              np_train_rows: list[dict[str, str]],
+                              np_val_rows: list[dict[str, str]]) -> dict[str, Any]:
+    if not np_audit.get("all_selected_decoded_valid"):
+        raise ValueError("safe NP audit does not prove all images decode")
+    lineage = np_audit.get("inherited_decode_audit")
+    if not lineage:
+        return {"mode": "direct_decode_audit", "audit_sha256": _file_sha256(audit_path)}
+    source_audit_path = Path(lineage["path"])
+    if _file_sha256(source_audit_path) != lineage["sha256"]:
+        raise ValueError("inherited NP decode audit hash mismatch")
+    source_audit = json.loads(source_audit_path.read_text(encoding="utf-8"))
+    if not source_audit.get("all_selected_decoded_valid"):
+        raise ValueError("source NP decode audit is not marked valid")
+    source_train_csv = DATA_DIR / "np_train.csv"
+    source_val_csv = DATA_DIR / "np_val.csv"
+    source_hashes = {"train": _file_sha256(source_train_csv), "val": _file_sha256(source_val_csv)}
+    expected_source_hashes = {"train": lineage["train_source_csv_sha256"],
+                              "val": lineage["val_source_csv_sha256"]}
+    expected_audit_hashes = {"train": source_audit["csv"]["np_train.csv_sha256"],
+                             "val": source_audit["csv"]["np_val.csv_sha256"]}
+    inherited_audit_hashes = {"train": lineage["audit_train_csv_sha256"],
+                              "val": lineage["audit_val_csv_sha256"]}
+    if source_hashes != expected_source_hashes or source_hashes != expected_audit_hashes \
+            or source_hashes != inherited_audit_hashes:
+        raise ValueError("inherited NP source CSV hashes do not match decode audit")
+    source_train = read_rows(source_train_csv, "train", "0")
+    source_val = read_rows(source_val_csv, "val", "0")
+    if not {_path_key(row["path"]) for row in np_train_rows}.issubset(
+            {_path_key(row["path"]) for row in source_train}):
+        raise ValueError("safe NP train rows are not a subset of the decoded source partition")
+    if not {_path_key(row["path"]) for row in np_val_rows}.issubset(
+            {_path_key(row["path"]) for row in source_val}):
+        raise ValueError("safe NP val rows are not a subset of the decoded source partition")
+    return {"mode": "inherited_verified_decode_subset", "source_audit_path": str(source_audit_path.resolve()),
+            "source_audit_sha256": lineage["sha256"], "source_csv_sha256": source_hashes,
+            "safe_train_rows": len(np_train_rows), "safe_val_rows": len(np_val_rows),
+            "safe_train_paths_subset": True, "safe_val_paths_subset": True,
+            "safe_images_redecoded_this_run": False}
+
+
 def audit_sources(train_rows: list[dict[str, str]], val_rows: list[dict[str, str]],
                   np_train: list[dict[str, str]] | None = None,
                   np_val: list[dict[str, str]] | None = None,
@@ -420,8 +660,14 @@ def audit_sources(train_rows: list[dict[str, str]], val_rows: list[dict[str, str
             "frozen_manifest_sha256": hashlib.sha256(frozen_path.read_bytes()).hexdigest(),
             "golden_manifest_sha256": hashlib.sha256(golden_path.read_bytes()).hexdigest(),
             "undecodable_manifest_sha256": hashlib.sha256(undecodable_path.read_bytes()).hexdigest(),
-            "np_pixels_read_during_audit": 0, "hard_dev_images_read": 0,
-            "frozen_or_golden_images_read": 0,
+            "np_pixels_decoded_during_source_audit": 0,
+            "hard_dev_pixels_decoded_during_source_audit": 0,
+            "frozen_or_golden_pixels_decoded_during_source_audit": 0,
+            "source_audit_scope": (
+                "Validates rows, path membership, and source metadata without decoding image pixels. "
+                "Protected image bytes are hashed later by _verify_selected_image_bytes and counted "
+                "in selected_data_integrity."
+            ),
             "np_policy": "explicit safe 80/20 NP lists" if np_train else "no NP pixels selected"}
 
 
@@ -825,6 +1071,7 @@ def _valid_quad(points_norm: np.ndarray) -> bool:
 
 
 def train(args: argparse.Namespace) -> None:
+    out_dir = Path(args.out_dir)
     threads = min(8, max(1, args.threads))
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(1)
@@ -836,33 +1083,59 @@ def train(args: argparse.Namespace) -> None:
     train_rows, val_rows = read_rows(Path(args.train_csv), "train"), read_rows(Path(args.val_csv), "val")
     np_train = read_rows(Path(args.np_train_csv), "train", "0") if args.np_train_csv else []
     np_val = read_rows(Path(args.np_val_csv), "val", "0") if args.np_val_csv else []
+    hard_train, hard_val, hard_pool_audit = ([], [], None)
+    if bool(args.hard_train_csv) != bool(args.hard_val_csv):
+        raise ValueError("specify both --hard-train-csv and --hard-val-csv")
+    if args.hard_train_csv:
+        hard_train, hard_val, hard_pool_audit = _read_audited_hard_pools(
+            Path(args.hard_train_csv), Path(args.hard_val_csv),
+            per_subset=args.hard_per_subset, seed=args.hard_seed)
     if bool(args.np_train_csv) != bool(args.np_val_csv):
         raise ValueError("specify both --np-train-csv and --np-val-csv")
     audit = audit_sources(train_rows, val_rows, np_train, np_val,
                           Path(args.train_csv), Path(args.val_csv))
-    np_audit_path = DATA_DIR / "np-split-audit.json"
+    hard_audit = None
+    if hard_train:
+        audit["hard_pool"] = hard_pool_audit
+    np_audit_path = Path(args.np_audit) if args.np_audit else DATA_DIR / "np-split-audit.json"
     if np_train:
         np_audit = json.loads(np_audit_path.read_text(encoding="utf-8"))
-        disjointness = np_audit["disjointness"]
+        np_audit = np_audit.get("safe_partitions", {}).get(
+            "np_safe_partition", np_audit.get("np_safe_partition", np_audit))
+        audit["np_decode_lineage"] = _verify_np_decode_lineage(
+            np_audit, np_audit_path, Path(args.np_train_csv), Path(args.np_val_csv), np_train, np_val)
+        disjointness = np_audit.get("disjointness", {})
+        np_counts = np_audit.get("sampling", np_audit)
+        np_csv_hashes = np_audit.get("csv", {})
         if (not np_audit["all_selected_decoded_valid"] or
                 any(disjointness[key] != 0 for key in disjointness) or
-                len(np_train) != np_audit["sampling"]["n_train"] or
-                len(np_val) != np_audit["sampling"]["n_val"]):
+                len(np_train) != np_counts["n_train"] or
+                len(np_val) != np_counts["n_val"]):
             raise ValueError("NP split audit failed; refusing to read NP pixels")
         audit["np_split_audit_sha256"] = hashlib.sha256(np_audit_path.read_bytes()).hexdigest()
         audit["np_train_csv_sha256"] = hashlib.sha256(Path(args.np_train_csv).read_bytes()).hexdigest()
         audit["np_val_csv_sha256"] = hashlib.sha256(Path(args.np_val_csv).read_bytes()).hexdigest()
-        if (audit["np_train_csv_sha256"] != np_audit["csv"]["np_train.csv_sha256"] or
-                audit["np_val_csv_sha256"] != np_audit["csv"]["np_val.csv_sha256"]):
+        if (audit["np_train_csv_sha256"] != np_csv_hashes["np_train.csv_sha256"] or
+                audit["np_val_csv_sha256"] != np_csv_hashes["np_val.csv_sha256"]):
             raise ValueError("NP CSV hash differs from the audited split")
         audit["np_frozen_golden_undecodable_exclusions"] = disjointness
         audit["available_np_train_rows"] = len(np_train)
         audit["available_np_validation_rows"] = len(np_val)
     train_rows = select_training_positives(train_rows, args.limit_train)
+    if hard_train:
+        train_rows.extend(hard_train)
+        val_rows.extend(hard_val)
     train_rows += np_train
     val_rows += np_val
     val_rows = select_train_subset(val_rows, args.limit_val)
-    run_dir = OUT_DIR / "runs" / args.run_name
+    index_path = DATA_ROOT / "index" / "ccpd_index.csv"
+    _verify_selected_source_rows(train_rows + val_rows, index_path)
+    selected_bytes_audit = _verify_selected_image_bytes(
+        [FROZEN_MANIFEST, GOLDEN_MANIFEST, DATA_ROOT / "index" / "devhard_v1.csv",
+         UNDECODABLE_MANIFEST],
+        train_rows, val_rows, hash_threads=args.hash_threads)
+    audit["selected_data_integrity"] = selected_bytes_audit
+    run_dir = out_dir / "runs" / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     selected_train_csv = run_dir / "selected_train.csv"
     selected_train_sha = write_selected_samples(train_rows, selected_train_csv)
@@ -874,8 +1147,8 @@ def train(args: argparse.Namespace) -> None:
                      "corner_net_py": hashlib.sha256(source_model_path.read_bytes()).hexdigest()}
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     start_epoch, step, history = 0, 0, []
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = OUT_DIR / "checkpoints" if args.run_name == "main" else OUT_DIR / "checkpoints" / args.run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints" if args.run_name == "main" else out_dir / "checkpoints" / args.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_path = ckpt_dir / "corner_last.pt"
     resume_source_sha = None
@@ -884,7 +1157,7 @@ def train(args: argparse.Namespace) -> None:
     if args.resume:
         resume_source_sha = hashlib.sha256(last_path.read_bytes()).hexdigest()
         start_epoch, step, history = _load_checkpoint(last_path, model, optimizer)
-        if args.run_name == "main" and not (OUT_DIR / "runs" / "main" / "training-audit.json").exists():
+        if args.run_name == "main" and not (out_dir / "runs" / "main" / "training-audit.json").exists():
             # A diagnostic checkpoint may seed formal training, but its subset metrics
             # must not compete with full-validation checkpoints for best-model selection.
             history = []
@@ -908,7 +1181,11 @@ def train(args: argparse.Namespace) -> None:
            "selected_np_negative_rows": sum(row["has_plate"] == "0" for row in train_rows),
            "synthetic_background_negative_rows_per_epoch": sum(row["has_plate"] == "1" for row in train_rows),
            "resume_requested": bool(args.resume), "resume_checkpoint_sha256": resume_source_sha,
-           "initial_random_state_sha256": initial_state_sha, "source_sha256": source_hashes,
+           "hard_per_subset": args.hard_per_subset if hard_train else None,
+           "hard_seed": args.hard_seed if hard_train else None,
+           "initial_state_sha256": initial_state_sha,
+           "initial_state_origin": "random",
+           "source_sha256": source_hashes,
            "command": [sys.executable, *sys.argv]}
     (run_dir / "training-audit.json").write_text(json.dumps({**audit, "config": cfg}, ensure_ascii=False, indent=2), encoding="utf-8")
     log_path = run_dir / "training-log.jsonl"
@@ -1040,6 +1317,10 @@ class SourceQuadOutOfBounds(ValueError):
     """The indexed quadrilateral itself extends beyond its decoded source image."""
 
 
+class NoGTExteriorCrop(ValueError):
+    """No background block can be sampled outside this image's plate box."""
+
+
 def parse_quad(row: dict[str, str]) -> np.ndarray:
     q = np.asarray([float(x) for x in row["quad"].split()], np.float32).reshape(4, 2)
     if not np.isfinite(q).all():
@@ -1075,34 +1356,70 @@ def _validate_rows(rows: list[dict[str, str]], *, positive: bool,
 
 
 def _read_safe_pools(train_csv: Path, np_train_csv: Path, val_csv: Path, np_val_csv: Path,
-                     limit_train: int, seed: int) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, Any]]:
+                     limit_train: int, seed: int, *, hard_train_csv: Path | None = None,
+                     hard_val_csv: Path | None = None, hard_per_subset: int = 1200,
+                     np_audit_path: Path | None = None, hash_threads: int = 4
+                     ) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, Any]]:
     positives = read_rows(train_csv, expected_split="train", expected_has_plate="1")
     # Fixed positive pool selection uses the source pilot's seed; stage seeds
     # control crop and augmentation randomness only.
     positives = select_training_positives(positives, limit_train, SEED)
+    official_positives = list(positives)
     np_rows = read_rows(np_train_csv, expected_split="train", expected_has_plate="0")
     val_rows = read_rows(val_csv, expected_split="val", expected_has_plate="1")
     np_val_rows = read_rows(np_val_csv, expected_split="val", expected_has_plate="0")
+    np_audit_path = np_audit_path or DATA_DIR / "np-split-audit.json"
+    np_audit_root = json.loads(np_audit_path.read_text(encoding="utf-8"))
+    np_audit = np_audit_root.get("safe_partitions", {}).get(
+        "np_safe_partition", np_audit_root.get("np_safe_partition", np_audit_root))
+    decode_lineage = _verify_np_decode_lineage(np_audit, np_audit_path,
+                                                np_train_csv, np_val_csv, np_rows, np_val_rows)
+    np_counts = np_audit.get("sampling", np_audit)
+    if (len(np_rows) != np_counts["n_train"] or len(np_val_rows) != np_counts["n_val"]
+            or any(value != 0 for value in np_audit.get("disjointness", {}).values())
+            or _file_sha256(np_train_csv) != np_audit["csv"]["np_train.csv_sha256"]
+            or _file_sha256(np_val_csv) != np_audit["csv"]["np_val.csv_sha256"]):
+        raise ValueError("ROI safe NP audit does not match selected rows")
+    hard_audit = None
+    hard_holdout: list[dict[str, str]] = []
+    if (hard_train_csv is None) != (hard_val_csv is None):
+        raise ValueError("hard ROI training requires both train and holdout CSVs")
+    if hard_train_csv is not None:
+        hard_rows, hard_holdout, hard_audit = _read_audited_hard_pools(
+            hard_train_csv, hard_val_csv, per_subset=hard_per_subset, seed=seed)
+        holdout_keys = {_path_key(row["path"]) for row in hard_holdout}
+        val_keys = {_path_key(row["path"]) for row in val_rows + np_val_rows}
+        if holdout_keys & val_keys:
+            raise ValueError("hard tuning holdout intersects validation CSV")
+        positives.extend(hard_rows)
     excluded = (_manifest_paths(FROZEN_MANIFEST)
                 | _manifest_paths(GOLDEN_MANIFEST)
                 | _manifest_paths(UNDECODABLE_MANIFEST))
     val_keys = {_path_key(row["path"]) for row in val_rows + np_val_rows}
     _validate_rows(positives, positive=True, forbidden=excluded, val_keys=val_keys)
     _validate_rows(np_rows, positive=False, forbidden=excluded, val_keys=val_keys)
-    membership_audit = _verify_index_split_membership(positives, val_rows, np_rows, np_val_rows)
+    membership_audit = _verify_index_split_membership(official_positives, val_rows, np_rows, np_val_rows)
     pos_keys = {_path_key(r["path"]) for r in positives}
     np_keys = {_path_key(r["path"]) for r in np_rows}
     if pos_keys & val_keys or np_keys & val_keys:
         raise ValueError("ROI train pool intersects validation rows")
     if pos_keys & np_keys:
         raise ValueError("positive and NP negative pools intersect")
+    roi_train_rows = positives + np_rows
+    roi_val_rows = val_rows + np_val_rows + hard_holdout
+    _verify_selected_source_rows(roi_train_rows + roi_val_rows,
+                                 DATA_ROOT / "index" / "ccpd_index.csv")
+    bytes_audit = _verify_selected_image_bytes(
+        [FROZEN_MANIFEST, GOLDEN_MANIFEST, DATA_ROOT / "index" / "devhard_v1.csv",
+         UNDECODABLE_MANIFEST], roi_train_rows, roi_val_rows, hash_threads=hash_threads)
     # Validation is inspected only to prove disjointness; it is not sampled or decoded.
     return positives, np_rows, {"positive_count": len(positives), "np_train_count": len(np_rows),
         "validation_count": len(val_rows), "np_validation_negative_count": len(np_val_rows),
         "positive_val_intersection": 0, "np_val_intersection": 0,
         "excluded_manifest_count": len(excluded), "positive_pool_selection_seed": SEED,
         "stage_random_seed": seed,
-        "source_membership_audit": membership_audit}
+        "source_membership_audit": membership_audit, "hard_pool": hard_audit,
+        "np_decode_lineage": decode_lineage, "selected_data_integrity": bytes_audit}
 
 
 def _appearance(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -1224,7 +1541,8 @@ def _positive_roi(image: np.ndarray, row: dict[str, str], rng: np.random.Generat
         affine[:, 2] += [rng.uniform(-.025, .025)*ww, rng.uniform(-.025, .025)*hh]
         matrix = np.vstack([affine, [0., 0., 1.]])
         if rng.random() < .5:
-            dst = src + rng.uniform(-.012, .012, (4, 2)).astype(np.float32) * [ww, hh]
+            dst = src + rng.uniform(-.012, .012, (4, 2)).astype(np.float32) * np.asarray([ww, hh], np.float32)
+            dst = dst.astype(np.float32, copy=False)
             matrix = cv2.getPerspectiveTransform(src, dst) @ matrix
         transformed = cv2.perspectiveTransform(pts.reshape(1, 4, 2), matrix)[0] / [ww, hh]
         if np.all((transformed >= .005) & (transformed <= .995)):
@@ -1262,9 +1580,14 @@ def _sample_positive_roi(rows: list[dict[str, str]], rng: np.random.Generator, *
 def train_roi_regression(*, train_csv: Path, np_train_csv: Path, val_csv: Path, np_val_csv: Path,
                          output: Path, seed: int = 42, steps: int = 1000,
                          limit_train: int = 12000, batch_size: int = 16,
-                         threads: int = 2) -> Path:
+                         threads: int = 2, hard_train_csv: Path | None = None,
+                         hard_val_csv: Path | None = None, hard_per_subset: int = 1200,
+                         np_audit_path: Path | None = None, hash_threads: int = 4) -> Path:
     positives, _, audit = _read_safe_pools(
-        train_csv, np_train_csv, val_csv, np_val_csv, limit_train, seed)
+        train_csv, np_train_csv, val_csv, np_val_csv, limit_train, seed,
+        hard_train_csv=hard_train_csv, hard_val_csv=hard_val_csv,
+        hard_per_subset=hard_per_subset, np_audit_path=np_audit_path,
+        hash_threads=hash_threads)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -1345,7 +1668,24 @@ def _outside_gt_crop(image: np.ndarray, row: dict[str, str], rng: np.random.Gene
         disjoint_y = y + ch <= exclusion[1] or y >= exclusion[3]
         if disjoint_x or disjoint_y:
             return image[y:y + ch, x:x + cw]
-    raise RuntimeError("no GT-exterior background crop found after bounded retries")
+    raise NoGTExteriorCrop("no GT-exterior background crop found after bounded retries")
+
+
+def _sample_gt_exterior_crop(positives: list[dict[str, str]], rng: np.random.Generator,
+                             counters: dict[str, Any]) -> np.ndarray:
+    """Retry safe positive images when one source has no exterior area."""
+    for _attempt in range(ROI_POSITIVE_RETRY_LIMIT):
+        row = random.choice(positives)
+        image = imread(row["path"])
+        if image is None:
+            raise OSError(f"failed to decode train positive: {row['path']}")
+        try:
+            return _outside_gt_crop(image, row, rng)
+        except NoGTExteriorCrop:
+            counters["gt_exterior_resample_draws"] += 1
+            counters["gt_exterior_resample_paths"].append(_path_key(row["path"]))
+    counters["gt_exterior_retry_exhaustions"] += 1
+    raise RuntimeError("no GT-exterior background crop after bounded positive-image retries")
 
 
 def train_roi_confidence(*, train_csv: Path, np_train_csv: Path, val_csv: Path, np_val_csv: Path,
@@ -1355,9 +1695,14 @@ def train_roi_confidence(*, train_csv: Path, np_train_csv: Path, val_csv: Path, 
                          strong_augmentation: bool = False,
                          seed: int = 44, steps: int = 400, batch_size: int = 16,
                          limit_train: int = 12000, np_limit: int = 512,
-                         threads: int = 2) -> Path:
+                         threads: int = 2, hard_train_csv: Path | None = None,
+                         hard_val_csv: Path | None = None, hard_per_subset: int = 1200,
+                         np_audit_path: Path | None = None, hash_threads: int = 4) -> Path:
     positives, np_pool, audit = _read_safe_pools(
-        train_csv, np_train_csv, val_csv, np_val_csv, limit_train, seed)
+        train_csv, np_train_csv, val_csv, np_val_csv, limit_train, seed,
+        hard_train_csv=hard_train_csv, hard_val_csv=hard_val_csv,
+        hard_per_subset=hard_per_subset, np_audit_path=np_audit_path,
+        hash_threads=hash_threads)
     np_rows = random.Random(seed).sample(np_pool, min(np_limit, len(np_pool)))
     random.seed(seed)
     np.random.seed(seed)
@@ -1417,11 +1762,16 @@ def train_roi_confidence(*, train_csv: Path, np_train_csv: Path, val_csv: Path, 
         weight_decay=1e-4)
     model.train()
     source_counts = {"np_weak_candidate": 0, "np_fallback": 0,
-        "gt_exterior_background": 0, "source_quad_resample_draws": 0,
+        "gt_exterior_background": 0, "gt_exterior_resample_draws": 0,
+        "gt_exterior_retry_exhaustions": 0, "gt_exterior_resample_paths": [],
+        "source_quad_resample_draws": 0,
         "source_quad_retry_exhaustions": 0, "ordinary": 0,
         "moderate": 0, "strong": 0, "ordinary_fallback": 0,
         "dark": 0, "normal_exposure": 0}
     invalid_source_paths: set[str] = set()
+    confidence_started = time.time()
+    confidence_loss_total = 0.0
+    confidence_loss_count = 0
     for _step in range(steps):
         crops: list[torch.Tensor] = []
         labels: list[float] = []
@@ -1476,11 +1826,7 @@ def train_roi_confidence(*, train_csv: Path, np_train_csv: Path, val_csv: Path, 
             labels.append(0.)
             quads.append(torch.zeros(8))
         for _ in range(4):
-            row = random.choice(positives)
-            image = imread(row["path"])
-            if image is None:
-                raise OSError(row["path"])
-            crop = _outside_gt_crop(image, row, rng)
+            crop = _sample_gt_exterior_crop(positives, rng, source_counts)
             canvas, _ = letterbox_image(crop, ROI_WH)
             canvas = _appearance(canvas, rng)
             crops.append(torch.from_numpy(canvas.transpose(2, 0, 1).copy()).float().div_(255.))
@@ -1500,6 +1846,15 @@ def train_roi_confidence(*, train_csv: Path, np_train_csv: Path, val_csv: Path, 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        confidence_loss_total += float(loss.detach())
+        confidence_loss_count += 1
+        if (_step + 1) % 100 == 0 or _step + 1 == steps:
+            print(json.dumps({"type": "roi_confidence_step", "step": _step + 1,
+                              "loss_mean": confidence_loss_total / confidence_loss_count,
+                              "elapsed_sec": time.time() - confidence_started},
+                             ensure_ascii=False), flush=True)
+            confidence_loss_total = 0.0
+            confidence_loss_count = 0
     torch.save(model.state_dict(), output)
     proposal_inventory = hashlib.sha256(json.dumps(
         proposal_counts, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -1659,11 +2014,24 @@ def main() -> None:
                         help="decode every selected NP image before writing an audit marked valid")
     parser.add_argument("--train-csv", default=str(TRAIN_CSV))
     parser.add_argument("--val-csv", default=str(VAL_CSV))
+    parser.add_argument("--out-dir", default=str(OUT_DIR),
+                        help="training run/checkpoint output directory")
     parser.add_argument("--np-train-csv", default="")
     parser.add_argument("--np-val-csv", default="")
+    parser.add_argument("--np-audit", default="",
+                        help="audit for selected safe NP partitions; defaults to seventh-batch audit")
+    parser.add_argument("--hard-train-csv", default="",
+                        help="safe, balanced hard-subset training pool CSV")
+    parser.add_argument("--hard-val-csv", default="",
+                        help="independent safe hard tuning holdout CSV")
+    parser.add_argument("--hard-per-subset", type=int, default=1200,
+                        help="maximum coarse-stage hard examples sampled per subset")
+    parser.add_argument("--hard-seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=18)
     parser.add_argument("--batch-size", type=int, default=12)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--hash-threads", type=int, default=4,
+                        help="bounded parallelism for selected image byte audits")
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--coord-weight", type=float, default=12.)
     parser.add_argument("--checkpoint-every", type=int, default=200)
@@ -1711,7 +2079,12 @@ def main() -> None:
                     output=args.roi_output,
                     seed=args.roi_seed if args.roi_seed is not None else 42,
                     steps=args.roi_steps if args.roi_steps is not None else 1000,
-                    limit_train=args.roi_limit_train, batch_size=args.roi_batch_size, threads=args.threads)
+                    limit_train=args.roi_limit_train, batch_size=args.roi_batch_size, threads=args.threads,
+                    hard_train_csv=Path(args.hard_train_csv) if args.hard_train_csv else None,
+                    hard_val_csv=Path(args.hard_val_csv) if args.hard_val_csv else None,
+                    hard_per_subset=args.hard_per_subset,
+                    np_audit_path=Path(args.np_audit) if args.np_audit else None,
+                    hash_threads=args.hash_threads)
             elif args.stage == "roi-confidence":
                 if args.coarse_checkpoint is None:
                     parser.error("roi-confidence requires --coarse-checkpoint")
@@ -1738,7 +2111,12 @@ def main() -> None:
                     seed=confidence_seed,
                     steps=confidence_steps,
                     batch_size=args.roi_batch_size, limit_train=args.roi_limit_train,
-                    np_limit=args.roi_np_limit, threads=args.threads)
+                    np_limit=args.roi_np_limit, threads=args.threads,
+                    hard_train_csv=Path(args.hard_train_csv) if args.hard_train_csv else None,
+                    hard_val_csv=Path(args.hard_val_csv) if args.hard_val_csv else None,
+                    hard_per_subset=args.hard_per_subset,
+                    np_audit_path=Path(args.np_audit) if args.np_audit else None,
+                    hash_threads=args.hash_threads)
             else:
                 if args.coarse_checkpoint is None or args.roi_checkpoint is None:
                     parser.error("package requires --coarse-checkpoint and --roi-checkpoint")
