@@ -175,3 +175,115 @@ CNN 累计每轮训练及验证时间（跨断点累计），SVM 记录 fit/校�
 sigmoid 校准，折数为 `min(5, 每类最少训练样本数)`，每类不足 2 个样本时报错。
 此路径不启用 SVC 的 `probability` 参数，消除 sklearn 1.9 的对应弃用提示；
 运行时可加载旧概率 SVC 与新校准器。
+
+## CRNN 整牌兜底（第七批）
+
+`lpr.recognize.crnn.CrnnReader` 将 252×80/276×80 BGR uint8 校正图转为
+160×40 灰度，CNN 提取 40 个时间步，单层双向 GRU 输出 65 字符与 blank 的
+CTC logits。greedy 解码合并连续重复、删除 blank，保留逐位概率；格式、最低
+置信度与状态仍由既有流水线处理。权重从随机初始化训练，不加载预训练模型。
+
+下面第一、二阶段的命令保留为历史运行记录：128×40 第一阶段使用
+`b5218c6` / `fcead48` 的实现，第二阶段使用 `bc8bf84`；当前代码已是160×40。
+复现旧阶段必须固定对应源码版本，不能把同一条命令在160×40代码下运行后
+当作旧实验复现。manifest的`input_size`必须与代码的`INPUT_SIZE`一致，
+`CrnnReader.from_file`会拒绝不一致的已登记权重。加载器保留调用者设置的Torch线程数；
+完整流水线与裁片评测明确使用2线程。
+
+
+合成工具只写 train，使用 Windows 自带 TrueType 字体；按真实训练 GT 图计数，
+把少于 1000 个独立 GT 样本的省份补足到 1500。这个口径避免把同源候选图
+算成独立样本。蓝牌 7 位，绿牌按 L8S/L8L 规则生成。字体合成只用于训练，
+其清单、字体哈希、种子及数量记录于 `synthetic_manifest.json`。
+
+```powershell
+$env:PYTHONPATH = 'algorithm'
+$env:PYTHONUTF8 = '1'
+.venv\Scripts\python.exe -m lpr_tools.train.synth_plates --help
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --epochs 30 --samples-per-epoch 32768 --batch-size 128 --num-workers 0 --out algorithm/out/models/batch7/crnn_run1/crnn_v1.pt
+.venv\Scripts\python.exe -m lpr_tools.train.eval_crnn --data D:\keshe2\algorithm\data\plates\v1 --model algorithm/models/crnn_v1.pt --out algorithm/out/eval/batch7/crnn-crops
+```
+
+训练前必须根据测试清单、金样例、`devhard_v1.csv`、`val1000_v1.csv` 做原图
+路径和字节哈希隔离；`--exclude-origins` 接受每行一个规范化原图绝对路径，
+只排除对应 train 的所有视图，不删改提供的数据。本批预检发现 27 个同源原图、
+73 个训练裁片需排除；原始 train 294783，实际保留 294710，真实 val 10000 不变。
+排除清单是本批审计产物，复跑时须保留或根据上述清单重新生成，不能省略。
+
+训练采用省份逆频率平方根、上限 8 倍的有放回采样，每轮 32768 次抽样，
+不表示遍历全部训练图片。模糊、噪声、亮度、轻透视和遮挡仅用于 train；
+源/省份/位数的预期抽样概率记录在 checkpoint metadata。CPU 训练线程为 4，
+默认不创建额外数据加载进程。`--stop-after` 在轮次边界停止，用原参数加
+`--resume <model.checkpoint.pt>` 续训，校验来源清单、排除文件、源码哈希与配置；
+逐轮日志追加，随机抽样和增强按 seed/epoch 确定。新训练拒绝覆盖已有输出。
+
+每轮在完整真实 val 上报告 GT、pipeline、总体、省份及逐位字符准确率，
+按总体整牌准确率选择最佳权重。`eval_crnn` 另走真实 `read()` 接口逐图核验，
+输出逐图预测、分来源/省份/位数指标和 CPU 2 线程耗时；字符准确率使用
+逐位匹配数除以 `sum(max(真值长度, 预测长度))`。其自动通过率只是裁片级指标，
+不能代替带四角点网络的完整流水线配对评测。最终模型是否达到 GT 95%、
+pipeline 90%、自动通过精度 99% 和 G1 P95 200 ms，见第七批实测回执。
+
+CPU 数据预取可用 `--num-workers 1`（最多 4）；主训练 Torch 4 线程，每个 worker
+Torch/OpenCV 各设 1 线程。普通 resume 要求原参数完全匹配。若仅迁移数据加载
+worker 数量/对应训练器实现，显式加 `--resume-execution-change` 并使用全新输出
+路径；数据、排除清单、模型源码及其他训练配置仍须完全相同。迁移保留优化器与
+模型状态、最佳权重和已有历史，并记录源 checkpoint/最佳模型/日志 SHA、旧新
+worker 数及训练器 SHA。它不支持模型、训练数据、采样或学习率变更。源断点
+必须沿用 `<name>.checkpoint.pt`，同目录有对应 `<name>.pt` 最佳权重；原始目录
+保持不动。第七批首轮从 0 worker 迁移到 1 worker 的证据见回执。
+
+第七批第二阶段针对真实绿牌不足增加 `--real-green-boost 8`：只乘真实
+`ground_truth` / `pipeline_candidate` 的 8 位车牌采样权重，字体合成数据仍按原
+省份权重采样。权重统计用于实际 sampler；每轮日志另外记录实际
+`source/layout` 抽样数量，不能把预期概率当作已执行抽样次数。
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --init-weights algorithm/out/receipts/batch7/crnn-run1-workers1-epoch7/crnn_v1.pt --init-training-run algorithm/out/models/batch7/crnn_run1_workers1 --version crnn_v1_realgreen --real-green-boost 8 --lr 0.0003 --epochs 12 --samples-per-epoch 32768 --batch-size 128 --num-workers 1 --out algorithm/out/models/batch7/crnn_run2_realgreen_counted/crnn_v1.pt
+```
+
+这里的初始化来源是本批从随机权重训练出的第一阶段最佳第 5 轮模型；
+快照目录记录第 7 轮停止时的 last checkpoint 和此前保留的 best 权重，两者
+不是同一个模型。禁止使用外部预训练权重。`--init-weights` 与
+`--init-training-run` 必须同时提供，前者严格加载有限 Tensor state_dict并记录
+SHA，后者记录本地来源运行。新阶段使用新的优化器和输出路径；它与普通
+`--resume` 互斥。恢复第二阶段时用第二阶段 checkpoint 和原参数，不再次传
+初始化参数；初始化来源由 checkpoint 继承。两阶段耗时和完成轮次分别报告。
+
+第二阶段的最佳 checkpoint 为第 11 轮，但 pipeline 候选准确率仍未达到 90%。
+第三阶段沿用本地从零训练的第二阶段最佳纯权重，保持网络层和 state_dict 键不变，
+只把共享推理/训练输入宽度提高到 160；输入预处理尺寸写入模型 manifest 与
+训练 metadata。训练 4 轮、学习率 0.0001、绿牌真实样本权重 8，使用新的输出目录：
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn --data D:\keshe2\algorithm\data\plates\v1 --data D:\keshe2\algorithm\data\plates_synth\v2_seed42 --exclude-origins algorithm/out/receipts/batch7/excluded-train-origins.txt --init-weights algorithm/out/models/batch7/crnn_run2_realgreen_counted/crnn_v1.pt --init-training-run algorithm/out/models/batch7/crnn_run2_realgreen_counted --version crnn_v1_realgreen_width160 --real-green-boost 8 --lr 0.0001 --epochs 4 --samples-per-epoch 32768 --batch-size 128 --num-workers 1 --out algorithm/out/models/batch7/crnn_run3_width160/crnn_v1.pt
+```
+
+评估时必须以该模型自身的 160×40 manifest 输入尺寸加载；若完整 `read()` 或流水线验收
+不优于 128×40 的第二阶段最佳模型，发布候选应回选第二阶段权重及其 128×40 预处理。
+
+
+### 第七批最终实测与未达标项
+
+发布权重 `models/crnn_v1.pt` 来自第三阶段第4轮，886,653 bytes、218,474参数，
+SHA `d50c656f671a882244b2688596e85e97d7eb37a5cadaf947802e96dbfcccca48`。
+第三阶段训练源码固定于`ae6c6d9`；后续加载器仅追加manifest尺寸校验，网络与read数值未变。
+恢复历史checkpoint须匹配其记录的训练和模型源码SHA。
+
+| 验证 | 结果 | 判定 |
+|---|---:|---|
+| 真实GT裁片5000张 | 4910/5000，98.20% | ≥95%，通过 |
+| 真实流水线裁片5000张 | 4225/5000，84.50% | 未达90% |
+| 省份字（完整10000裁片） | 9901/10000，99.01% | 独立列报 |
+| val整帧1000张 | 85.30% → 95.70% | 提升10.40个百分点 |
+| val自动通过精度 | 99.7611% → 98.6272% | 未达99%，新增11个错误自动通过 |
+| dev-hard整帧2100张 | 43.8095% → 53.5714% | 提升9.7619个百分点 |
+| dev-hard自动通过精度 | 97.4760% → 94.5437% | 未达99%，新增34个错误自动通过 |
+| CPU2 read()，10000次 | 均值3.8133ms / P95 4.5643ms / 最大8.5907ms | ≤10ms，通过 |
+| G1，1280×720，100次 | P95 60.7307ms | ≤200ms，通过 |
+
+**本批性能验收未全部通过，权重保留为开发候选，不应据此认定自动通行可上线。**
+默认配置未开启CRNN。完整流水线基线已有的错误自动通过全部保留，CRNN另有新增；
+继续处理需评估候选缺字问题、CRNN置信度，以及主路线先行OK的复核策略。
+本批没有越界修改pipeline或默认配置，未声称已解决这些问题。
+原始评测、训练与隔离证据见工位01的`algorithm/out/receipts/第七批.md`及其batch7目录。
