@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -92,6 +93,31 @@ def _data_signature(sources):
     return signature
 
 
+def _state_dict_source(path: Path) -> tuple[dict, dict[str, str]]:
+    """Load a CharCNN inference state_dict safely and record immutable provenance."""
+    path = Path(path).resolve()
+    sha256 = _file_sha256(path)
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ValueError(f"init weights are not a safe PyTorch state_dict: {path}") from exc
+    if not isinstance(state, dict) or any(
+            not isinstance(key, str) or not isinstance(value, torch.Tensor)
+            for key, value in state.items()):
+        raise ValueError("init weights must contain only string keys and tensors")
+    if any(not torch.isfinite(value).all() for value in state.values()):
+        raise ValueError("init weights must contain only finite tensors")
+    return state, {"path": str(path), "sha256": sha256}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _save_checkpoint(path, *, model, optimizer, scheduler, epoch, config, data_signature,
                      loader_generator, sampler_generator, train_seconds, val_char_acc,
                      val_province_acc, val_alnum_acc, best_model, best_epoch,
@@ -121,12 +147,23 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
           num_workers: int = 0, weight_decay: float = 1e-4,
           log_path: Path | None = None, data_weights=None,
           class_boosts=None,
+          init_weights: Path | None = None,
           resume: Path | None = None, checkpoint_path: Path | None = None,
           max_epochs_this_run: int | None = None) -> list[dict]:
     if (epochs < 1 or batch_size < 1 or not np.isfinite(lr) or lr <= 0
             or not np.isfinite(weight_decay) or weight_decay < 0
             or num_workers not in (0, 1, 2)):
         raise ValueError("epochs/batch_size/lr must be positive; num_workers must be 0..2")
+    if init_weights is not None and resume is not None:
+        raise ValueError("init_weights and resume are mutually exclusive")
+    out = Path(out)
+    init_state = None
+    init_metadata = None
+    if init_weights is not None:
+        init_path = Path(init_weights).resolve()
+        if init_path == out.resolve():
+            raise ValueError("init weights and output model must use distinct paths")
+        init_state, init_metadata = _state_dict_source(init_path)
     sources, weights_by_source = _as_sources(data, data_weights)
     class_boosts = {} if class_boosts is None else {int(k): float(v) for k, v in class_boosts.items()}
     if any(k < 0 or k >= NUM_CLASSES or not np.isfinite(v) or v <= 0
@@ -136,7 +173,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     config = {"epochs": epochs, "batch_size": batch_size, "lr": lr,
               "weight_decay": weight_decay, "seed": seed, "num_workers": num_workers,
               "data_weights": weights_by_source,
-              "class_boosts": {str(k): class_boosts[k] for k in sorted(class_boosts)}}
+              "class_boosts": {str(k): class_boosts[k] for k in sorted(class_boosts)},
+              "init_weights": init_metadata}
     signature = _data_signature(sources)
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     torch.set_num_threads(2); torch.use_deterministic_algorithms(True); cv2.setNumThreads(1)
@@ -155,6 +193,13 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers,
                             worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(seed))
     model = CharCNN()
+    if init_state is not None:
+        try:
+            model.load_state_dict(init_state, strict=True)
+        except RuntimeError as exc:
+            raise ValueError("init weights are incompatible with CharCNN") from exc
+        if _file_sha256(init_weights) != init_metadata["sha256"]:
+            raise ValueError("init weights changed while they were being loaded")
     # Class loss weights use raw merged counts; source weights independently set
     # source exposure through the sampler and are not included in this formula.
     counts = np.bincount(train_labels, minlength=NUM_CLASSES)
@@ -170,6 +215,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     protected = {p.resolve() for p in (out, checkpoint_path, log_path, sidecar_path, best_path)}
     if len(protected) != 5:
         raise ValueError("checkpoint, best/inference models, training log, and sidecar must use distinct paths")
+    if init_weights is not None and Path(init_weights).resolve() in protected:
+        raise ValueError("init weights and training outputs must use distinct paths")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     first_epoch, elapsed_total, last_accuracy = 0, 0.0, None
@@ -184,6 +231,11 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         # Checkpoints created before class-aware sampling implicitly used no
         # class boosts, so keep those resumable when the current run also uses none.
         saved_config.setdefault("class_boosts", {})
+        # Older checkpoints did not record an initial inference state_dict.
+        saved_init_metadata = saved_config.setdefault("init_weights", None)
+        # On resume, inherit provenance without loading initial weights again.
+        init_metadata = saved_init_metadata
+        config["init_weights"] = saved_init_metadata
         if saved_config != config:
             raise ValueError("checkpoint hyperparameters/sampling weights are incompatible")
         first_epoch = int(state["epoch"])
@@ -294,7 +346,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         json.dumps({"train_seconds": elapsed_total, "best_epoch": best_epoch,
                     "val_char_acc": best_accuracy, "val_province_acc": best_province_accuracy,
                     "val_alnum_acc": best_alnum_accuracy,
-                    "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()}},
+                    "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()},
+                    "init_weights": init_metadata},
         indent=2) + "\n", encoding="utf-8")
     print(f"saved={out.as_posix()} version={version} log={log_path.as_posix()} "
           f"best={best_path.as_posix()} best_epoch={best_epoch} "
@@ -320,10 +373,14 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--resume", type=Path, help="resume from a training checkpoint")
+    parser.add_argument("--init-weights", type=Path,
+                        help="warm-start from a safe CharCNN inference state_dict; starts fresh optimizer/scheduler")
     parser.add_argument("--checkpoint", type=Path, help="training checkpoint path (separate from inference weights)")
     parser.add_argument("--stop-after", type=int,
                         help="optional maximum epochs in this invocation; checkpoints at epoch boundaries")
     args = parser.parse_args()
+    if args.resume is not None and args.init_weights is not None:
+        parser.error("--resume and --init-weights are mutually exclusive")
     class_boosts = {}
     for item in args.class_boost:
         try:
@@ -341,7 +398,8 @@ def main() -> None:
           batch_size=args.batch_size, lr=args.lr, seed=args.seed, num_workers=args.num_workers,
           weight_decay=args.weight_decay, log_path=args.log, data_weights=args.data_weight,
           class_boosts=class_boosts,
-          resume=args.resume, checkpoint_path=args.checkpoint, max_epochs_this_run=args.stop_after)
+          init_weights=args.init_weights, resume=args.resume,
+          checkpoint_path=args.checkpoint, max_epochs_this_run=args.stop_after)
 
 
 if __name__ == "__main__":

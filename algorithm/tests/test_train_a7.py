@@ -2,6 +2,7 @@
 
 import json
 import csv
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
@@ -79,10 +80,115 @@ def test_resume_accepts_pre_boost_checkpoint_without_boosts(tmp_path):
               checkpoint_path=checkpoint, max_epochs_this_run=1)
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     state["config"].pop("class_boosts")
+    state["config"].pop("init_weights")
     torch.save(state, checkpoint)
     history = train_cnn(data, out, version="v", epochs=2, batch_size=130,
                         checkpoint_path=checkpoint, resume=checkpoint)
     assert [row["epoch"] for row in history] == [2]
+
+
+def test_init_weights_warm_starts_with_fresh_optimizer_and_records_provenance(
+        tmp_path, monkeypatch):
+    from lpr.recognize.cnn_model import CharCNN
+    from lpr_tools.train import train_cnn as module
+
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=401)
+    init_path = tmp_path / "initial.pt"
+    out = tmp_path / "warm.pt"
+    checkpoint = tmp_path / "warm.checkpoint.pt"
+    torch.manual_seed(91)
+    initial = CharCNN().state_dict()
+    torch.save(initial, init_path)
+    source_hash = hashlib.sha256(init_path.read_bytes()).hexdigest()
+
+    captured = {}
+    original_adamw = module.torch.optim.AdamW
+    original_load = module.torch.load
+
+    def capture_adamw(parameters, *args, **kwargs):
+        parameters = list(parameters)
+        captured["parameters"] = [parameter.detach().clone() for parameter in parameters]
+        optimizer = original_adamw(parameters, *args, **kwargs)
+        captured["optimizer_initial_state_size"] = len(optimizer.state)
+        return optimizer
+
+    def safe_load(*args, **kwargs):
+        captured["weights_only"] = kwargs.get("weights_only")
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(module.torch.optim, "AdamW", capture_adamw)
+    monkeypatch.setattr(module.torch, "load", safe_load)
+    train_cnn(data, out, version="warm", epochs=2, batch_size=130,
+              checkpoint_path=checkpoint, init_weights=init_path,
+              max_epochs_this_run=1)
+
+    named_parameters = list(CharCNN().named_parameters())
+    assert captured["weights_only"] is True
+    assert captured["optimizer_initial_state_size"] == 0
+    for (name, _), actual in zip(named_parameters, captured["parameters"]):
+        torch.testing.assert_close(actual, initial[name], rtol=0, atol=0)
+    assert hashlib.sha256(init_path.read_bytes()).hexdigest() == source_hash
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    expected_origin = {"path": str(init_path.resolve()), "sha256": source_hash}
+    assert state["config"]["init_weights"] == expected_origin
+
+    # Resume inherits the initial weights' provenance but does not reload them.
+    monkeypatch.setattr(module.torch.optim, "AdamW", original_adamw)
+    history = train_cnn(data, out, version="warm", epochs=2, batch_size=130,
+                        checkpoint_path=checkpoint, resume=checkpoint)
+    assert [row["epoch"] for row in history] == [2]
+    sidecar = json.loads(out.with_suffix(".training.json").read_text(encoding="utf-8"))
+    assert sidecar["init_weights"] == expected_origin
+
+
+def test_init_weights_rejects_incompatible_state_dict_keys(tmp_path):
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=402)
+    invalid = tmp_path / "invalid.pt"
+    torch.save({"not_a_charcnn_key": torch.zeros(1)}, invalid)
+    with pytest.raises(ValueError, match="incompatible with CharCNN"):
+        train_cnn(data, tmp_path / "out.pt", version="bad", epochs=1,
+                  init_weights=invalid)
+
+
+@pytest.mark.parametrize("state", [{"epoch": 1}, {"weight": torch.tensor(float("nan"))}])
+def test_init_weights_rejects_non_tensor_or_non_finite_source(tmp_path, state):
+    from lpr_tools.train.train_cnn import _state_dict_source
+
+    invalid = tmp_path / "invalid.pt"
+    torch.save(state, invalid)
+    with pytest.raises(ValueError, match="only"):
+        _state_dict_source(invalid)
+
+
+def test_init_weights_rejects_resume_combination_and_output_collision(tmp_path):
+    from lpr.recognize.cnn_model import CharCNN
+
+    data = tmp_path / "synth"
+    generate_dataset(data, per_class=2, seed=403)
+    checkpoint = tmp_path / "model.checkpoint.pt"
+    out = tmp_path / "model.pt"
+    train_cnn(data, out, version="v", epochs=1, batch_size=130,
+              checkpoint_path=checkpoint)
+    init_path = tmp_path / "init.pt"
+    torch.save(CharCNN().state_dict(), init_path)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        train_cnn(data, out, version="v", epochs=1, checkpoint_path=checkpoint,
+                  resume=checkpoint, init_weights=init_path)
+    with pytest.raises(ValueError, match="distinct paths"):
+        train_cnn(data, init_path, version="v", epochs=1, init_weights=init_path)
+
+
+def test_init_weights_cli_rejects_resume_combination(monkeypatch):
+    from lpr_tools.train import train_cnn as module
+
+    monkeypatch.setattr("sys.argv", ["train_cnn", "--data", "unused", "--out", "unused.pt",
+                                      "--version", "v", "--resume", "checkpoint.pt",
+                                      "--init-weights", "model.pt"])
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("boosts", [["0=0"], ["皖=nan"], ["?=2"], ["0=2", "0=3"]])
