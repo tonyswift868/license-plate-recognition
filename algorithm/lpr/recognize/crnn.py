@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from ..charset import CHARSET, NUM_CLASSES
+from . import read_manifest
 
 BLANK = NUM_CLASSES
 INPUT_SIZE = (160, 40)  # width, height; tuned continuation input for small candidate text
@@ -62,6 +63,9 @@ class CrnnReader:
 
     @classmethod
     def from_file(cls, path: Path, *, version: str) -> "CrnnReader":
+        entry = read_manifest(path.parent).get(path.name)
+        if entry is not None and entry.get("input_size") != list(INPUT_SIZE):
+            raise ValueError(f"CRNN manifest input_size must match {INPUT_SIZE}")
         state = torch.load(path, map_location="cpu", weights_only=True)
         if not isinstance(state, dict) or not state or any(
                 not isinstance(k, str) or not isinstance(v, torch.Tensor) or not torch.isfinite(v).all()

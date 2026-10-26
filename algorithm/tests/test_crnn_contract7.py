@@ -89,3 +89,18 @@ def test_loading_preserves_caller_torch_thread_count(tmp_path):
         assert not reader.model.training
     finally:
         torch.set_num_threads(original_threads)
+
+
+def test_loading_checks_registered_preprocessing_size(tmp_path):
+    from lpr.recognize import write_manifest_entry
+    from lpr.recognize.crnn import INPUT_SIZE
+
+    path = tmp_path / 'sized.pt'
+    torch.save(CrnnNet().state_dict(), path)
+    write_manifest_entry(path, version='sized', train_data='test', val_char_acc=None,
+                         input_size=(INPUT_SIZE[0] + 1, INPUT_SIZE[1]))
+    with pytest.raises(ValueError, match='input_size'):
+        CrnnReader.from_file(path, version='sized')
+    write_manifest_entry(path, version='sized', train_data='test', val_char_acc=None,
+                         input_size=INPUT_SIZE)
+    assert CrnnReader.from_file(path, version='sized').version == 'sized'
