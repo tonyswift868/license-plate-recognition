@@ -7,6 +7,7 @@ Failure causes are status-based proxies, not proven causal localization recall.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import subprocess
 import time
@@ -27,8 +28,9 @@ from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write
 from lpr_tools.data.image_health import decode_image
 from .common import (add_backend_args, config_for_args, effective_config_info,
                      make_recognizer, mode_name)
-from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, read_samples,
-                           sample_dev_hard, sample_validation)
+from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, FIXED_HARD_MANIFEST,
+                           FIXED_VAL_MANIFEST, fixed_manifest_samples, path_key,
+                           read_samples, sample_dev_hard, sample_validation)
 from .locate_recall import locate_match, summarize as summarize_location
 
 
@@ -117,7 +119,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
              locate_recall=False, sampling=None, stage_trace=None, reuse_stage_trace=None,
              truth_samples=None, effective_config=None):
     # Keep rows with missing or corrupt files in the denominator accounting;
-    # they are explicitly recorded as decode errors and skipped below.
+    # they are explicitly recorded as BAD_INPUT results below.
+    cv2.setNumThreads(1)
     rows = read_manifest(manifest, check_files=False)
     if not rows:
         raise ValueError("manifest is empty")
@@ -146,7 +149,7 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
                 raise ValueError(f"missing index bbox ground truth: {row.path}")
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    samples, failures, locations, decode_errors, traces = [], [], [], [], []
+    samples, failures, locations, decode_errors, decode_retries, traces = [], [], [], [], [], []
     subset_samples = {}
     locator_cfg = (getattr(recognizer, "config", None) or effective_config or load_config()) if locate_recall else None
     causes = Counter({key:0 for key in ("localization","segmentation","recognition","rejection")})
@@ -158,9 +161,24 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
     for i,row in enumerate(rows):
         image, decode_error = decode_image(image_path(row, manifest))
         if decode_error:
+            first_error = decode_error
+            gc.collect()
+            image, decode_error = decode_image(image_path(row, manifest))
+            decode_retries.append({"path": row.path, "first_error": first_error,
+                                   "retry_error": decode_error})
+        if decode_error:
             decode_errors.append({"path": row.path, "error": decode_error})
+            result = failure_result(S.BAD_INPUT, f"invalid validation input: {decode_error}")
+            samples.append((row, result))
+            truth = lookup.get(path_key(image_path(row, manifest)))
+            if truth is not None:
+                subset_samples.setdefault(truth.stratum, []).append((row, result))
+                if locate_recall and row.category != "np":
+                    locations.append((truth.stratum, {"hit": False, "best_iou": 0., "candidates": 0}))
+            causes["rejection"] += 1
             traces.append({"path": row.path, "category": row.category, "truth": row.plate_no,
-                           "decode_error": decode_error})
+                           "prediction": "", "status": S.BAD_INPUT.value, "decode_error": decode_error,
+                           "failure_cause": "rejection", "top3_hit": False if locate_recall else None})
             continue
         if hasattr(recognizer, "_reset_observation"):
             recognizer._reset_observation()
@@ -242,7 +260,8 @@ def evaluate(manifest, recognizer, out, *, oracle=False, index=None,
                   "reader_invoked_calls": reader_invoked_calls,
                   "corner_invoked_calls": corner_invoked_calls,
               },
-              "manifest_rows": len(rows), "decoded_rows": len(samples),
+              "manifest_rows": len(rows), "decoded_rows": len(samples) - len(decode_errors),
+              "scored_rows": len(samples), "decode_retries": decode_retries,
               "decode_error_count": len(decode_errors), "decode_errors": decode_errors,
               "oracle_scope":"ground truth quad, color and length; np runs normally" if oracle else None,
               "character_metric":"positional matches / max(true length, predicted length)",
@@ -366,8 +385,13 @@ def append_scoreboard(path, report, *, split, classifier):
     m=report["overall_g2"]
     location = report.get("locate_recall")
     recall = location["overall"]["recall"] if location else None
-    sample_note = (f"; seed={report['sampling']['seed']}; n={report['sampling']['selected_n']}"
-                   if report.get("sampling") else "")
+    sampling = report.get("sampling") or {}
+    if sampling.get("mode") == "fixed_manifest":
+        sample_note = f"; fixed manifest sha256={sampling['manifest_sha256']}; n={sampling['selected_n']}"
+    elif sampling:
+        sample_note = f"; seed={sampling['seed']}; n={sampling['selected_n']}"
+    else:
+        sample_note = ""
     line = "| " + " | ".join([datetime.now(timezone(timedelta(hours=9))).date().isoformat(),commit,classifier,*values,
         _percent(m["character_accuracy"]),_percent(recall),_percent(m["auto_pass_precision"]),"N/A",
         f"{report['mode']}; oracle={report['oracle']}; validation; status-based attribution{sample_note}"]) + " |\n"
@@ -379,13 +403,14 @@ def append_scoreboard(path, report, *, split, classifier):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="G2 evaluator v1: indexed validation sampling and Top-3 localization recall")
     parser.add_argument("--manifest", default="algorithm/testset/manifest.csv")
-    parser.add_argument("--index", default="algorithm/data/index/ccpd_index.csv", help="CCPD index; relative images resolve beside CSV")
+    parser.add_argument("--index", default=r"D:\keshe2\algorithm\data\index\ccpd_index.csv", help="CCPD index; relative images resolve beside CSV")
     parser.add_argument("--split", choices=("test", "val", "manifest-val"), default="test",
                         help="val samples only the index val split; manifest-val uses a supplied validation manifest")
-    parser.add_argument("--n", type=int, default=DEFAULT_VALIDATION_N, help="total validation sample upper bound (default 300)")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--n", type=int, help="explicitly resample this many validation rows (legacy exploratory mode)")
+    parser.add_argument("--seed", type=int, help="seed for explicit exploratory resampling")
     parser.add_argument("--subset", action="append", help="restrict val sampling to a CCPD subset; repeatable")
-    parser.add_argument("--dev-hard", action="store_true", help="sample --n development images per hard subset from all index splits, excluding frozen tests")
+    parser.add_argument("--dev-hard", action="store_true", help="use the fixed 7x300 development hard manifest")
+    parser.add_argument("--fixed-manifest", help="override the versioned daily list (still validated against the CCPD index)")
     parser.add_argument("--exclude-manifest", default=r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv",
                         help="primary manifest of frozen test images excluded from val/dev-hard sampling; golden-only images are also excluded when golden_manifest.csv exists")
     parser.add_argument("--locate-recall", action="store_true", help="Top-3 original-space bbox IoU >= 0.5; requires --index")
@@ -414,28 +439,38 @@ def main(argv=None):
         parser.error("--reuse-stage-trace is intended for --oracle runs")
     if args.subset and args.dev_hard:
         parser.error("--subset cannot be combined with --dev-hard")
+    if args.fixed_manifest and (args.n is not None or args.seed is not None or args.subset):
+        parser.error("--fixed-manifest cannot be combined with explicit resampling options")
     if args.split == "val" and not Path(args.exclude_manifest).is_file():
         parser.error(f"validation exclusion manifest not found: {args.exclude_manifest}")
-    if args.n < 1:
+    if args.n is not None and args.n < 1:
         parser.error("--n must be positive")
     try:
         cfg = config_for_args(args)
         manifest, sampling, selected = args.manifest, None, None
         if args.split == "val":
-            exclusion_manifests = [Path(args.exclude_manifest)]
-            golden_exclusion = ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv"
-            if golden_exclusion.is_file() and golden_exclusion.resolve() not in {
-                    path.resolve() for path in exclusion_manifests}:
-                exclusion_manifests.append(golden_exclusion)
-            if args.dev_hard:
-                selected, sampling = sample_dev_hard(args.index, n=args.n, seed=args.seed,
-                                                     exclude_manifest=exclusion_manifests)
-                sampling["mode"] = "dev-hard"
+            fixed_path = Path(args.fixed_manifest) if args.fixed_manifest else (
+                FIXED_HARD_MANIFEST if args.dev_hard else FIXED_VAL_MANIFEST)
+            if args.n is None and args.seed is None and not args.subset:
+                selected, sampling = fixed_manifest_samples(
+                    args.index, fixed_path, purpose="dev-hard" if args.dev_hard else "val")
             else:
-                selected, sampling = sample_validation(args.index, n=args.n, seed=args.seed,
-                    exclude_manifest=exclusion_manifests,
-                    subsets=set(args.subset) if args.subset else None)
-                sampling["mode"] = "val"
+                exclusion_manifests = [Path(args.exclude_manifest)]
+                golden_exclusion = ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv"
+                if golden_exclusion.is_file() and golden_exclusion.resolve() not in {
+                        path.resolve() for path in exclusion_manifests}:
+                    exclusion_manifests.append(golden_exclusion)
+                count = args.n if args.n is not None else DEFAULT_VALIDATION_N
+                seed = args.seed if args.seed is not None else DEFAULT_SEED
+                if args.dev_hard:
+                    selected, sampling = sample_dev_hard(args.index, n=count, seed=seed,
+                                                         exclude_manifest=exclusion_manifests)
+                    sampling["mode"] = "dev-hard-exploratory"
+                else:
+                    selected, sampling = sample_validation(args.index, n=count, seed=seed,
+                        exclude_manifest=exclusion_manifests,
+                        subsets=set(args.subset) if args.subset else None)
+                    sampling["mode"] = "val-exploratory"
             manifest = Path(args.out)/"validation_manifest.csv"
             write_manifest(manifest, [sample.row for sample in selected], check_files=False)
         if args.locate_only:

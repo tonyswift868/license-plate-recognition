@@ -135,6 +135,35 @@ def test_deferred_marker_config_identity_rejects_changed_model(tmp_path):
         _verify_marker_config(marker)
 
 
+def test_deferred_marker_with_fixed_manifests_returns_config_path(tmp_path, monkeypatch):
+    classifier = tmp_path / "classifier.pt"
+    classifier.write_bytes(b"classifier")
+    config = tmp_path / "daily.toml"
+    config.write_text(f'[runtime]\nmodel_path = "{classifier.as_posix()}"\n', encoding="utf-8")
+    fixed_val = tmp_path / "val.csv"
+    fixed_hard = tmp_path / "hard.csv"
+    fixed_val.write_bytes(b"val-fixed")
+    fixed_hard.write_bytes(b"hard-fixed")
+    run = tmp_path / "run"
+    run.mkdir()
+    val_copy = run / "val.csv"
+    hard_copy = run / "hard.csv"
+    val_copy.write_bytes(fixed_val.read_bytes())
+    hard_copy.write_bytes(fixed_hard.read_bytes())
+    monkeypatch.setattr(daily_module, "FIXED_VAL_MANIFEST", fixed_val)
+    monkeypatch.setattr(daily_module, "FIXED_HARD_MANIFEST", fixed_hard)
+    selected_config, identity = _effective_config(config)
+    from lpr_tools.eval.daily import _sha
+    marker = {"effective_config": identity, "run_dir": str(run),
+              "fixed_manifests": {"val": {"sha256": _sha(fixed_val)},
+                                  "dev-hard": {"sha256": _sha(fixed_hard)}},
+              "run_manifests": {"val.csv": _sha(val_copy), "hard.csv": _sha(hard_copy)}}
+    assert _verify_marker_config(marker) == selected_config
+    fixed_hard.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="fixed dev-hard manifest changed"):
+        _verify_marker_config(marker)
+
+
 @pytest.mark.parametrize(("decoded", "expected"), [(6, 1), (7, 0)])
 def test_recovery_exit_code_reflects_completed_hard_reports(tmp_path, monkeypatch, capsys,
                                                            decoded, expected):
@@ -159,12 +188,18 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
                            'corner_model_path = ""\nplate_reader_model_path = ""\n', encoding="utf-8")
     index = tmp_path / "ccpd_index.csv"
     index.write_text("index", encoding="utf-8")
+    fixed_val = tmp_path / "val1000_v1.csv"
+    fixed_hard = tmp_path / "devhard_v1.csv"
+    fixed_val.write_text("val fixed fixture\n", encoding="utf-8")
+    fixed_hard.write_text("hard fixed fixture\n", encoding="utf-8")
     python = tmp_path / "python.exe"
     python.write_bytes(b"stub")
     monkeypatch.setattr(daily_module, "ROOT", root)
     monkeypatch.setattr(daily_module, "ALGORITHM_DIR", algorithm)
     monkeypatch.setattr(daily_module, "PYTHON", python)
     monkeypatch.setattr(daily_module, "INDEX", index)
+    monkeypatch.setattr(daily_module, "FIXED_VAL_MANIFEST", fixed_val)
+    monkeypatch.setattr(daily_module, "FIXED_HARD_MANIFEST", fixed_hard)
 
     metrics = {"n": 300, "correct": 210, "plate_accuracy": .7, "character_accuracy": .8,
                "auto_pass_rate": .2, "auto_pass_precision": .99, "char_correct": 1000,
@@ -176,7 +211,8 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
                 "subsets": {"ccpd2019/ccpd_base": dict(metrics),
                             "ccpd2019/ccpd_green": dict(metrics)},
                 "locate_recall": {"overall": {"recall": .9}},
-                "decoded_rows": 1000, "decode_error_count": 0}
+                "manifest_rows": 1000, "decoded_rows": 1000,
+                "scored_rows": 1000, "decode_error_count": 0}
 
     observed = []
     def fake_run(command, cwd, log, *, env=None):
@@ -192,7 +228,7 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
             trace.parent.mkdir(parents=True, exist_ok=True)
             trace.write_text(json.dumps({"truth": "京A12345", "prediction": "京B12345"}, ensure_ascii=False)+"\n", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "", "")
-        if "sample_dev_hard" in " ".join(command):
+        if "fixed_manifest_samples" in " ".join(command):
             dest = Path(command[-2])
             dest.parent.mkdir(parents=True, exist_ok=True)
             lines = ["path,plate_no,plate_color,category,source,quad,note"]
@@ -201,12 +237,13 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
                 for n in range(300):
                     lines.append(f"{subset}-{n}.jpg,京A12345,blue,night,ccpd2019/{subset},,fixture")
             dest.write_text("\n".join(lines), encoding="utf-8")
-            Path(command[-1]).write_text("{}", encoding="utf-8")
+            Path(command[-1]).write_text(json.dumps({"manifest_sha256": "fixed-hard-hash",
+                                                     "paths_sha256": "hard-paths-hash"}), encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "", "")
         if "manifest-val" in command:
             out = Path(command[command.index("--out") + 1])
             out.mkdir(parents=True, exist_ok=True)
-            data = report(); data["decoded_rows"] = 300
+            data = report(); data["manifest_rows"] = data["scored_rows"] = data["decoded_rows"] = 300
             (out / "report.json").write_text(json.dumps(data), encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "", "")
         if any("test_golden.py" in item for item in command):
@@ -243,6 +280,9 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
     for command, child_env in observed:
         if "eval_accuracy" in command or "bench_latency" in command:
             assert command[command.index("--config") + 1] == effective_path
+        if "eval_accuracy" in command and "--split" in command and "val" in command:
+            assert "--n" not in command and "--seed" not in command
+            assert command[command.index("--fixed-manifest") + 1] == str(fixed_val)
         if "eval_accuracy" in command or "bench_latency" in command or "test_golden.py" in command or "-c" in command:
             assert child_env["LPR_CONFIG"] == effective_path
 

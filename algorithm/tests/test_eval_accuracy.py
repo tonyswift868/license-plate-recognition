@@ -1,4 +1,5 @@
 import json
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 import numpy as np
@@ -7,7 +8,7 @@ from lpr.io_utils import imwrite
 from lpr.pipeline import PlateRecognizer
 from lpr.testing import FakeRecognizer, UniformClassifier
 from lpr.types import SegmentResult, RecogStatus as S
-from lpr_tools.data.manifest import ManifestRow, write_manifest
+from lpr_tools.data.manifest import ManifestRow, read_manifest, write_manifest
 from lpr_tools.eval.eval_accuracy import evaluate, main, append_scoreboard, OracleRecognizer
 import lpr_tools.eval.eval_accuracy as ev
 import lpr_tools.eval.index_samples as index_samples_module
@@ -73,6 +74,19 @@ def test_metrics_and_failure_artifacts(tmp_path):
     assert saved==report
 
 
+def test_fixed_validation_decode_error_is_scored_as_bad_input(tmp_path, monkeypatch):
+    manifest = fixture_manifest(tmp_path)
+    rows = read_manifest(manifest)
+    write_manifest(manifest, [rows[0]], check_files=False)
+    monkeypatch.setattr(ev, "decode_image", lambda _path: (None, "decode_failed"))
+    report = evaluate(manifest, FakeRecognizer(samples_dir=tmp_path), tmp_path / "bad-input")
+    assert report["manifest_rows"] == report["scored_rows"] == 1
+    assert report["decoded_rows"] == 0 and report["decode_error_count"] == 1
+    assert report["overall_g2"]["n"] == 1
+    assert report["overall_g2"]["correct"] == report["overall_g2"]["auto_pass"] == 0
+    assert report["failure_causes"]["rejection"] == 1
+
+
 def test_cli_and_scoreboard(tmp_path,capsys):
     manifest=fixture_manifest(tmp_path);score=tmp_path/"scoreboard.md"
     score.write_text("temporary scoreboard\n",encoding="utf-8")
@@ -91,6 +105,51 @@ def test_cli_and_scoreboard(tmp_path,capsys):
         assert exc.value.code==2
     assert "ccpd_index.csv" in capsys.readouterr().err
     with pytest.raises(ValueError):append_scoreboard(tmp_path/"algorithm"/"reports"/"scoreboard.md",{},split="val",classifier="fake")
+
+
+def test_scoreboard_fixed_manifest_note_uses_hash_without_seed(tmp_path):
+    score = tmp_path / "scoreboard.md"
+    report = {"categories": {name: {"plate_accuracy": 0.5} for name in ("clear", "night", "tilt", "dirty")},
+              "overall_g2": {"character_accuracy": 0.5, "auto_pass_precision": 0.99},
+              "locate_recall": None, "sampling": {"mode": "fixed_manifest",
+                  "manifest_sha256": "a" * 64, "selected_n": 1000},
+              "mode": "cnn", "oracle": False}
+    append_scoreboard(score, report, split="val", classifier="cnn")
+    row = score.read_text(encoding="utf-8")
+    assert "fixed manifest sha256=" + "a" * 64 in row
+    assert "seed=" not in row
+
+
+def test_fixed_validation_cli_scoreboard_keeps_fixed_mode_and_rejects_resampling(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from lpr_tools.data.manifest import read_manifest, write_manifest
+
+    rows = read_manifest(fixture_manifest(tmp_path))
+    index = tmp_path / "ccpd_index.csv"
+    index.write_text("fixture index\n", encoding="utf-8")
+    fixed = tmp_path / "val1000_v1.csv"
+    fixed_rows = [replace(row, path=str((tmp_path / row.path).resolve())) for row in rows[:2]]
+    write_manifest(fixed, fixed_rows, check_files=True)
+    monkeypatch.setattr(ev, "FIXED_VAL_MANIFEST", fixed)
+    meta = {"mode": "fixed_manifest", "purpose": "val", "manifest": str(fixed),
+            "manifest_sha256": hashlib.sha256(fixed.read_bytes()).hexdigest(),
+            "selected_n": len(fixed_rows), "paths_sha256": "fixed-paths-hash"}
+    selected = [SimpleNamespace(row=row, dataset="ccpd2019", subset="ccpd_base",
+                                split="val", bbox=(0., 0., 100., 50.), stratum="ccpd2019/ccpd_base")
+                for row in fixed_rows]
+    monkeypatch.setattr(ev, "fixed_manifest_samples", lambda _index, _path, purpose: (selected, meta))
+    score = tmp_path / "scoreboard.md"
+
+    assert main(["--split", "val", "--index", str(index), "--fixed-manifest", str(fixed),
+                 "--fake", "--out", str(tmp_path / "out"), "--scoreboard", str(score)]) == 0
+    line = score.read_text(encoding="utf-8")
+    assert f"fixed manifest sha256={hashlib.sha256(fixed.read_bytes()).hexdigest()}" in line
+    assert "seed=" not in line
+
+    with pytest.raises(SystemExit) as caught:
+        main(["--split", "val", "--index", str(index), "--fixed-manifest", str(fixed),
+              "--n", "2", "--fake", "--out", str(tmp_path / "bad")])
+    assert caught.value.code == 2
 
 
 def test_fake_oracle(tmp_path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from lpr_tools.eval.e1_threshold import (candidate_thresholds, scan, validate_provenance,
+from lpr_tools.eval.e1_threshold import (candidate_thresholds, recommend, scan, validate_provenance,
                                         _stable_threshold)
 
 
@@ -47,6 +47,17 @@ def test_stable_interior_threshold_preserves_maximum_coverage_plateau():
     assert recommendation["threshold"] < stable["threshold"] < stable["next_coverage_boundary"]
 
 
+def test_recommendation_supports_a_stricter_conservative_precision_floor():
+    rows = [
+        {"threshold": .6, "accepted": 100, "correct_accepted": 99,
+         "auto_pass_precision": .99},
+        {"threshold": .8, "accepted": 80, "correct_accepted": 80,
+         "auto_pass_precision": 1.0},
+    ]
+    assert recommend(rows, .99)["accepted"] == 100
+    assert recommend(rows, .995)["accepted"] == 80
+
+
 def test_no_valid_attempts_reports_zero_coverage_without_precision():
     record = {"truth": "PLATE001", "lead_color": "blue", "candidate_count": 1,
               "attempts": [attempt(0, "bad", .99, valid=False)]}
@@ -63,5 +74,5 @@ def test_empty_or_missing_truth_is_rejected():
 
 
 def test_provenance_rejects_non_validation_source_before_scanning(tmp_path):
-    with pytest.raises(ValueError, match="val 1000"):
+    with pytest.raises(ValueError, match="fixed val1000"):
         validate_provenance([], tmp_path / "attempts.jsonl", {"selection": {"split": "test"}})
