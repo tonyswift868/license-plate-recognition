@@ -102,5 +102,18 @@
     "val_char_acc": 0.9741870844339193,
     "sha256": "02527ecc66797e82cb1b18eb24d998e421c30ef4fc97b2cb0beaf1f7e0242599",
     "created_at": "2026-10-27T01:47:09"
+  },
+  "corner_refine_v1.pt": {
+    "name": "corner_refine_v1.pt",
+    "version": "corner_refine_v1",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      256,
+      128
+    ],
+    "train_data": "{\"architecture\": \"roi_four_corner_heatmaps_stride2_v1\", \"role\": \"standalone single-candidate corner refiner, no pipeline integration\", \"initialization\": \"random; own code, no inherited/external weights\", \"input\": \"expanded arbitrary-source candidate bbox, padding=.25, BGR letterbox256x128\", \"selected_steps\": 4000, \"status\": \"experimental, review all frozen acceptance gates\", \"four_manifest_exclusion\": \"normalized paths and image SHA256\", \"selection\": {\"step\": 4000, \"checkpoint\": \"algorithm/out/tenth/train-run/corner-refine-step-4000.pt\", \"checkpoint_sha256\": \"095b012fc55f9412d447b5a03d4e65d986aab96512c347ab2ebb8f46fb43b07f\", \"before_mean_px\": 21.368138589940717, \"after_mean_px\": 20.47729232024949, \"after_le8_ratio\": 0.15384615384615385, \"error_reduction_ratio\": 0.04169040115223714, \"holdout_report\": \"algorithm/out/tenth/holdout900-step-4000.json\", \"candidates\": [{\"step\": 2000, \"checkpoint\": \"algorithm/out/tenth/train-run/corner-refine-step-2000.pt\", \"checkpoint_sha256\": \"df0187478227817cdd83a88f9ac08aed1b0f32bdb39420fb5ab589e9074de546\", \"before_mean_px\": 21.368138589940717, \"after_mean_px\": 22.34641576819888, \"after_le8_ratio\": 0.10989010989010989, \"error_reduction_ratio\": -0.045782049481778386, \"holdout_report\": \"algorithm/out/tenth/holdout900-step-2000.json\"}, {\"step\": 4000, \"checkpoint\": \"algorithm/out/tenth/train-run/corner-refine-step-4000.pt\", \"checkpoint_sha256\": \"095b012fc55f9412d447b5a03d4e65d986aab96512c347ab2ebb8f46fb43b07f\", \"before_mean_px\": 21.368138589940717, \"after_mean_px\": 20.47729232024949, \"after_le8_ratio\": 0.15384615384615385, \"error_reduction_ratio\": 0.04169040115223714, \"holdout_report\": \"algorithm/out/tenth/holdout900-step-4000.json\"}], \"frozen_before_fixed_inference\": true, \"timestamp_utc\": \"2026-10-26T21:39:08.083022+00:00\", \"stop_loss_triggered\": true, \"postfreeze_policy\": \"final only, no further training/threshold/decoder changes\", \"selection_rule_sha256\": \"0a8e0d43517a4848c3a6bbe5135f89debea5145434c8c9cc0f0cdb2ab4660f76\"}, \"training_audit_path\": \"algorithm/out/tenth/train-run/round1-data-audit.json\", \"training_audit_sha256\": \"4a052b8da01cc2b3593015d99b05522f634cb3fe8dc1749c4188f3a5cd02a332\", \"proposal_distribution_sha256\": \"8b2b2112413f760547409bc783bb0d819041ec267d15ac23f4c2cf81f2d81147\"}",
+    "val_char_acc": null,
+    "sha256": "095b012fc55f9412d447b5a03d4e65d986aab96512c347ab2ebb8f46fb43b07f",
+    "created_at": "2026-10-27T06:39:13"
   }
 }
