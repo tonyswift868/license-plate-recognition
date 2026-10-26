@@ -379,3 +379,33 @@ first_ok最大值1070.84ms，P95达标不代表每帧均≤200ms；长尾原因�
 
 分项限制：绿牌first_ok整牌准确率94.00%→92.60%，agree为93.60%→91.80%；
 devhard v2 agree的Blur自动通过精度仅93.62%，总体98.57%不能替代逐组判断。
+
+### 第九批：由安全训练池测量裁偏并续训
+
+`measure_crop_errors` 只从第八批审计train索引选七组各300原图，运行正式v1网络+传统融合定位。
+按生产顺序选择首个bbox IoU≥0.5且能校正的候选，逆实际homography恢复裁片四角，
+不是拿proposal四角冒充实际warp。每原图保留一个完整4×2相关误差向量；249张失配单列，
+拟合仅使用1851张匹配的train原图。真实图像读取只在安全训练池内，不读最终集合拟合扰动。
+报告区分原图dx/GT bbox宽、dy/GT bbox高与GT透视归一化后的canonical残差；训练使用后者。
+
+`train_crnn_v3` 在自有v2权重上续训，不增加STN或推理层。难例占62%（七组等权），
+其中GT/候选为30/70；base7占12%、real8占18%、字体8%。难例候选总抽样概率从24.5%升至43.4%，
+同时提高真实八字牌份额。难例GT抽中时以50%概率从原图按整组实测残差重新裁切，保留真实背景；
+不对既有候选叠加另一份严重裁偏，所有训练样本保留第八批光照/模糊增强，关闭旧的小几何扰动。
+
+选轮先要求tune GT正确数不低于v2，以及安全val整体/八字牌准确率各不低于v2超过0.5个百分点；
+满足资格后仍按第八批最差hard GT、宏平均hard GT、过滤后val准确率依次选best，初始化为第0轮候选。
+这些条件在训练前固定。正式最多8轮，每轮65536抽样，batch128、AdamW LR0.0001，
+第5轮起减半，Torch4线程、worker1、OpenCV1。第4轮当前候选裁片提升不足3个百分点立即止损，
+不因更换seed或继续训练绕过该条件。达到候选≥82%且满足资格也停止。不用固定最终集选轮次。
+
+```powershell
+$env:PYTHONPATH='algorithm'
+$env:PYTHONUTF8='1'
+.venv\Scripts\python.exe -m lpr_tools.train.measure_crop_errors --per-subset 300
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn_v3 --index-dir algorithm/out/data/batch8 --fonts D:\keshe2\algorithm\data\plates_synth\v2_seed42 --init algorithm/models/crnn_v2.pt --empirical algorithm/out/receipts/batch9/geometry/train_sampler.json --out algorithm/out/train/batch9-v3 --epochs 8 --samples-per-epoch 65536 --batch-size 128 --lr 0.0001 --num-workers 1
+```
+
+长训练用本地隐藏后台启动器执行，保存native exit，温度校准仍只拟合tune/fit；
+report折也曾参与选轮，不称盲测。固定val1000/devhard仅在模型与温度冻结后用于最终报告。
+数据源哈希、分位数、止损和性能目标达成情况见工位01的`algorithm/out/receipts/第九批.md`。

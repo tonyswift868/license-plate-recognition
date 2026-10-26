@@ -87,10 +87,10 @@ def sampling_weights(rows: list[Sample]) -> torch.Tensor:
     return weights
 
 
-def augment(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def augment(image: np.ndarray, rng: np.random.Generator, *, geometry: bool = True) -> np.ndarray:
     """Own implementation of mild geometry, illumination and blur perturbations."""
     h, w = image.shape[:2]
-    if rng.random() < .35:
+    if geometry and rng.random() < .35:
         src = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
         dst = src + rng.uniform(-1, 1, (4, 2)).astype(np.float32) * np.float32([.025 * w, .05 * h])
         image = cv2.warpPerspective(image, cv2.getPerspectiveTransform(src, dst), (w, h),
