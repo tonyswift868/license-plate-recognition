@@ -607,3 +607,109 @@ class KeypointNet(CornerNet):
         # Coordinates are in the full letterbox canvas, never in a predicted bbox.
         candidate = _candidate_from_peak(image, score, normalized, transform)
         return [candidate] if candidate is not None else []
+
+
+REFINE_INPUT_SIZE = (256, 128)  # width, height, independent candidate ROI only
+REFINE_ARCHITECTURE = "roi_four_corner_heatmaps_stride2_v1"
+
+
+class RefineModel(nn.Module):
+    """Four spatial corner distributions within a single expanded candidate ROI."""
+
+    architecture = REFINE_ARCHITECTURE
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = _KeypointStem(3, 16, 2)
+        self.stage4 = _KeypointDSBlock(16, 24, 2)
+        self.stage8 = _KeypointDSBlock(24, 40, 2)
+        self.stage16 = _KeypointDSBlock(40, 64, 2)
+        self.lateral = nn.ModuleList(nn.Conv2d(c, 16, 1) for c in (16, 24, 40, 64))
+        self.head = nn.Sequential(_KeypointDSBlock(16, 24, 1), nn.Conv2d(24, 4, 1))
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        if images.ndim != 4 or images.shape[1:] != (3, REFINE_INPUT_SIZE[1], REFINE_INPUT_SIZE[0]):
+            raise ValueError("RefineModel expects [B,3,128,256]")
+        x2 = self.stem(images)
+        x4 = self.stage4(x2)
+        x8 = self.stage8(x4)
+        x16 = self.stage16(x8)
+        fused = self.lateral[0](x2)
+        for layer, feature in zip(self.lateral[1:], (x4, x8, x16)):
+            fused = fused + torch.nn.functional.interpolate(
+                layer(feature), size=x2.shape[-2:], mode="bilinear", align_corners=False)
+        return self.head(fused)
+
+
+def refine_coordinates(logits: torch.Tensor) -> torch.Tensor:
+    """Spatial expectation at pixel centers, normalized to the complete ROI canvas."""
+    if logits.ndim != 4 or logits.shape[1] != 4 or min(logits.shape[-2:]) < 1:
+        raise ValueError("refine logits must have shape [B,4,H,W]")
+    height, width = logits.shape[-2:]
+    probabilities = logits.flatten(2).softmax(dim=-1).reshape_as(logits)
+    xs = (torch.arange(width, device=logits.device, dtype=logits.dtype) + .5) / width
+    ys = (torch.arange(height, device=logits.device, dtype=logits.dtype) + .5) / height
+    x = (probabilities.sum(dim=2) * xs).sum(dim=2)
+    y = (probabilities.sum(dim=3) * ys).sum(dim=2)
+    return torch.stack((x, y), dim=-1)
+
+
+class CornerRefiner:
+    """Standalone candidate refinement; never invoked implicitly by the pipeline.
+
+    Invalid input or invalid predicted geometry returns the original candidate.
+    The caller retains source, color, confidence and candidate ordering.
+    """
+
+    def __init__(self, model: RefineModel, *, padding: float = .25) -> None:
+        self.padding = _valid_fraction(padding, "refine padding", allow_zero=True)
+        self.model = model.to("cpu").eval()
+
+    @classmethod
+    def from_file(cls, path: Path) -> "CornerRefiner":
+        try:
+            payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+            if (not isinstance(payload, dict) or payload.get("architecture") != REFINE_ARCHITECTURE
+                    or tuple(payload.get("input_size", ())) != REFINE_INPUT_SIZE):
+                raise ModelLoadError("refiner architecture or input size mismatch")
+            model = RefineModel()
+            model.load_state_dict(payload["state_dict"], strict=True)
+            if not all(torch.isfinite(value).all() for value in model.state_dict().values()):
+                raise ModelLoadError("refiner state contains non-finite values")
+            return cls(model, padding=payload["padding"])
+        except ModelLoadError:
+            raise
+        except Exception as exc:
+            raise ModelLoadError(f"角点精修器加载失败：{path}：{exc}") from exc
+
+    def refine(self, image: np.ndarray, candidate: PlateCandidate) -> PlateCandidate:
+        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.size == 0
+                or image.ndim != 3 or image.shape[2] != 3):
+            return candidate
+        try:
+            bbox = np.asarray(candidate.bbox, dtype=np.float64)
+            if bbox.shape != (4,) or not np.isfinite(bbox).all() or min(bbox[2:]) <= 0:
+                return candidate
+            x0, y0, x1, y1 = _roi_bounds(image.shape, tuple(bbox.tolist()), self.padding)
+        except (TypeError, ValueError, OverflowError):
+            return candidate
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return candidate
+        canvas, transform = letterbox_image(image[y0:y1, x0:x1], REFINE_INPUT_SIZE)
+        tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy()).unsqueeze(0).float().div_(255.)
+        with torch.inference_mode():
+            logits = self.model(tensor)
+            if not torch.isfinite(logits).all():
+                return candidate
+            normalized = refine_coordinates(logits)[0].cpu().numpy()
+        local = normalized * np.asarray(REFINE_INPUT_SIZE, np.float32)
+        points = transform.to_source(local) + np.asarray([x0, y0], np.float32)
+        points[:, 0] = np.clip(points[:, 0], 0, image.shape[1] - 1)
+        points[:, 1] = np.clip(points[:, 1], 0, image.shape[0] - 1)
+        if cv2.contourArea(points.astype(np.float32), oriented=True) <= 0:
+            return candidate
+        refined = _candidate_from_source_points(image, candidate.score, points)
+        if refined is None:
+            return candidate
+        return PlateCandidate(corners=refined.corners, bbox=refined.bbox,
+                              color=candidate.color, score=candidate.score, source=candidate.source)
