@@ -54,6 +54,11 @@ char_size = 32                            # 冻结
 min_confidence = 0.80                     # E1 阈值【待调】
 topk = 3
 province_prior = {}                       # 例如 {"陕" = 1.5}，默认关闭
+arbitration = "first_ok"                  # first_ok = 分割路线先出 OK 即返回、CRNN 只兜底；agree = 两条路线读法一致才自动通过（10-26 新增，待 03 定阈值）
+agree_min_confidence = 0.0                # 以下四项只在 agree 且启用 CRNN 时生效【待调】
+solo_min_confidence_segment = 1.01        # >1 = 关闭单边通过
+solo_min_confidence_reader = 1.01
+disagree_prefer = "reader"
 
 [voting]
 min_frames = 2

@@ -251,3 +251,55 @@ def test_plate_reader_low_conf_and_invalid(cfg, stages):
     assert r.status is S.INVALID_FORMAT
     r = _recognizer_with(cfg, plate_reader=_FakeReader("", [])).recognize(IMG)
     assert r.status is S.SEG_FAILED
+
+
+# ---- agree 模式：两条路线读法一致才自动通过（10-26） ----
+
+def _agree_cfg(**kw):
+    from lpr.config import load_config
+
+    return load_config(postprocess={"arbitration": "agree", **kw})
+
+
+def test_agree_mode_both_routes_same_is_ok(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["decode"] = [_dec(S.LOW_CONFIDENCE, 0.6)]          # 分割路线单独不够 OK，一致后升为 OK
+    reader = _FakeReader("陕A12345", [0.7] * 7)
+    r = _recognizer_with(_agree_cfg(agree_min_confidence=0.5), plate_reader=reader).recognize(IMG)
+    assert r.status is S.OK and r.plate_no == "陕A12345" and r.confidence == 0.7 and reader.calls == 1
+
+
+def test_agree_mode_disagree_is_low_confidence_with_both_candidates(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["decode"] = [_dec(S.OK, 0.99)]                     # 旧规则下会直接 OK
+    reader = _FakeReader("陕A12346", [0.99] * 7)
+    r = _recognizer_with(_agree_cfg(), plate_reader=reader).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.plate_no == "陕A12346"     # disagree_prefer 默认 reader
+    assert [c[0] for c in r.candidates][:2] == ["陕A12346", "陕A12345"]
+    r = _recognizer_with(_agree_cfg(disagree_prefer="segment"), plate_reader=reader).recognize(IMG)
+    assert r.plate_no == "陕A12345"
+
+
+def test_agree_mode_solo_threshold_and_below_agree_threshold(stages):
+    plan, _ = stages
+    plan["cands"] = [_cand(0)]
+    plan["seg_ok"] = {(0, 7): False}
+    reader = _FakeReader("陕A12345", [0.97] * 7)
+    r = _recognizer_with(_agree_cfg(), plate_reader=reader).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE                     # 只有一边、单边门槛默认关闭
+    r = _recognizer_with(_agree_cfg(solo_min_confidence_reader=0.95), plate_reader=reader).recognize(IMG)
+    assert r.status is S.OK
+    plan["seg_ok"] = {}
+    plan["decode"] = [_dec(S.OK, 0.3)]
+    r = _recognizer_with(_agree_cfg(agree_min_confidence=0.5), plate_reader=reader).recognize(IMG)
+    assert r.status is S.LOW_CONFIDENCE and r.plate_no == "陕A12345"
+
+
+def test_agree_mode_without_reader_keeps_first_ok(stages):
+    plan, calls = stages
+    plan["cands"] = [_cand(0), _cand(1)]
+    plan["decode"] = [_dec(S.OK, 0.95)]
+    r = _recognizer_with(_agree_cfg()).recognize(IMG)
+    assert r.status is S.OK and calls == [("rectify", 0), ("segment", 0, 7)]

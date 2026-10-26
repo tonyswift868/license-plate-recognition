@@ -10,7 +10,7 @@ import os
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from loguru import logger
@@ -144,6 +144,32 @@ def _decode_text(text: str, confs: Sequence[float], color: PlateColor,
 
 def _rank(dec: DecodeResult) -> tuple[int, float]:
     return _STATUS_RANK.get(dec.status, 0), float(dec.confidence)
+
+
+def _arbitrate(seg: _Attempt | None, rd: _Attempt | None, pp) -> _Attempt | None:
+    """agree 模式：同一块校正图上分割路线（seg）与整牌识别（rd）的仲裁（E1）。
+
+    两边读法相同、格式合法且较小置信度 ≥ agree_min_confidence → OK；
+    否则单边置信度 ≥ 各自 solo 门槛才 OK；其余为 LOW_CONFIDENCE，备选里带上另一边的读法。"""
+    s = seg.dec if seg is not None and seg.dec.status != S.INVALID_FORMAT else None
+    r = rd.dec if rd is not None and rd.dec.status != S.INVALID_FORMAT else None
+    if s is not None and r is not None and s.plate_no == r.plate_no \
+            and min(s.confidence, r.confidence) >= pp.agree_min_confidence:
+        return _Attempt(replace(s, status=S.OK, confidence=max(s.confidence, r.confidence)), seg.rect, seg.seg)
+    valid = {"segment": seg if s is not None else None, "reader": rd if r is not None else None}
+    solo = {"segment": valid["segment"] if s is not None and s.confidence >= pp.solo_min_confidence_segment else None,
+            "reader": valid["reader"] if r is not None and r.confidence >= pp.solo_min_confidence_reader else None}
+    flip = {"segment": "reader", "reader": "segment"}
+    for pool, status in ((solo, S.OK), (valid, S.LOW_CONFIDENCE)):
+        side = pp.disagree_prefer if pool[pp.disagree_prefer] is not None else flip[pp.disagree_prefer]
+        pick, alt = pool[side], valid[flip[side]]
+        if pick is None:
+            continue
+        cands = [*pick.dec.candidates[:1], *([(alt.dec.plate_no, alt.dec.confidence)] if alt is not None else []),
+                 *pick.dec.candidates[1:]]
+        cands = [c for i, c in enumerate(cands) if c[0] not in {x[0] for x in cands[:i]}][:max(pp.topk, 1)]
+        return _Attempt(replace(pick.dec, status=status, candidates=cands), pick.rect, pick.seg)
+    return max((a for a in (seg, rd) if a is not None), key=lambda a: _rank(a.dec), default=None)
 
 
 def _chars_mosaic(chars: np.ndarray) -> np.ndarray:
@@ -295,6 +321,7 @@ class PlateRecognizer:
             return failure_result(S.NO_PLATE)
 
         best: _Attempt | None = None
+        agree = cfg.postprocess.arbitration == "agree" and self.plate_reader is not None
         lead_color = candidates[0].color
         for i, cand in enumerate(candidates[:cfg.runtime.max_candidates]):
             with timer("rectify"):
@@ -304,6 +331,7 @@ class PlateRecognizer:
             if dbg is not None:
                 dbg[f"plate_{i}"] = rects[0].image
             for rect in rects:                           # 四角点假设回退
+                seg_best: _Attempt | None = None
                 for layout in _layouts_to_try(rect):
                     with timer("segment"):
                         seg = segment(rect, layout, cfg.segment)
@@ -313,11 +341,28 @@ class PlateRecognizer:
                         probs = self.classifier.predict_proba(seg.chars)
                     with timer("postprocess"):
                         dec = decode(probs, seg.layout, rect.color, cfg.postprocess)
+                    if agree:                            # 先不返回，等整牌识别结果一起仲裁
+                        if seg_best is None or _rank(dec) > _rank(seg_best.dec):
+                            seg_best = _Attempt(dec, rect, seg)
+                        if dec.status == S.OK:
+                            break
+                        continue
                     if best is None or _rank(dec) > _rank(best.dec):
                         best = _Attempt(dec, rect, seg)
                     if dec.status == S.OK:               # 提前结束
                         return self._build(best, dbg)
-                if self.plate_reader is not None:        # 分割路线没出 OK：整牌识别兜底
+                if agree:
+                    with timer("reader"):
+                        text, confs = self.plate_reader.read(rect.image)
+                    dec = _decode_text(text, confs, rect.color, cfg.postprocess.min_confidence)
+                    att = _arbitrate(seg_best, _Attempt(dec, rect, None) if dec is not None else None,
+                                     cfg.postprocess)
+                    if att is not None:
+                        if best is None or _rank(att.dec) > _rank(best.dec):
+                            best = att
+                        if att.dec.status == S.OK:
+                            return self._build(best, dbg)
+                elif self.plate_reader is not None:      # 分割路线没出 OK：整牌识别兜底
                     with timer("reader"):
                         text, confs = self.plate_reader.read(rect.image)
                     dec = _decode_text(text, confs, rect.color, cfg.postprocess.min_confidence)

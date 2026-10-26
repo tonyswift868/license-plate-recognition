@@ -114,6 +114,11 @@ class PostprocessConfig(_Section):
     min_confidence: float
     topk: int
     province_prior: dict[str, float]
+    arbitration: Literal["first_ok", "agree"]            # agree：分割路线与整牌识别读法一致才自动通过（须启用 CRNN）
+    agree_min_confidence: float                          # agree：两边置信度的较小值 ≥ 此值才算一致通过
+    solo_min_confidence_segment: float                   # agree：读法不一致或缺一边时，单边自动通过门槛；>1 = 关闭
+    solo_min_confidence_reader: float
+    disagree_prefer: Literal["segment", "reader"]        # agree：不一致且都未单边通过时返回哪一边的读法
 
     @field_validator("province_prior")
     @classmethod
