@@ -435,8 +435,8 @@ def main(argv=None):
         parser.error("--dev-hard requires --split val")
     if args.locate_only and (args.scoreboard or args.oracle):
         parser.error("--locate-only cannot be combined with --scoreboard or --oracle")
-    if args.stage_trace and not (args.locate_recall or args.reuse_stage_trace):
-        parser.error("--stage-trace requires --locate-recall or --reuse-stage-trace")
+    # Decision traces also serve exact arbitration replay; unmeasured Top-3
+    # remains None rather than requiring a separate localization evaluation.
     if args.reuse_stage_trace and not args.oracle:
         parser.error("--reuse-stage-trace is intended for --oracle runs")
     if args.subset and args.dev_hard:

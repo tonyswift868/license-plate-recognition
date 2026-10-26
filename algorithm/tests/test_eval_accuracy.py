@@ -104,6 +104,18 @@ def test_stage_trace_preserves_exact_text_confidence_and_failure_state(tmp_path)
         assert traced["status"] == result.status.value
 
 
+def test_manifest_cli_can_record_decisions_without_localization_measurement(tmp_path, capsys):
+    manifest = fixture_manifest(tmp_path)
+    trace = tmp_path / "decisions.jsonl"
+    assert main(["--manifest", str(manifest), "--split", "manifest-val", "--fake",
+                 "--out", str(tmp_path / "out"), "--stage-trace", str(trace)]) == 0
+    capsys.readouterr()
+    rows = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == len(read_manifest(manifest))
+    assert all(row["top3_hit"] is None for row in rows)
+    assert all("plate_no" in row and "confidence" in row for row in rows)
+
+
 def test_cli_and_scoreboard(tmp_path,capsys):
     manifest=fixture_manifest(tmp_path);score=tmp_path/"scoreboard.md"
     score.write_text("temporary scoreboard\n",encoding="utf-8")
