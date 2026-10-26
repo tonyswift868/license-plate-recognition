@@ -149,4 +149,3 @@ class DecisionBits:
                        "guaranteed_accept": (guaranteed_accept & mask).bit_count(),
                        "possible_correct": (possible_correct & mask).bit_count()}
                 for name, mask in self.groups.items()}
-

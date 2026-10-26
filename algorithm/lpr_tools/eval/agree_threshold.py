@@ -298,7 +298,6 @@ def exact_branch_bound(records, permille, *, max_nodes=200_000, checkpoint_path=
                            and s["plate"] == r["plate"]} | {0.0, 1.0000000000000002})
     domains = (agree_values, seg_values, reader_values)
     full_grid = len(seg_values) * len(reader_values) * len(agree_values)
-    packed = _compile_records(records)
     decisions = DecisionBits(records)
     domain_sha = hashlib.sha256(json.dumps(domains, separators=(",", ":")).encode()).hexdigest()
     best = None
@@ -404,10 +403,6 @@ def exact_branch_bound(records, permille, *, max_nodes=200_000, checkpoint_path=
             pruned += 1
             solved_boxes += 1
             continue
-        lower = tuple(domains[d][lo[d]] for d in range(3))
-        upper = tuple(domains[d][hi[d]] for d in range(3))
-        high_params = {"agree_min": upper[0], "solo_seg": upper[1],
-                       "solo_reader": upper[2], "prefer": prefer}
         possible_correct = {name: bounds[name]["possible_correct"] for name in ("val", "devhard")}
         impossible = any(bounds[name]["guaranteed_accept"] * permille >
                          possible_correct[name] * 1000 for name in ("val", "devhard"))

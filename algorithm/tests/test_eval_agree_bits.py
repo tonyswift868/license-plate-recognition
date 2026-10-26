@@ -82,4 +82,3 @@ def test_first_guaranteed_ok_excludes_later_correct_rect_from_bound(prefer):
     # The first rect is guaranteed OK at the high corner and always precedes
     # the later correct rect; no setting inside this box can return truth.
     assert bits.bounds(lower, upper)["val"]["possible_correct"] == 0
-
