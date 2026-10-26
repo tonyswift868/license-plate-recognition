@@ -15,7 +15,7 @@ from lpr.pipeline import PlateRecognizer
 
 from .conftest import GOLDEN_DIR
 
-MIN_CORRECT = 12                                         # 10-26 cnn v1 + 第五批分割：12/20；随版本提高
+MIN_CORRECT = 13                                         # 10-26 cnn v2 + corner_net v1：13/20；随版本提高
 
 LABELS = GOLDEN_DIR / "labels.csv"
 pytestmark = [pytest.mark.golden,

@@ -4,10 +4,10 @@
 
 [runtime]
 torch_threads = 2
-model_path = "models/char_cnn_v1.pt"     # 相对 algorithm/ 目录；指向 classifier 所选分类器的模型文件（10-26 切到 v1）
+model_path = "models/char_cnn_v2.pt"     # 相对 algorithm/ 目录；指向 classifier 所选分类器的模型文件（10-26 切到 v2）
 classifier = "cnn"                        # cnn | template | svm（对比实验用）
 max_candidates = 3
-corner_model_path = ""                    # 四角点网络（K1 Plan B-1），空 = 不启用；相对 algorithm/ 目录
+corner_model_path = "models/corner_net_v1.pt"  # 四角点网络（K1 Plan B-1），空 = 不启用；相对 algorithm/ 目录（10-26 启用）
 plate_reader_model_path = ""              # 整牌识别 CRNN（K1 Plan B-2），空 = 不启用；相对 algorithm/ 目录
 
 [preprocess]
