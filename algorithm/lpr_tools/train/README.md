@@ -287,3 +287,48 @@ SHA `d50c656f671a882244b2688596e85e97d7eb37a5cadaf947802e96dbfcccca48`。
 继续处理需评估候选缺字问题、CRNN置信度，以及主路线先行OK的复核策略。
 本批没有越界修改pipeline或默认配置，未声称已解决这些问题。
 原始评测、训练与隔离证据见工位01的`algorithm/out/receipts/第七批.md`及其batch7目录。
+
+### 第八批：难例原图留出与 CRNN v2
+
+调研依据见 `docs/research/01-整牌识别调研.md`。`prepare_crnn_v2_holdout`
+以 V2 来源 SHA 账本和六份保护清单隔离训练、调参及验证来源；保护原图直接哈希，
+训练池没有重新全量哈希。七个难例子集各留出 300 个原图 SHA，其所有裁片都离开训练；
+每组 fit/report 各 150 原图。v1 已见训练 SHA 也不能入选调参集。
+V2 原 val 中属于 val1000 等保护清单的裁片会被移除。本轮实际保留
+492,840 train、3,957 tune、7,617 val 裁片；数据树只读，输出索引在本工位 out。
+
+```powershell
+$env:PYTHONPATH='algorithm'
+$env:PYTHONUTF8='1'
+.venv\Scripts\python.exe -m lpr_tools.train.prepare_crnn_v2_holdout
+.venv\Scripts\python.exe -m lpr_tools.train.train_crnn_v2 --index-dir algorithm/out/data/batch8 --fonts D:\keshe2\algorithm\data\plates_synth\v2_seed42 --init algorithm/models/crnn_v1.pt --out algorithm/out/train/batch8-v2 --epochs 12 --samples-per-epoch 65536 --batch-size 128 --lr 0.0003 --num-workers 1
+```
+
+准备工具拒绝覆盖已有输出；复现时使用新的 `--out`，训练的 `--index-dir` 同步指向它。
+正式长训练须由后台启动器执行（本次 `algorithm/out/receipts/batch8/run_training.ps1`），
+不能用前台终端是否返回猜测进程状态。主训练 Torch 4 线程，数据 worker 1 线程，
+OpenCV 1 线程。每轮采样难例70%（七类等权）、常规七字12%、真实八字10%、
+字体合成七/八字8%；真实组内部 GT65%/候选35%，组内省份平衡不改变上述份额。
+每轮落盘实际采样计数，增广使用每次抽样位置的确定性种子。
+
+以七组 GT 整牌准确率的最小值优先、均值其次、过滤后 val 总体准确率再次选择最佳轮。
+最少完成6轮后，若任意子集最佳值仍低于90%，且连续3轮没有超过此前最佳值，则止损；
+最多12轮，不依据最终清单加轮次。普通 `--resume` 要求原参数、数据及源码 SHA 一致，
+恢复模型、优化器和 RNG。只保存自有 v1 续训权重，初始化路径与输出路径不能相同。
+
+```powershell
+.venv\Scripts\python.exe -m lpr_tools.train.calibrate_crnn_v2 --index algorithm/out/data/batch8/tune.csv --model algorithm/out/train/batch8-v2/best.pt --out algorithm/out/train/batch8-calibration
+.venv\Scripts\python.exe -m lpr_tools.train.eval_crnn_v2 --index algorithm/out/data/batch8/tune.csv --model algorithm/models/crnn_v2.pt --out algorithm/out/eval/batch8/tune-v2
+```
+
+温度仅拟合 fit 的真实标签 CTC NLL，report 不参与温度拟合。两折都参与轮次选择，
+故 report 仍是开发数据，不能称为盲测。温度是纯 state_dict 中额外的 scalar Tensor
+`ctc_temperature`；旧模型缺省为1，不改变旧预处理或输出。正温度不改变 CTC argmax
+文本，只改变逐字概率。报告按流水线一致口径使用最小字符概率作为整牌置信度，
+给出分档全牌精度、Brier/ECE 与 read 耗时。CTC NLL 优化不保证整牌置信度完美校准，
+需按实测判定，不能把字符正确率代替整牌正确率。
+
+模型和校准冻结后才允许使用 val1000_v1、devhard_v1 做最终 CRNNv1/v2 ×
+first_ok/agree 的固定清单配对比较。CNN v2、corner_net_v1及默认 agree 阈值保持一致；
+此轮不扫阈值。旧 v1/CNN v2 已看过历史开发指标，最终集并非首次盲测。
+最终数据、目标达成情况与命令退出码见 `algorithm/out/receipts/第八批.md`。

@@ -52,14 +52,25 @@ def _greedy_decode(logits: torch.Tensor) -> tuple[str, list[float]]:
     return "".join(chars), confs
 
 
+def plate_tensor(plate_image: np.ndarray) -> torch.Tensor:
+    """Shared training/inference preprocessing, returning 1 x H x W."""
+    gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
+    image = cv2.resize(gray, INPUT_SIZE, interpolation=cv2.INTER_AREA)
+    tensor = torch.from_numpy(np.ascontiguousarray(image)).float().div_(255).sub_(0.5).div_(0.5)
+    return tensor.unsqueeze(0)
+
+
 class CrnnReader:
     """CPU inference for a rectified whole plate; the model is trained from scratch."""
 
     name = "crnn"
 
-    def __init__(self, version: str, model: CrnnNet) -> None:
+    def __init__(self, version: str, model: CrnnNet, *, temperature: float = 1.0) -> None:
+        if not np.isfinite(temperature) or temperature <= 0:
+            raise ValueError("CRNN temperature must be finite and positive")
         self.version = version
         self.model = model.cpu().eval()
+        self.temperature = float(temperature)
 
     @classmethod
     def from_file(cls, path: Path, *, version: str) -> "CrnnReader":
@@ -71,9 +82,13 @@ class CrnnReader:
                 not isinstance(k, str) or not isinstance(v, torch.Tensor) or not torch.isfinite(v).all()
                 for k, v in state.items()):
             raise ValueError("CRNN model must be a finite tensor state_dict")
+        state = dict(state)
+        temperature = state.pop("ctc_temperature", torch.tensor(1.0))
+        if temperature.ndim != 0:
+            raise ValueError("CRNN temperature must be a scalar tensor")
         model = CrnnNet()
         model.load_state_dict(state, strict=True)
-        return cls(version, model)
+        return cls(version, model, temperature=float(temperature.item()))
 
     def read(self, plate_image: np.ndarray) -> tuple[str, list[float]]:
         """BGR plate at 252/276 × 80; reject malformed inputs with the empty result."""
@@ -81,12 +96,11 @@ class CrnnReader:
                 or plate_image.ndim != 3 or plate_image.shape[2] != 3
                 or plate_image.shape[0] != 80 or plate_image.shape[1] not in (252, 276)):
             return "", []
-        gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY)
-        image = cv2.resize(gray, INPUT_SIZE, interpolation=cv2.INTER_AREA)
-        tensor = torch.from_numpy(np.ascontiguousarray(image)).float().div_(255).sub_(0.5).div_(0.5)
+        tensor = plate_tensor(plate_image)
         with torch.inference_mode():
-            logits = self.model(tensor[None, None])[..., :NUM_CLASSES + 1]
+            logits = self.model(tensor[None])[..., :NUM_CLASSES + 1]
+            if self.temperature != 1.0:
+                logits = logits / self.temperature
         if not torch.isfinite(logits).all():
             return "", []
         return _greedy_decode(logits[:, 0])
-
