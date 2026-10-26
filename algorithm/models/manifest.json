@@ -24,5 +24,18 @@
     "val_char_acc": 0.9979585304264325,
     "sha256": "152d9c3e7f3242c31240a73b4533562a3f35bfdb664c5bc19170185eb4bb4943",
     "created_at": "2026-10-26T00:13:57"
+  },
+  "char_cnn_v2.pt": {
+    "name": "char_cnn_v2.pt",
+    "version": "char_cnn_v2",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      32,
+      32
+    ],
+    "train_data": "[{\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\v2\", \"weight\": 1.0, \"class_sample_boosts\": {\"0\": 2.0, \"皖\": 2.0, \"D\": 2.0, \"8\": 2.0, \"7\": 2.0, \"A\": 2.0, \"E\": 2.0}}, {\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\v2_green_train_ft2\", \"weight\": 0.5, \"class_sample_boosts\": {\"0\": 2.0, \"皖\": 2.0, \"D\": 2.0, \"8\": 2.0, \"7\": 2.0, \"A\": 2.0, \"E\": 2.0}}, {\"path\": \"D:\\\\keshe2\\\\algorithm\\\\data\\\\chars\\\\provinces_synth_v0\", \"weight\": 0.05, \"class_sample_boosts\": {\"0\": 2.0, \"皖\": 2.0, \"D\": 2.0, \"8\": 2.0, \"7\": 2.0, \"A\": 2.0, \"E\": 2.0}}]",
+    "val_char_acc": 0.9958321533087888,
+    "sha256": "7d0529621f991607c883e2b79f1d2800805459276f68cb6f393062b4c97d9d2a",
+    "created_at": "2026-10-26T15:10:42"
   }
 }
