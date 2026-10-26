@@ -280,3 +280,78 @@ def test_unknown_candidate_with_repeated_glyphs_remains_white(cfg):
     assert evidence['glyph_count'] >= 5
     assert result.color == 'white' and result.layout == 0
     assert all(r.color == 'white' and r.layout == 0 for r in alternatives)
+
+
+@pytest.mark.parametrize('color,bgr,width', [('blue', (170, 70, 10), 252),
+                                          ('green', (100, 200, 90), 276)])
+def test_network_quad_preserves_perspective_without_better_pixel_evidence(cfg, monkeypatch,
+                                                                     color, bgr, width):
+    image = np.full((180, 300, 3), 60, np.uint8)
+    quad = np.float32([[40, 50], [250, 20], [230, 130], [80, 100]])
+    cv2.fillConvexPoly(image, quad.astype(np.int32), bgr)
+    candidate = PlateCandidate(quad.tolist(), (40, 20, 211, 111), color, .95, 'net')
+
+    result = rectify(image, candidate, cfg.rectify)
+    alternatives = rectify_candidates(image, candidate, cfg.rectify)
+    assert 1 <= len(alternatives) <= 4
+    assert np.array_equal(result.homography, alternatives[0].homography)
+    assert np.array_equal(result.image, alternatives[0].image)
+    assert result.image.shape == (80, width, 3)
+    target = np.float32([[0, 0], [width-1, 0], [width-1, 79], [0, 79]])
+    mapped = cv2.perspectiveTransform(quad[None], result.homography)[0]
+    assert np.allclose(mapped, target, atol=1e-3)
+
+
+def test_network_nonconvex_quad_is_rejected(cfg):
+    image = np.zeros((100, 100, 3), np.uint8)
+    candidate = PlateCandidate([(10, 10), (60, 10), (30, 20), (10, 60)],
+                               (10, 10, 51, 51), 'blue', .9, 'net')
+    with pytest.raises(BadInputError, match='convex'):
+        rectify_candidates(image, candidate, cfg.rectify)
+
+
+def test_network_refinements_keep_direct_first_and_reject_unrelated_quads(cfg, monkeypatch):
+    image = np.full((240, 440, 3), (170, 70, 10), np.uint8)
+    quad = np.float32([[30, 30], [230, 40], [220, 110], [40, 100]])
+    refined = quad + np.float32([3, 2])
+    unrelated = quad + np.float32([170, 100])
+    candidate = PlateCandidate(quad.tolist(), (30, 30, 201, 81), 'unknown', .9, 'net')
+    def proposals(_image, proxy, expand):
+        assert proxy.source == 'color' and expand >= .25
+        return refined, [refined, refined.copy(), unrelated]
+
+    monkeypatch.setattr(rectify_module, '_quad_candidates', proposals)
+    direct = rectify(image, candidate, cfg.rectify)
+    alternatives = rectify_candidates(image, candidate, cfg.rectify)
+    assert len(alternatives) == 2
+    np.testing.assert_array_equal(alternatives[0].homography, direct.homography)
+    assert all(item.candidate is candidate for item in alternatives)
+    destination = np.float32([[0, 0], [251, 0], [251, 79], [0, 79]])
+    np.testing.assert_allclose(cv2.perspectiveTransform(refined[None], alternatives[1].homography)[0],
+                               destination, atol=1e-3)
+
+
+def test_network_pixel_refinement_can_lead_but_retains_exact_network_warp(cfg, monkeypatch):
+    image = np.full((240, 440, 3), (170, 70, 10), np.uint8)
+    quad = np.float32([[30, 30], [230, 40], [220, 110], [40, 100]])
+    refined = quad + np.float32([3, 2])
+    candidate = PlateCandidate(quad.tolist(), (30, 30, 201, 81), 'unknown', .9, 'net')
+    monkeypatch.setattr(rectify_module, '_quad_candidates', lambda *a, **k: (refined, [refined]))
+    original_warp = rectify_module._warp_quad
+
+    def marked_warp(image, cand, points):
+        rect = original_warp(image, cand, points)
+        rect.image = np.full_like(rect.image, 10 if np.allclose(points, refined) else 5)
+        return rect
+
+    monkeypatch.setattr(rectify_module, '_warp_quad', marked_warp)
+    monkeypatch.setattr(rectify_module, '_quad_pixel_quality', lambda image, layout: float(image[0, 0, 0]))
+    monkeypatch.setattr(rectify_module, '_quad_glyph_evidence', lambda image: {'glyph_count': 7})
+    result = rectify(image, candidate, cfg.rectify)
+    alternatives = rectify_candidates(image, candidate, cfg.rectify)
+    assert len(alternatives) == 2
+    np.testing.assert_array_equal(result.homography, alternatives[0].homography)
+    target = np.float32([[0, 0], [251, 0], [251, 79], [0, 79]])
+    np.testing.assert_allclose(cv2.perspectiveTransform(refined[None], alternatives[0].homography)[0], target, atol=1e-3)
+    np.testing.assert_allclose(cv2.perspectiveTransform(quad[None], alternatives[1].homography)[0], target, atol=1e-3)
+    assert all(item.candidate is candidate for item in alternatives)
