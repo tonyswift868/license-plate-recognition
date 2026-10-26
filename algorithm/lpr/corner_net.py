@@ -146,6 +146,88 @@ class CornerModel(nn.Module):
         return absolute_corners-center_corners+.5
 
 
+# Independent keypoint heatmaps; original implementation inspired by dense pose supervision.
+class _KeypointStem(nn.Sequential):
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1) -> None:
+        super().__init__(
+            nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False),
+            nn.GroupNorm(_group_count(out_ch), out_ch),
+            nn.SiLU(inplace=True),
+        )
+
+
+class _KeypointDSBlock(nn.Module):
+    """Depthwise spatial conv followed by pointwise channel mixing."""
+    def __init__(self, in_ch: int, out_ch: int, stride: int) -> None:
+        super().__init__()
+        self.depthwise = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1,
+                      groups=in_ch, bias=False),
+            nn.GroupNorm(_group_count(in_ch), in_ch), nn.SiLU(inplace=True),
+        )
+        self.pointwise = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.GroupNorm(_group_count(out_ch), out_ch), nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.pointwise(self.depthwise(x))
+
+
+class KeypointModel(nn.Module):
+    """Multi-scale one-stage keypoint model; returns [B,5,80,128] logits."""
+    architecture = "keypoint_v3_center_four_independent_heatmaps_pyramid"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = _KeypointStem(3, 32, 2)            # stride 2
+        self.s4 = _KeypointDSBlock(32, 48, 2)                  # stride 4, precise edges
+        self.s8 = _KeypointDSBlock(48, 64, 2)
+        self.s16 = _KeypointDSBlock(64, 96, 2)
+        self.s32 = _KeypointDSBlock(96, 96, 2)
+        self.lateral = nn.ModuleList(nn.Conv2d(ch, 32, 1, bias=False)
+                                     for ch in (48, 64, 96, 96))
+        self.fuse = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1, groups=32, bias=False),
+            nn.GroupNorm(8, 32), nn.SiLU(inplace=True),
+            nn.Conv2d(32, 48, 1, bias=False),
+            nn.GroupNorm(8, 48), nn.SiLU(inplace=True),
+        )
+        self.heatmaps = nn.Conv2d(48, 5, 1)
+        # A mild prior improves early sparse-positive stability.
+        nn.init.constant_(self.heatmaps.bias, -4.0)
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        if image.ndim != 4 or image.shape[1:] != (3, INPUT_SIZE[1], INPUT_SIZE[0]):
+            raise ValueError("expected BGR float tensor [B,3,320,512]")
+        x2 = self.stem(image)
+        x4 = self.s4(x2)
+        x8 = self.s8(x4)
+        x16 = self.s16(x8)
+        x32 = self.s32(x16)
+        levels = (x4, x8, x16, x32)
+        target_size = x4.shape[-2:]
+        # Each deeper context level contributes to the stride-4 representation.
+        fused = sum(torch.nn.functional.interpolate(proj(feature), size=target_size, mode="bilinear",
+                                  align_corners=False)
+                    for proj, feature in zip(self.lateral, levels))
+        return self.heatmaps(self.fuse(fused))
+
+
+def keypoint_coordinates(logits: torch.Tensor, *, temperature: float = .05) -> torch.Tensor:
+    """Spatial expectation for each channel, output normalized canvas xy [B,C,2]."""
+    if logits.ndim != 4 or not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("logits must be [B,C,H,W] and temperature positive")
+    b, c, h, w = logits.shape
+    xs = (torch.arange(w, device=logits.device, dtype=logits.dtype) + .5) / w
+    ys = (torch.arange(h, device=logits.device, dtype=logits.dtype) + .5) / h
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    probs = torch.softmax(logits.flatten(2) / temperature, dim=-1).reshape(b, c, h, w)
+    return torch.stack(((probs * xx).sum(dim=(-2, -1)),
+                        (probs * yy).sum(dim=(-2, -1))), dim=-1)
+
+
+
 @dataclass(frozen=True)
 class LetterboxTransform:
     """Rounding-aware map from source image pixels to a letterbox canvas."""
@@ -413,6 +495,13 @@ class CornerNet:
         try:
             checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
             score_threshold = SCORE_THRESHOLD
+            if isinstance(checkpoint, dict) and checkpoint.get("architecture") == KeypointModel.architecture:
+                if tuple(checkpoint.get("input_size", ())) != INPUT_SIZE:
+                    raise ModelLoadError("keypoint checkpoint input_size mismatch")
+                model = KeypointModel()
+                model.load_state_dict(checkpoint["state_dict"], strict=True)
+                return KeypointNet(version, model,
+                                   score_threshold=checkpoint.get("score_threshold", .05))
             if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
                 if checkpoint.get("architecture") != ARCHITECTURE:
                     raise ModelLoadError("corner checkpoint architecture mismatch")
@@ -488,3 +577,33 @@ class CornerNet:
             if len(selected) >= min(max_candidates, MAX_DETECTIONS):
                 break
         return selected
+
+
+class KeypointNet(CornerNet):
+    """Single-plate center/four-corner heatmaps, with the same detector protocol.
+
+    Independent corner association supports the single-plate CCPD task only.
+    No shared mutable inference state or input enhancement is introduced.
+    """
+
+    def detect(self, image: np.ndarray, max_candidates: int) -> list[PlateCandidate]:
+        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.size == 0
+                or image.ndim != 3 or image.shape[2] != 3
+                or isinstance(max_candidates, bool) or not isinstance(max_candidates, int)
+                or max_candidates <= 0):
+            return []
+        canvas, transform = letterbox_image(image)
+        tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy()).unsqueeze(0).float().div_(255.)
+        with torch.inference_mode():
+            logits = self.model(tensor)
+            if not torch.isfinite(logits).all():
+                return []
+            scores = torch.sigmoid(logits[0]).flatten(1).max(dim=1).values
+            center_score = float(scores[0])
+            if center_score < self.score_threshold:
+                return []
+            normalized = keypoint_coordinates(logits[:, 1:5])[0].cpu().numpy()
+            score = center_score * float(scores[1:5].prod().pow(.25))
+        # Coordinates are in the full letterbox canvas, never in a predicted bbox.
+        candidate = _candidate_from_peak(image, score, normalized, transform)
+        return [candidate] if candidate is not None else []

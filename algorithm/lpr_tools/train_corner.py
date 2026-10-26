@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from lpr.corner_net import (  # noqa: E402
     ARCHITECTURE, INPUT_SIZE, OUTPUT_STRIDE, CornerModel, letterbox_image,
-    CornerNet, RoiConfidenceModel, RoiCornerRefiner, pack_corner_roi_checkpoint,
+    KeypointModel, keypoint_coordinates, CornerNet, RoiConfidenceModel, RoiCornerRefiner, pack_corner_roi_checkpoint,
 )
 from lpr.io_utils import imread  # noqa: E402
 
@@ -2004,6 +2004,341 @@ def average_coarse_checkpoints(checkpoints: list[Path], output: Path) -> Path:
 
 
 
+
+def make_keypoint_targets(quads_xy_norm: torch.Tensor, has_plate: torch.Tensor, *,
+                 sigma_cells: float = 1.25) -> torch.Tensor:
+    """Build Gaussian targets [B,5,H/4,W/4]; quads are normalized canvas xy.
+
+    Args: quads [B,4,2] ordered LT,RT,RB,LB; has_plate [B] bool/0-1.
+    The center target is the mean of the four corners. No-plate rows remain 0.
+    """
+    if quads_xy_norm.ndim != 3 or quads_xy_norm.shape[1:] != (4, 2):
+        raise ValueError("quads_xy_norm must have shape [B,4,2]")
+    if has_plate.numel() != quads_xy_norm.shape[0]:
+        raise ValueError("has_plate length must match batch")
+    if not torch.isfinite(quads_xy_norm).all() or not math.isfinite(sigma_cells) or sigma_cells <= 0:
+        raise ValueError("targets and sigma must be finite; sigma must be positive")
+    b = quads_xy_norm.shape[0]
+    gh, gw = INPUT_SIZE[1] // OUTPUT_STRIDE, INPUT_SIZE[0] // OUTPUT_STRIDE
+    dtype, device = quads_xy_norm.dtype, quads_xy_norm.device
+    xs = (torch.arange(gw, device=device, dtype=dtype) + .5) / gw
+    ys = (torch.arange(gh, device=device, dtype=dtype) + .5) / gh
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    grid = torch.stack((xx, yy), dim=-1)  # [H,W,2], normalized cell centers
+    points = torch.cat((quads_xy_norm.mean(dim=1, keepdim=True), quads_xy_norm), dim=1)
+    targets = torch.zeros((b, 5, gh, gw), device=device, dtype=dtype)
+    valid = has_plate.to(device=device).reshape(b).bool()
+    if valid.any():
+        delta = (grid[None, None] - points[valid, :, None, None, :])
+        delta_cells = delta * torch.tensor([gw, gh], device=device, dtype=dtype)
+        positive_maps = torch.exp(-delta_cells.square().sum(dim=-1) /
+                                  (2 * sigma_cells * sigma_cells))
+        # Preserve a unit-valued discrete positive for focal-loss normalization.
+        # Cell centers are (i + .5)/size; floor(q*size) chooses the nearest
+        # center, whereas round(q*size) shifts non-grid-aligned points by half
+        # a cell when q*size is already in the upper half of its cell.
+        nearest_x = torch.clamp((points[valid, :, 0] * gw).floor().long(), 0, gw - 1)
+        nearest_y = torch.clamp((points[valid, :, 1] * gh).floor().long(), 0, gh - 1)
+        # Set each map's nearest cell explicitly; avoid assuming the GT lies on
+        # the stride grid. Advanced indexing is clear and works for any batch.
+        batch_ids = torch.arange(int(valid.sum()), device=device)[:, None]
+        channel_ids = torch.arange(5, device=device)[None, :]
+        positive_maps[batch_ids, channel_ids, nearest_y, nearest_x] = 1.
+        targets[valid] = positive_maps
+    return targets
+
+
+def keypoint_loss(logits: torch.Tensor, targets: torch.Tensor,
+                  quads_xy_norm: torch.Tensor, has_plate: torch.Tensor,
+                  *, coordinate_weight: float = 4.) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Heatmap supervision plus soft-argmax coordinates on positive images."""
+    hm = _focal_heatmap_loss(logits, targets)
+    positive = has_plate.to(device=logits.device).reshape(-1).bool()
+    if positive.any():
+        predicted = keypoint_coordinates(logits[positive, 1:5])
+        coord = F.smooth_l1_loss(predicted, quads_xy_norm[positive].to(logits), beta=.01)
+    else:
+        coord = logits.sum() * 0.
+    total = hm + coordinate_weight * coord
+    return total, {"heatmap": hm.detach(), "softargmax_xy": coord.detach()}
+
+def _keypoint_safe_inputs(data_dir: Path) -> tuple[list[dict], list[dict], list[dict], dict]:
+    CSV_PATHS = {
+        "safe_train": data_dir / "safe_train.csv",
+        "safe_val": data_dir / "safe_val.csv",
+        "np_train_safe": data_dir / "np_train_safe.csv",
+        "np_val_safe": data_dir / "np_val_safe.csv",
+        "hard_pool_train": data_dir / "hard_pool_train.csv",
+        "hard_tuning_holdout": data_dir / "hard_tuning_holdout.csv",
+    }
+    AUDIT_PATH = data_dir / "hard_pool_audit.json"
+    MANIFEST_PATHS = {
+        "frozen": FROZEN_MANIFEST,
+        "golden": GOLDEN_MANIFEST,
+        "devhard": DATA_ROOT / "index" / "devhard_v1.csv",
+        "undecodable": UNDECODABLE_MANIFEST,
+    }
+    missing = [str(p) for p in [*CSV_PATHS.values(), AUDIT_PATH, *MANIFEST_PATHS.values()]
+               if not p.is_file()]
+    if missing:
+        raise FileNotFoundError("missing audited eighth-batch inputs: " + ", ".join(missing))
+    train_positive, np_train, pool_audit = _read_safe_pools(
+        CSV_PATHS["safe_train"], CSV_PATHS["np_train_safe"],
+        CSV_PATHS["safe_val"], CSV_PATHS["np_val_safe"],
+        limit_train=12_000, seed=42,
+        hard_train_csv=CSV_PATHS["hard_pool_train"],
+        hard_val_csv=CSV_PATHS["hard_tuning_holdout"],
+        hard_per_subset=1_200, np_audit_path=AUDIT_PATH, hash_threads=4,
+    )
+    # _read_safe_pools performed path/content exclusion and provenance checks.
+    # Read validation metadata only for overlap proof/report; never decode its pixels.
+    val_positive = read_rows(CSV_PATHS["safe_val"], "val", "1")
+    np_val = read_rows(CSV_PATHS["np_val_safe"], "val", "0")
+    hard_val = read_rows(CSV_PATHS["hard_tuning_holdout"], "val", "1")
+    train_rows = train_positive + np_train
+    audited_hard_train = int(pool_audit.get("hard_pool", {}).get("selected_train_rows", 0))
+    if len(train_positive) - audited_hard_train != 12_000:
+        raise ValueError("audited base/green positive selection is not exactly 12,000 rows")
+    if len(np_train) != 2_400 or audited_hard_train > 7 * 1_200:
+        raise ValueError("audited NP or hard train selection exceeds the requested pool sizes")
+    train_keys = {_path_key(row["path"]) for row in train_rows}
+    val_keys = {_path_key(row["path"])
+                for row in val_positive + np_val + hard_val}
+    if train_keys & val_keys:
+        raise ValueError("training and validation/holdout paths intersect")
+    source_hashes = {name: _file_sha256(path) for name, path in CSV_PATHS.items()}
+    source_hashes["hard_pool_audit"] = _file_sha256(AUDIT_PATH)
+    source_hashes.update({f"manifest_{name}": _file_sha256(path)
+                          for name, path in MANIFEST_PATHS.items()})
+    selected_keys = sorted(train_keys)
+    pool_audit = {
+        **pool_audit,
+        "input_sha256": source_hashes,
+        "source_sha256": {
+            "corner_net_py": _file_sha256(ROOT / "lpr" / "corner_net.py"),
+            "train_corner_py": _file_sha256(Path(__file__)),
+        },
+        "selected_train_path_membership_sha256": hashlib.sha256(
+            "\n".join(selected_keys).encode("utf-8")).hexdigest(),
+        "selected_train_rows": len(train_rows),
+        "selected_positive_rows": len(train_positive),
+        "selected_np_negative_rows": len(np_train),
+        "validation_rows_read_as_metadata_only": len(val_positive) + len(np_val) + len(hard_val),
+        "devhard_decoded_trained_or_inferred": False,
+        "devhard_content_bytes_hashed_for_exclusion": True,
+    }
+    return train_rows, val_positive + np_val + hard_val, train_positive, pool_audit
+
+
+def _save_keypoint_checkpoint(path: Path, model: KeypointModel, optimizer: torch.optim.Optimizer,
+                     *, step: int, round_number: int, initial_state_sha256: str,
+                     data_audit_sha256: str, history: list[dict],
+                     exposure_counters: dict) -> None:
+    payload = {
+        "architecture": KeypointModel.architecture,
+        "input_size": list(INPUT_SIZE), "stride": OUTPUT_STRIDE,
+        "state_dict": model.state_dict(), "optimizer": optimizer.state_dict(),
+        "step": step, "round": round_number,
+        "initial_state_sha256": initial_state_sha256,
+        "data_audit_sha256": data_audit_sha256, "history": history,
+        "exposure_counters": exposure_counters,
+        "python_rng": random.getstate(), "numpy_rng": np.random.get_state(),
+        "torch_rng": torch.get_rng_state(), "saved_at": time.time(),
+    }
+    temp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temp)
+    temp.replace(path)
+
+
+def _save_keypoint_weights(path: Path, model: KeypointModel) -> None:
+    """Write only primitive metadata and model tensors for safe inference loading."""
+    payload = {"architecture": KeypointModel.architecture,
+               "input_size": list(INPUT_SIZE),
+               "state_dict": model.state_dict(), "score_threshold": .05}
+    temp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temp)
+    temp.replace(path)
+
+
+def train_keypoint_model(*, data_dir: Path, run_dir: Path, steps: int = 2000,
+                         round_number: int = 1, resume: Path | None = None,
+                         audit_only: bool = False) -> None:
+    """Bounded two-round from-scratch training with four-manifest byte exclusion.
+
+    Checkpoints with optimizer/RNG are trusted local training artifacts; deploy
+    files contain only tensors and primitive metadata and use weights_only=True.
+    """
+    if round_number not in (1, 2):
+        raise ValueError("round_number must be 1 or 2")
+    args = argparse.Namespace(run_dir=Path(run_dir), resume=resume, round=round_number,
+                              steps=steps, run=not audit_only)
+    if not 1 <= args.steps <= 2000:
+        raise ValueError("--steps must be between 1 and 2000")
+    if (args.round == 1) != (args.resume is None):
+        raise ValueError("round 1 starts fresh; round 2 requires --resume")
+
+    if args.run and args.resume is None and (args.run_dir / "initial-random-state.pt").exists():
+        raise ValueError("fresh keypoint run already exists; choose a new run directory")
+    torch.set_num_threads(4)
+    cv2.setNumThreads(1)
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+    train_rows, validation_rows, _, pool_audit = _keypoint_safe_inputs(Path(data_dir))
+    data_audit_sha256 = hashlib.sha256(json.dumps(
+        pool_audit, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    audit_output = {
+        "architecture": KeypointModel.architecture,
+        "input_size_wh": list(INPUT_SIZE), "stride": OUTPUT_STRIDE,
+        "seed": 42, "threads": 4, "batch_size": 8,
+        "round": args.round, "round_lr": .001 if args.round == 1 else .0003,
+        "requested_steps": args.steps, "data_audit_sha256": data_audit_sha256,
+        "base_green_positive_limit": 12_000, "hard_per_subset": 1_200,
+        "np_negative_limit": 2_400, "hard_subset_cap_rows": 8_400,
+        "pool_audit": pool_audit,
+        "training_started": False,
+    }
+    if not args.run:
+        args.run_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = args.run_dir / "data-audit-only.json"
+        audit_path.write_text(json.dumps(audit_output, indent=2, ensure_ascii=False),
+                              encoding="utf-8")
+        audit_output["audit_output_path"] = str(audit_path)
+        print(json.dumps(audit_output, indent=2, ensure_ascii=False))
+        return
+
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    audit_output["training_started"] = True
+    audit_file = args.run_dir / "data-audit.json"
+    audit_file.write_text(json.dumps(audit_output, indent=2, ensure_ascii=False), encoding="utf-8")
+    model = KeypointModel()
+    initial_state_path = args.run_dir / "initial-random-state.pt"
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.001 if args.round == 1 else .0003)
+    start_step, history, initial_state_sha = 0, [], ""
+    exposure_counters = {"total_image_exposures": 0, "positive_exposures": 0,
+                         "np_negative_exposures": 0, "synthetic_background_exposures": 0,
+                         "subset_exposures": {}}
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if (checkpoint.get("architecture") != KeypointModel.architecture
+                or tuple(checkpoint.get("input_size", ())) != INPUT_SIZE
+                or checkpoint.get("round") not in (1, 2)
+                or checkpoint.get("data_audit_sha256") != data_audit_sha256):
+            raise ValueError("resume checkpoint architecture, round, step, or data audit mismatch")
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        for group in optimizer.param_groups:
+            group["lr"] = .0003
+        start_step = int(checkpoint["step"])
+        previous_round = int(checkpoint["round"])
+        if (args.round == 2 and ((previous_round == 1 and start_step != 2000)
+                                 or (previous_round == 2 and not 2000 <= start_step < 4000))
+                or args.round == 1):
+            raise ValueError("round 2 must continue from step 2000 or a partial round-2 checkpoint")
+        if start_step >= 4000:
+            raise ValueError("checkpoint already reached the 4000-step global cap")
+        history = list(checkpoint["history"])
+        exposure_counters = checkpoint.get("exposure_counters", exposure_counters)
+        initial_state_sha = checkpoint["initial_state_sha256"]
+        random.setstate(checkpoint["python_rng"])
+        np.random.set_state(checkpoint["numpy_rng"])
+        torch.set_rng_state(checkpoint["torch_rng"])
+        if not initial_state_path.is_file() or _file_sha256(initial_state_path) != initial_state_sha:
+            raise ValueError("initial random state file missing or changed")
+    else:
+        torch.save({"state_dict": model.state_dict(), "architecture": KeypointModel.architecture,
+                    "input_size": list(INPUT_SIZE)}, initial_state_path)
+        initial_state_sha = _file_sha256(initial_state_path)
+
+    end_step = start_step + args.steps
+    round_limit = 2000 if args.round == 1 else 4000
+    if end_step > round_limit or end_step > 4000:
+        raise ValueError(f"requested steps exceed round/global budget (end={end_step})")
+    dataset = CornerDataset(train_rows, training=True, epoch=0, negatives=True)
+    batch_count = (len(dataset) + 7) // 8
+    if batch_count <= 0:
+        raise ValueError("audited training pool is empty")
+    log_path = args.run_dir / "training-log.jsonl"
+    model.train()
+    step = start_step
+    first_epoch = start_step // batch_count
+    last_epoch = (end_step - 1) // batch_count
+    for epoch_index in range(first_epoch, last_epoch + 1):
+        dataset.set_epoch(epoch_index)
+        # Re-seed each epoch from its index so a resumed run reconstructs the
+        # same shuffled sample order without saving a DataLoader iterator.
+        loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=0,
+                            generator=torch.Generator().manual_seed(42 + epoch_index),
+                            drop_last=False)
+        skip_batches = start_step % batch_count if epoch_index == first_epoch else 0
+        for images, quads, labels, meta in loader:
+            if skip_batches:
+                skip_batches -= 1
+                continue
+            if step >= end_step:
+                break
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(images)
+            targets = make_keypoint_targets(quads.reshape(-1, 4, 2), labels)
+            loss, pieces = keypoint_loss(logits, targets, quads.reshape(-1, 4, 2), labels)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"non-finite loss at step {step}")
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.)
+            optimizer.step()
+            step += 1
+            batch_counts = {"total_image_exposures": len(images), "positive_exposures": 0,
+                            "np_negative_exposures": 0, "synthetic_background_exposures": 0,
+                            "subset_exposures": {}}
+            for subset, synthetic, label in zip(meta["subset"], meta["synthetic_background"],
+                                                labels.tolist()):
+                subset = str(subset)
+                synthetic = bool(synthetic)
+                batch_counts["subset_exposures"][subset] = (
+                    batch_counts["subset_exposures"].get(subset, 0) + 1)
+                if label >= .5:
+                    batch_counts["positive_exposures"] += 1
+                elif subset == "ccpd_np" and not synthetic:
+                    batch_counts["np_negative_exposures"] += 1
+                if synthetic:
+                    batch_counts["synthetic_background_exposures"] += 1
+            for key in ("total_image_exposures", "positive_exposures", "np_negative_exposures",
+                        "synthetic_background_exposures"):
+                exposure_counters[key] += batch_counts[key]
+            for subset, count in batch_counts["subset_exposures"].items():
+                exposure_counters["subset_exposures"][subset] = (
+                    exposure_counters["subset_exposures"].get(subset, 0) + count)
+            if step % 100 == 0 or step == end_step:
+                # This is a post-augmentation brightness proxy, not a label of
+                # which stochastic exposure branch the dataset sampler chose.
+                means = images.mean(dim=(1, 2, 3))
+                record = {
+                    "step": step, "loss": float(loss.detach()),
+                    "loss_heatmap": float(pieces["heatmap"]),
+                    "loss_softargmax_xy": float(pieces["softargmax_xy"]),
+                    "batch_exposures": batch_counts,
+                    "cumulative_exposures": json.loads(json.dumps(exposure_counters)),
+                    "dark_mean_proxy_count": int((means < .22).sum()),
+                    "bright_mean_proxy_count": int((means > .70).sum()),
+                    "round_lr": optimizer.param_groups[0]["lr"],
+                }
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if step % 500 == 0 or step == end_step:
+                _save_keypoint_checkpoint(args.run_dir / f"checkpoint-step-{step}.pt", model, optimizer,
+                                 step=step, round_number=args.round,
+                                 initial_state_sha256=initial_state_sha,
+                                 data_audit_sha256=data_audit_sha256, history=history,
+                                 exposure_counters=exposure_counters)
+                _save_keypoint_weights(args.run_dir / f"keypoint-deploy-step-{step}.pt", model)
+    print(json.dumps({"training_started": True, "step": step, "round": args.round,
+                      "data_audit_sha256": data_audit_sha256,
+                      "checkpoint": str(args.run_dir / f"checkpoint-step-{step}.pt")},
+                     ensure_ascii=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-data", action="store_true",
@@ -2041,7 +2376,7 @@ def main() -> None:
     parser.add_argument("--max-steps-this-run", type=int, default=0)
     parser.add_argument("--run-name", default="main")
     parser.add_argument("--limit-val", type=int, default=0)
-    parser.add_argument("--stage", choices=("roi-regression", "roi-confidence", "package", "average-coarse"),
+    parser.add_argument("--stage", choices=("roi-regression", "roi-confidence", "package", "average-coarse", "keypoint"),
                         help="run an explicit ROI/package/checkpoint-average stage instead of CornerNet training")
     parser.add_argument("--roi-output", type=Path,
                         help="output checkpoint path for an ROI, package, or average-coarse stage")
@@ -2059,7 +2394,23 @@ def main() -> None:
     parser.add_argument("--roi-strong-augmentation", action="store_true",
                         help="resume full ROI confidence state with aug500 geometry/exposure schedule")
     parser.add_argument("--roi-confidence-threshold", type=float, default=.8)
+    parser.add_argument("--keypoint-data-dir", type=Path,
+                        help="audited pool directory containing safe_train, safe_val and hard/NP CSVs")
+    parser.add_argument("--keypoint-round", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--keypoint-resume", type=Path)
+    parser.add_argument("--keypoint-audit-only", action="store_true")
     args = parser.parse_args()
+    if args.stage == "keypoint":
+        if args.keypoint_data_dir is None or args.prepare_data or args.verify_np_images:
+            parser.error("keypoint requires --keypoint-data-dir and cannot prepare data")
+        try:
+            train_keypoint_model(data_dir=args.keypoint_data_dir, run_dir=Path(args.out_dir),
+                                 steps=args.max_steps_this_run or 2000,
+                                 round_number=args.keypoint_round, resume=args.keypoint_resume,
+                                 audit_only=args.keypoint_audit_only)
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.error(str(exc))
+        return
     if args.stage:
         if args.prepare_data or args.verify_np_images:
             parser.error("ROI stages cannot be combined with --prepare-data/--verify-np-images")

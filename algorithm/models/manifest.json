@@ -76,5 +76,18 @@
     "val_char_acc": 0.971612285382037,
     "sha256": "d50c656f671a882244b2688596e85e97d7eb37a5cadaf947802e96dbfcccca48",
     "created_at": "2026-10-26T21:15:17"
+  },
+  "corner_net_v3.pt": {
+    "name": "corner_net_v3.pt",
+    "version": "corner_net_v3",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      512,
+      320
+    ],
+    "train_data": "{\"architecture\": \"keypoint_v3_center_four_independent_heatmaps_pyramid\", \"initialization\": \"random; no v1/v2 or external weights\", \"four_manifest_exclusion\": \"normalized paths and image SHA256, including devhard_v1\", \"data_audit_sha256\": \"4f15bc6b28f5df967e27dbfb3f2982969f8ff901b156a58d57819895c6b9d632\", \"positive_pool\": 20400, \"np_pool\": 2400, \"background_negative_pool\": 20400, \"selection\": {\"step\": 4000, \"checkpoint\": \"algorithm/out/ninth/keypoint-run/keypoint-deploy-step-4000.pt\", \"checkpoint_sha256\": \"1c4770e29fe8fc8881c8df65732c75bb1faf1d58b3061610688dd608eaf7da35\", \"db_hits\": 260, \"db_n\": 300, \"dark_hits\": 45, \"dark_n\": 53, \"tilt_hits\": 289, \"tilt_n\": 300, \"primary_score\": 0.9420289855072463, \"strict_iou_hits_sum\": 433, \"candidates\": [{\"step\": 2000, \"checkpoint\": \"algorithm/out/ninth/keypoint-run/keypoint-deploy-step-2000.pt\", \"checkpoint_sha256\": \"5111e42961eeb85bd39aaecc2b71b609bfaf0837f26ba60717ee011cea860ec9\", \"db_hits\": 255, \"db_n\": 300, \"dark_hits\": 44, \"dark_n\": 53, \"tilt_hits\": 283, \"tilt_n\": 300, \"primary_score\": 0.9224318658280922, \"strict_iou_hits_sum\": 404}, {\"step\": 4000, \"checkpoint\": \"algorithm/out/ninth/keypoint-run/keypoint-deploy-step-4000.pt\", \"checkpoint_sha256\": \"1c4770e29fe8fc8881c8df65732c75bb1faf1d58b3061610688dd608eaf7da35\", \"db_hits\": 260, \"db_n\": 300, \"dark_hits\": 45, \"dark_n\": 53, \"tilt_hits\": 289, \"tilt_n\": 300, \"primary_score\": 0.9420289855072463, \"strict_iou_hits_sum\": 433}], \"selection_rule_sha256\": \"ec497fa7e86a355971947793e1cee365806eba71722bb5fd566157eee75783ec\", \"timestamp_utc\": \"2026-10-26T15:46:54.012792+00:00\", \"frozen_before_fixed_devhard\": true, \"frozen_before_v3_val_np_g1\": true, \"postfreeze_no_retuning\": true}, \"status\": \"experimental; default model unchanged\", \"single_plate_per_image\": true}",
+    "val_char_acc": null,
+    "sha256": "1c4770e29fe8fc8881c8df65732c75bb1faf1d58b3061610688dd608eaf7da35",
+    "created_at": "2026-10-27T00:47:01"
   }
 }
