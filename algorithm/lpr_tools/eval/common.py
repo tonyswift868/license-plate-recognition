@@ -20,19 +20,24 @@ class AttributedPlateRecognizer(PlateRecognizer):
     def __init__(self, recognizer):
         super().__init__(recognizer.config, recognizer.classifier,
                          corner_detector=recognizer.corner_detector,
-                         plate_reader=recognizer.plate_reader)
+                         plate_reader=recognizer.plate_reader,
+                         box_reader=recognizer.box_reader)
         self.last_selection = None
         self.reader_invoked_calls = 0
         self.corner_invoked_calls = 0
+        self.box_reader_invoked_calls = 0
         if self.plate_reader is not None:
             self.plate_reader = _CountingModel(self.plate_reader, "read", self, "reader_invoked_calls")
         if self.corner_detector is not None:
             self.corner_detector = _CountingModel(self.corner_detector, "detect", self, "corner_invoked_calls")
+        if self.box_reader is not None:
+            self.box_reader = _CountingModel(self.box_reader, "read", self, "box_reader_invoked_calls")
 
     def _reset_observation(self):
         self.last_selection = None
         self.reader_invoked_calls = 0
         self.corner_invoked_calls = 0
+        self.box_reader_invoked_calls = 0
 
     def _recognize_safe(self, image, lane_id, debug):
         self._reset_observation()
@@ -46,7 +51,9 @@ class AttributedPlateRecognizer(PlateRecognizer):
         result = super()._build(attempt, dbg)
         self.last_selection = {
             "source": attempt.rect.candidate.source,
-            "crnn_selected": attempt.seg is None,
+            # B keeps the original crop on the attempt and has no segmented chars;
+            # preserve the historical fallback for attempts predating plate_image.
+            "crnn_selected": attempt.seg is None and getattr(attempt, "plate_image", None) is None,
         }
         return result
 
@@ -115,10 +122,19 @@ def model_identity(cfg, field):
             "sha256": digest, "version": version}
 
 
+def _selected_config_path(config_arg=None):
+    chosen = config_arg or os.environ.get("LPR_CONFIG")
+    if not chosen:
+        return (ALGORITHM_DIR / "config" / "default.toml").resolve()
+    path = Path(chosen)
+    # Mirror load_config's special fallback for algorithm-relative config/ paths.
+    if not path.is_absolute() and path.parts[:1] == ("config",) and not path.exists():
+        path = ALGORITHM_DIR / path
+    return path.resolve()
+
+
 def effective_config_info(cfg, config_arg=None):
-    env = os.environ.get("LPR_CONFIG")
-    chosen = config_arg or env
-    config_path = str(Path(chosen).resolve()) if chosen else str((ALGORITHM_DIR / "config" / "default.toml").resolve())
+    config_path = str(_selected_config_path(config_arg))
     dumped = cfg.model_dump(mode="json")
     canonical = json.dumps(dumped, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {"config_path": config_path,
@@ -126,7 +142,8 @@ def effective_config_info(cfg, config_arg=None):
             "effective_config": dumped,
             "models": {"classifier": model_identity(cfg, "model_path"),
                        "corner": model_identity(cfg, "corner_model_path"),
-                       "plate_reader": model_identity(cfg, "plate_reader_model_path")}}
+                       "plate_reader": model_identity(cfg, "plate_reader_model_path"),
+                       "box_reader": model_identity(cfg, "box_reader_model_path")}}
 
 
 def make_recognizer(args, *, samples_dir=None, cfg=None):
@@ -172,6 +189,7 @@ def runtime_info(cfg=None) -> dict:
     import torch
     cfg = cfg or load_config()
     torch.set_num_threads(cfg.runtime.torch_threads)
+    cv2.setNumThreads(1)
     cpu = platform.processor() or platform.machine()
     if platform.system() == "Windows":
         try:

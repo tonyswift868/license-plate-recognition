@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 
 from .charset import PROVINCES
 from .errors import ConfigError
@@ -35,6 +35,7 @@ class RuntimeConfig(_Section):
     max_candidates: int
     corner_model_path: str                               # 空字符串 = 不启用四角点网络
     plate_reader_model_path: str                         # 空字符串 = 不启用整牌识别
+    box_reader_model_path: str                           # 空字符串 = 不启用原框整牌识别
 
 
 class PreprocessConfig(_Section):
@@ -114,12 +115,19 @@ class PostprocessConfig(_Section):
     min_confidence: float
     topk: int
     province_prior: dict[str, float]
-    arbitration: Literal["first_ok", "agree"]            # agree：分割路线与整牌识别读法一致才自动通过（须启用 CRNN）
+    arbitration: Literal["first_ok", "agree", "three_route"]
     agree_min_confidence: float                          # agree：两边置信度的较小值 ≥ 此值才算一致通过
     solo_min_confidence_segment: float                   # agree：读法不一致或缺一边时，单边自动通过门槛；>1 = 关闭
     solo_min_confidence_reader: float
     disagree_prefer: Literal["segment", "reader"]        # agree：不一致且都未单边通过时返回哪一边的读法
-    nonok_fallback: Literal["rank", "agreement_then_reader"]  # agree：没有任何结果自动通过时返回哪个读法
+    nonok_fallback: Literal["rank", "agreement_then_reader", "predicted_tilt_then_corrected"]
+    three_route_agree_min_confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    three_route_box_solo_min_confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    three_route_legacy_sr_agreement: StrictBool
+    three_route_segment_solo: StrictBool
+    three_route_reader_solo: StrictBool
+    three_route_province_support_min_routes: Literal[0, 2]
+    fallback_predicted_tilt_min_deg: float = Field(ge=0, le=180, allow_inf_nan=False)
 
     @field_validator("province_prior")
     @classmethod
@@ -207,8 +215,13 @@ def load_config(path: str | os.PathLike[str] | None = None, **overrides: Any) ->
     """
     raw = _read_toml(DEFAULT_CONFIG_PATH)
     chosen = path or os.environ.get(ENV_CONFIG)
-    if chosen and Path(chosen).resolve() != DEFAULT_CONFIG_PATH:
-        raw = _deep_merge(raw, _read_toml(Path(chosen)))
+    if chosen:
+        selected = Path(chosen)
+        # The public recognizer also accepts algorithm-relative config/ paths.
+        if not selected.is_absolute() and selected.parts[:1] == ("config",) and not selected.exists():
+            selected = ALGORITHM_DIR / selected
+        if selected.resolve() != DEFAULT_CONFIG_PATH:
+            raw = _deep_merge(raw, _read_toml(selected))
     raw = _apply_overrides(raw, overrides)
     try:
         return LprConfig.model_validate(raw)

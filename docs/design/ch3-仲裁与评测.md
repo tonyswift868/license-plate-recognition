@@ -76,3 +76,35 @@ G2的clear样本中，base的120张从其官方val一次性留出并固定到共
 主组合非皖自动精度低于99%；fit未触发省份门禁，不据hold/full追加。按派工组成折算，主组合清晰99.48%、夜间96.08%、倾斜97.40%、污损99.33%；对照分别98.68%、92.16%、86.83%、99.33%。这些仅为开发集折算。
 
 逐图期望及省份/错误分桶明细保存在第十三批报告附件；本章只保留足以说明组合差异、子组风险与G2口径的汇总。架构实现应按逐图压缩JSONL及其哈希、数据分半身份、权重哈希和执行代码版本复核。
+
+## 3.6 流水线实现（第十四批）
+
+三路已作为显式配置分支接入 `PlateRecognizer`。启动时按配置加载字符分类器、检测器、校正整牌读牌器和可选框读模型；版本字符串追加框读权重版本。默认配置仍为 `agree`，框读路径为空，新增键不改变旧行为。`config/three_route_v2.toml` 为验收用覆盖文件，模型路径和阈值全部从配置读取，便于后续替换模型。
+
+每帧先预处理与传统定位，再将网络候选合并为有序候选。每候选用官方 `crop_box` 读取一次原框，pad从框读权重的 `box_pad` 读取，结果在该候选各校正视图间复用。逐视图完成S/R后，按S/R、S/B、R/B配对及S/R单路门槛调用无图像依赖的纯函数；所有视图后才考察B单路。首次自动通过立即返回，后续候选不再推理。未自动通过时，采集的读法交纯函数执行A/M/L、T20_A和业务状态投影。输入错误、异常兜底与原状态码保持；路由和候选/视图索引仅作为结果对象的验收诊断属性，不修改原公开JSON字段。
+
+| 配置键 | 默认值 | 验收配置值 |
+|---|---|---|
+| runtime.box_reader_model_path | 空 | models/box_reader_v2.pt |
+| runtime.corner_model_path（已有） | models/corner_net_v1.pt | models/plate_det_v1.pt |
+| postprocess.arbitration（已有） | agree | three_route |
+| three_route_agree_min_confidence | 1.0（未启用） | 0.7329292297363281 |
+| three_route_box_solo_min_confidence | 1.0（未启用） | 0.9414944052696228 |
+| three_route_legacy_sr_agreement | false | false |
+| three_route_segment_solo / three_route_reader_solo | false / false | true / true |
+| three_route_province_support_min_routes | 0 | 0 |
+| nonok_fallback（已有） | agreement_then_reader | predicted_tilt_then_corrected |
+| fallback_predicted_tilt_min_deg | 0.0（未启用） | 20.0 |
+
+表中未带段名的键均属于postprocess；两条旧solo阈值仍复用已有键，旧agree阈值仅供L复放。置信度比较不加容差、不截断浮点；T20_A仅看候选0预测四角点，缺失/非有限角度走M。
+
+本批真实流水线按val1000后devhard2100顺序，与第十三批冻结期望逐张核对3100张，status、plate、route及候选/视图索引差异0，confidence绝对误差不超过1e-7。默认配置改动前后各跑同一val1000，status、plate和confidence零容差比较差异0。新配置金样例为19/20；这些属于本批实装复核，不改变第十三批自动精度99.5%门槛未完全达成的事实。
+
+G1使用冻结320路径清单的同序纯路径副本，不读真值；1280×720等比补边，预热5次、按原顺序循环计时100次，Torch2/OpenCV1。只计recognize墙钟，图片读取和补边不计。
+
+| 配置 | 总P50 ms | 总P95 ms | 最大 ms | 框读P50/P95 ms |
+|---|---:|---:|---:|---:|
+| three_route_v2 | 64.37 | 80.46 | 117.37 | 4.45 / 6.83 |
+| 默认agree | 42.92 | 63.82 | 120.06 | 未调用 |
+
+两配置P95均低于G1的300ms目标；这是本机本次100调用结果，不能外推所有子组时延。完整分阶段P50/P95、资源与逐张记录见第十四批回执。G2仅备好一次性入口及清晰/夜间/倾斜/污损汇总，以3张非测试集图片冒烟；正式冻结集准确率未运行，须等省份模型配置确认和架构师通知。

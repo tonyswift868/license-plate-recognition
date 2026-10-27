@@ -9,6 +9,7 @@ classifier = "cnn"                        # cnn | template | svm（对比实验�
 max_candidates = 3
 corner_model_path = "models/corner_net_v1.pt"  # 四角点网络（K1 Plan B-1），空 = 不启用；相对 algorithm/ 目录（10-26 启用）
 plate_reader_model_path = "models/crnn_v2.pt"  # 整牌识别 CRNN（K1 Plan B-2），空 = 不启用；相对 algorithm/ 目录（10-27 启用 v2）
+box_reader_model_path = ""                # 空 = 不启用；保持默认双路线
 
 [preprocess]
 min_side = 120
@@ -60,6 +61,13 @@ solo_min_confidence_segment = 0.938401460647583   # 单边通过门槛；>1 = �
 solo_min_confidence_reader = 0.9818063974380493
 disagree_prefer = "segment"
 nonok_fallback = "agreement_then_reader"  # 没有结果自动通过时：同块两路线同文优先，否则取置信度最高的 CRNN 读法（03 第十批）
+three_route_agree_min_confidence = 1.0    # 以下新键仅 arbitration=three_route 时生效
+three_route_box_solo_min_confidence = 1.0
+three_route_legacy_sr_agreement = false
+three_route_segment_solo = false
+three_route_reader_solo = false
+three_route_province_support_min_routes = 0
+fallback_predicted_tilt_min_deg = 0.0
 
 [voting]
 min_frames = 2

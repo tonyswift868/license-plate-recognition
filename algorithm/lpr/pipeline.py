@@ -23,8 +23,9 @@ from .locate import locate
 from .plate_rules import match_layout, vehicle_type_hint
 from .postprocess import decode
 from .preprocess import preprocess
-from .recognize import load_classifier, load_corner_detector, load_plate_reader
-from .recognize.base import CharClassifier, CornerDetector, PlateReader
+from .recognize import load_box_reader, load_classifier, load_corner_detector, load_plate_reader
+from .recognize.base import BoxReader, CharClassifier, CornerDetector, PlateReader
+from .boxcrop import crop_box
 from .rectify import rectify
 from .segment import segment
 
@@ -47,6 +48,8 @@ class _Attempt:
     dec: DecodeResult
     rect: RectifiedPlate
     seg: SegmentResult | None                            # 整牌识别（CRNN）的结果没有分割
+    plate_image: np.ndarray | None = None                 # route B 保留官方原框裁片
+    color: str | None = None
 
 
 class _StageTimer:
@@ -142,6 +145,14 @@ def _decode_text(text: str, confs: Sequence[float], color: PlateColor,
                         candidates=[(text, conf)], vehicle_type_hint=vehicle_type_hint(color, name))
 
 
+def _route_trace_attempt(attempt: _Attempt | None) -> dict | None:
+    if attempt is None:
+        return None
+    return {"status": attempt.dec.status.value, "plate": attempt.dec.plate_no,
+            "confidence": attempt.dec.confidence,
+            "valid": attempt.dec.status in (S.OK, S.LOW_CONFIDENCE)}
+
+
 def _rank(dec: DecodeResult) -> tuple[int, float]:
     return _STATUS_RANK.get(dec.status, 0), float(dec.confidence)
 
@@ -206,11 +217,13 @@ class PlateRecognizer:
 
     def __init__(self, config: LprConfig, classifier: CharClassifier, *,
                  corner_detector: CornerDetector | None = None,
-                 plate_reader: PlateReader | None = None) -> None:
+                 plate_reader: PlateReader | None = None,
+                 box_reader: BoxReader | None = None) -> None:
         self.config = config
         self.classifier = classifier
         self.corner_detector = corner_detector           # 可选：四角点网络（K1 Plan B-1）
         self.plate_reader = plate_reader                 # 可选：整牌识别 CRNN（K1 Plan B-2）
+        self.box_reader = box_reader                     # 可选：原框整牌识别（three_route）
 
     @classmethod
     def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> "PlateRecognizer":
@@ -225,13 +238,14 @@ class PlateRecognizer:
         classifier = load_classifier(rt.classifier, cfg.resolve_path(rt.model_path))
         corner = load_corner_detector(cfg.resolve_path(rt.corner_model_path)) if rt.corner_model_path else None
         reader = load_plate_reader(cfg.resolve_path(rt.plate_reader_model_path)) if rt.plate_reader_model_path else None
-        return cls(cfg, classifier, corner_detector=corner, plate_reader=reader)
+        box_reader = load_box_reader(cfg.resolve_path(rt.box_reader_model_path)) if rt.box_reader_model_path else None
+        return cls(cfg, classifier, corner_detector=corner, plate_reader=reader, box_reader=box_reader)
 
     @property
     def version(self) -> str:
         """例如 "lpr-1.0.0+char_cnn_v1"，启用网络时追加其版本，写入日志与结果。"""
         parts = [self.classifier.version]
-        parts += [m.version for m in (self.corner_detector, self.plate_reader) if m is not None]
+        parts += [m.version for m in (self.corner_detector, self.plate_reader, self.box_reader) if m is not None]
         return f"lpr-{__version__}+" + "+".join(parts)
 
     def warmup(self) -> None:
@@ -345,6 +359,11 @@ class PlateRecognizer:
         if not candidates:
             return failure_result(S.NO_PLATE)
 
+        # Isolate the new policy: legacy first_ok and agree retain their original
+        # control flow and early-return behavior.
+        if cfg.postprocess.arbitration == "three_route":
+            return self._run_three_route(image, lane_id, timer, dbg, candidates)
+
         best: _Attempt | None = None
         agree = cfg.postprocess.arbitration == "agree" and self.plate_reader is not None
         pairs: list[tuple[_Attempt | None, _Attempt | None]] = []   # agree：每块校正图两路线的结果，供回退选读法
@@ -407,6 +426,176 @@ class PlateRecognizer:
             return self._build(best, dbg)
         return failure_result(S.SEG_FAILED)
 
+    def _run_three_route(self, image: np.ndarray, lane_id: int | None, timer: _StageTimer,
+                         dbg: dict[str, np.ndarray] | None,
+                         candidates: list[PlateCandidate]) -> RecognitionResult:
+        """Three-route streaming decision; model reads stop at the first automatic OK."""
+        from . import arbitration
+
+        cfg = self.config
+        pp = cfg.postprocess
+        records: list[dict] = []
+        segment_attempts: dict[tuple[int, int], _Attempt | None] = {}
+        reader_attempts: dict[tuple[int, int], _Attempt | None] = {}
+        box_attempts: dict[int, _Attempt | None] = {}
+        rects_by_candidate: dict[int, list[RectifiedPlate]] = {}
+        lead_rect_color: str | None = None
+        stop_auto_search = False
+
+        for ci, cand in enumerate(candidates[:cfg.runtime.max_candidates]):
+            with timer("rectify"):
+                rects = _rectifications(image, cand, cfg.rectify)
+            rects_by_candidate[ci] = rects
+            if ci == 0:
+                lead_rect_color = rects[0].color if rects else None
+            if dbg is not None and rects:
+                dbg[f"plate_{ci}"] = rects[0].image
+
+            # Lazily compute B once, then reuse it across every rect for this candidate.
+            box_att: _Attempt | None = None
+            if self.box_reader is not None:
+                with timer("box_crop"):
+                    native_crop = crop_box(image, cand.bbox, *self.box_reader.box_pad)
+                with timer("box_reader"):
+                    text, confs = self.box_reader.read(native_crop)
+                box_dec = _decode_text(text, confs, cand.color, pp.min_confidence)
+                if box_dec is not None:
+                    box_source = (rects[0] if rects else
+                                  RectifiedPlate(native_crop, box_dec.layout, cand.color, np.eye(3), cand))
+                    box_att = _Attempt(box_dec, box_source, None, native_crop, cand.color)
+                else:
+                    box_att = None
+            box_attempts[ci] = box_att
+            box_trace = _route_trace_attempt(box_att)
+
+            candidate_records: list[dict] = []
+            for ri, rect in enumerate(rects):
+                seg_best: _Attempt | None = None
+                for layout in _layouts_to_try(rect):
+                    with timer("segment"):
+                        seg = segment(rect, layout, cfg.segment)
+                    if not seg.ok:
+                        continue
+                    with timer("recognize"):
+                        probs = self.classifier.predict_proba(seg.chars)
+                    with timer("postprocess"):
+                        dec = decode(probs, seg.layout, rect.color, pp)
+                    attempt = _Attempt(dec, rect, seg)
+                    if seg_best is None or _rank(dec) > _rank(seg_best.dec):
+                        seg_best = attempt
+                    if dec.status == S.OK:
+                        break
+
+                rd_att: _Attempt | None = None
+                if self.plate_reader is not None:
+                    with timer("reader"):
+                        text, confs = self.plate_reader.read(rect.image)
+                    rd_dec = _decode_text(text, confs, rect.color, pp.min_confidence)
+                    if rd_dec is not None:
+                        rd_att = _Attempt(rd_dec, rect, None)
+                segment_attempts[(ci, ri)] = seg_best
+                reader_attempts[(ci, ri)] = rd_att
+                record = {
+                    "candidate_index": ci, "rect_index": ri,
+                    "segment": _route_trace_attempt(seg_best),
+                    "reader": _route_trace_attempt(rd_att),
+                    "box": box_trace, "color": rect.color,
+                }
+                candidate_records.append(record)
+                records.append(record)
+                auto = (arbitration.try_auto_candidate(ci, candidate_records, box_trace, pp)
+                        if not stop_auto_search else None)
+                if auto is not None:
+                    if auto.status != S.OK or auto.plate is None:
+                        stop_auto_search = True       # p2 rejects later auto results, but keep collecting fallback inputs.
+                    else:
+                        chosen = self._three_route_attempt(auto, segment_attempts, reader_attempts,
+                                                           box_attempts, rects_by_candidate)
+                        chosen.dec = replace(chosen.dec, status=S.OK, confidence=float(auto.confidence))
+                        result = self._build(chosen, dbg)
+                        result.route = auto.route
+                        result.candidate_index = auto.candidate_index
+                        result.rect_index = auto.rect_index
+                        return result
+
+            if not stop_auto_search:
+                auto = arbitration.try_auto_candidate(ci, candidate_records, box_trace, pp,
+                                                      candidate_complete=True)
+                if auto is not None:
+                    if auto.status == S.OK and auto.plate is not None:
+                        chosen = self._three_route_attempt(auto, segment_attempts, reader_attempts,
+                                                           box_attempts, rects_by_candidate)
+                        chosen.dec = replace(chosen.dec, status=S.OK, confidence=float(auto.confidence))
+                        result = self._build(chosen, dbg)
+                        result.route = auto.route
+                        result.candidate_index = auto.candidate_index
+                        result.rect_index = auto.rect_index
+                        return result
+                    stop_auto_search = True
+
+        # Terminal fallback uses the same pure policy used by trace replay.
+        trace = {"rects": records, "boxes": {str(i): _route_trace_attempt(a)
+                    for i, a in box_attempts.items()},
+                 "candidates": [{"corners": list(c.corners)} for c in candidates],
+                 "candidate_count": min(len(candidates), cfg.runtime.max_candidates),
+                 "corners_by_candidate": {str(i): list(c.corners) for i, c in enumerate(candidates)}}
+        decision = arbitration.arbitrate(trace, pp, predicted_corners=(candidates[0].corners if candidates else None),
+                                         runtime=True)
+        if decision is not None and decision.status == S.OK and decision.plate is not None:
+            chosen = self._three_route_attempt(decision, segment_attempts, reader_attempts,
+                                               box_attempts, rects_by_candidate)
+            chosen.dec = replace(chosen.dec, status=S.OK, confidence=float(decision.confidence))
+            result = self._build(chosen, dbg)
+            result.route = decision.route
+            result.candidate_index = decision.candidate_index
+            result.rect_index = decision.rect_index
+            return result
+
+        if decision is not None and decision.status == S.LOW_CONFIDENCE and decision.plate is not None:
+            chosen = self._three_route_attempt(decision, segment_attempts, reader_attempts,
+                                               box_attempts, rects_by_candidate)
+            chosen.dec = replace(chosen.dec, status=S.LOW_CONFIDENCE,
+                                 confidence=float(decision.confidence), plate_no=decision.plate)
+            result = self._build(chosen, dbg)
+            result.route = decision.route
+            result.candidate_index = decision.candidate_index
+            result.rect_index = decision.rect_index
+            return result
+
+        if decision is not None and decision.status == S.INVALID_FORMAT and decision.plate is not None:
+            chosen = self._three_route_attempt(decision, segment_attempts, reader_attempts,
+                                               box_attempts, rects_by_candidate)
+            result = self._build(chosen, dbg)
+            result.route = decision.route
+            result.candidate_index = decision.candidate_index
+            result.rect_index = decision.rect_index
+            return result
+
+        if decision is not None and decision.status == S.UNSUPPORTED:
+            return failure_result(S.UNSUPPORTED)
+
+        if lead_rect_color in _SPECIAL_COLORS:
+            return failure_result(S.UNSUPPORTED)
+        # Preserve the old S/R INVALID_FORMAT result when no valid manual choice exists.
+        invalid = [a for a in (*segment_attempts.values(), *reader_attempts.values())
+                   if a is not None and a.dec.status == S.INVALID_FORMAT]
+        if invalid:
+            pick = max(invalid, key=lambda a: _rank(a.dec))
+            return self._build(pick, dbg)
+        return failure_result(S.SEG_FAILED)
+
+    @staticmethod
+    def _three_route_attempt(decision, segments, readers, boxes, rects_by_candidate) -> _Attempt:
+        ci, ri, route = decision.candidate_index, decision.rect_index, decision.route
+        if route == "segment":
+            return segments[(ci, ri)]
+        if route == "reader":
+            return readers[(ci, ri)]
+        if route == "box":
+            return boxes[ci]
+        # Defensive fallback: malformed pure-function output is caught by the safe wrapper.
+        raise ValueError(f"未知三路路线：{route}")
+
     @staticmethod
     def _build(a: _Attempt, dbg: dict[str, np.ndarray] | None) -> RecognitionResult:
         d, cand = a.dec, a.rect.candidate
@@ -417,14 +606,14 @@ class PlateRecognizer:
             error_code=ERROR_CODES[d.status],
             message=DEFAULT_MESSAGES[d.status],
             plate_no=d.plate_no,
-            plate_color=a.rect.color,
+            plate_color=a.color or a.rect.color,
             layout=d.layout,
             confidence=float(d.confidence),
             char_confidences=[float(c) for c in d.char_confidences],
             candidates=[(p, float(s)) for p, s in d.candidates],
             bbox=cand.bbox,
             corners=list(cand.corners),
-            plate_image=a.rect.image,
+            plate_image=a.plate_image if a.plate_image is not None else a.rect.image,
             elapsed_ms=0.0,
             stage_ms={},
             vehicle_type_hint=d.vehicle_type_hint,

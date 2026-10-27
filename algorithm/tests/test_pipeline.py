@@ -205,10 +205,10 @@ class _FakeReader:
         return self.text, list(self.confs)
 
 
-def _recognizer_with(cfg, **nets):
+def _recognizer_with(cfg, box_reader=None, **nets):
     from lpr.testing import UniformClassifier
 
-    return pl.PlateRecognizer(cfg, UniformClassifier(), **nets)
+    return pl.PlateRecognizer(cfg, UniformClassifier(), box_reader=box_reader, **nets)
 
 
 def test_corner_candidates_go_first_and_dedupe(cfg, stages):
