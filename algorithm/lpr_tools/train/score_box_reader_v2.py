@@ -4,6 +4,13 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
+import os
+
+# Keep helper-library temporary files in the explicitly authorized office.
+_RUNTIME_TMP = Path(__file__).resolve().parents[3] / "algorithm/out/tmp/batch11-runtime"
+_RUNTIME_TMP.mkdir(parents=True, exist_ok=True)
+os.environ["TEMP"] = os.environ["TMP"] = str(_RUNTIME_TMP)
+
 import cv2
 import torch
 from torch.utils.data import DataLoader
