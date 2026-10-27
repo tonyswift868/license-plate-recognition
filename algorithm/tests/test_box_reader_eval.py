@@ -11,6 +11,7 @@ from lpr_tools.train.eval_box_reader import (
     bbox_from_quad,
     choose_highest_legal,
     measured_box_deltas,
+    summarize_read_timings,
     _read_csv,
 )
 
@@ -48,6 +49,20 @@ def test_highest_legal_reader_uses_minimum_character_confidence():
         ("皖B23456", [0.98, 0.97, 0.91, 0.99, 0.95, 0.96, 0.94]),
     ]
     assert choose_highest_legal(values) == ("皖B23456", 0.91)
+
+
+def test_read_timing_summary_uses_nearest_rank_and_keeps_all_calls():
+    timings = [
+        {"stage": "tune_gt_bbox", "elapsed_ms": value}
+        for value in (1.0, 2.0, 3.0, 4.0, 11.0)
+    ]
+    result = summarize_read_timings(timings)
+    assert result["read_calls"] == 5
+    assert result["p95_ms"] == 11.0  # nearest-rank ceil(.95 * 5)
+    assert result["over_10ms"] == 1
+    assert result["by_stage"]["tune_gt_bbox"]["read_calls"] == 5
+    assert result["diagnostic_after_first_5"]["read_calls"] == 0
+    assert result["diagnostic_exclusion"] == "exclude_first_5_applies_only_to_diagnostic"
 
 
 def test_safe_tune_csv_requires_fixed_groups_and_disjoint_folds(tmp_path):

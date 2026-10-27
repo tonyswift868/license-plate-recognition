@@ -15,6 +15,7 @@ import os
 import random
 import statistics
 import time
+from datetime import datetime, timezone
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -33,6 +34,47 @@ CEILING_REPORT = Path(r"D:\keshe2\algorithm\out\tmp_arch\ceiling_v2\report.json"
 MODEL = ALGORITHM / "models" / "box_reader_v1.pt"
 JITTER_SOURCE = ROOT / "algorithm" / "out" / "receipts" / "batch9" / "geometry" / "train_per_image.jsonl"
 TUNE_SUBSETS = {"db", "blur", "tilt", "rotate", "fn", "challenge", "weather"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def summarize_read_timings(records: list[dict[str, Any]], *, threads: int | None = None
+                           ) -> dict[str, Any]:
+    """Summarize every timed read; nearest-rank P95 includes cold calls."""
+    def summary(values: list[float]) -> dict[str, Any]:
+        ordered = sorted(values)
+        if not ordered:
+            return {"read_calls": 0, "mean_ms": None, "p95_ms": None,
+                    "p95_method": "nearest_rank", "max_ms": None, "over_10ms": 0}
+        return {"read_calls": len(ordered), "mean_ms": statistics.fmean(ordered),
+                "p95_ms": ordered[math.ceil(.95 * len(ordered)) - 1],
+                "p95_method": "nearest_rank", "max_ms": ordered[-1],
+                "over_10ms": sum(value > 10 for value in ordered)}
+
+    all_values = [float(row["elapsed_ms"]) for row in records]
+    result = summary(all_values)
+    result["by_stage"] = {stage: summary([float(row["elapsed_ms"]) for row in records
+                                         if row["stage"] == stage])
+                          for stage in sorted({row["stage"] for row in records})}
+    result["diagnostic_first_5"] = summary(all_values[:5])
+    result["diagnostic_after_first_5"] = summary(all_values[5:])
+    result["diagnostic_exclusion"] = "exclude_first_5_applies_only_to_diagnostic"
+    if threads is not None:
+        result["torch_threads"] = threads
+    return result
+
+
+def _record_timing(timing: list[dict[str, Any]], stage: str, path: str,
+                   candidate_rank: int | None, started_ns: int) -> None:
+    timing.append({"call_index": len(timing), "stage": stage, "path": path,
+                   "candidate_rank": candidate_rank,
+                   "elapsed_ms": (time.perf_counter_ns() - started_ns) / 1e6})
 
 
 def legal_prediction(text: str, confidences: Iterable[float]) -> tuple[str, float] | None:
@@ -141,7 +183,7 @@ def _jitter_delta(subset: str, rng: random.Random,
 def _read_tune(reader, rows: list[dict[str, str]], source: Path,
                pad: tuple[float, float], seed: int,
                jitter_samples: dict[str, list[tuple[float, float, float, float]]],
-               timing: list[float]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+               timing: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from lpr.boxcrop import crop_box
     from lpr.io_utils import imread
 
@@ -152,15 +194,15 @@ def _read_tune(reader, rows: list[dict[str, str]], source: Path,
         image = imread(image_path)
         gt = bbox_from_quad(raw["quad"])
         for mode, bbox, output in (
-                ("gt_bbox", gt, gt_records),
-                ("measured_jitter", apply_box_jitter(gt, _jitter_delta(raw["subset"], rng, jitter_samples)), jitter_records)):
+                ("tune_gt_bbox", gt, gt_records),
+                ("tune_measured_jitter", apply_box_jitter(gt, _jitter_delta(raw["subset"], rng, jitter_samples)), jitter_records)):
             crop = crop_box(image, bbox, *pad)
             if crop.size == 0:
                 prediction = None
             else:
                 started = time.perf_counter_ns()
                 text, confs = reader.read(crop)
-                timing.append((time.perf_counter_ns() - started) / 1e6)
+                _record_timing(timing, mode, raw["path"], None, started)
                 prediction = legal_prediction(text, confs)
             output.append({"path": raw["path"], "subset": raw["subset"],
                            "brightness": int(raw["brightness"]) if raw["brightness"].isdigit() else None,
@@ -186,7 +228,8 @@ def _fixed_rows(index_path: Path, manifest_path: Path, purpose: str) -> list[dic
 
 
 def _read_actual(reader, image_rows: list[dict[str, Any]], cfg, corner_detector,
-                 pad: tuple[float, float], timing: list[float]) -> list[dict[str, Any]]:
+                 pad: tuple[float, float], timing: list[dict[str, Any]],
+                 split: str) -> list[dict[str, Any]]:
     from lpr.boxcrop import crop_box
     from lpr.io_utils import imread
     from lpr.locate import locate
@@ -208,7 +251,7 @@ def _read_actual(reader, image_rows: list[dict[str, Any]], cfg, corner_detector,
                 continue
             started = time.perf_counter_ns()
             text, confs = reader.read(crop)
-            timing.append((time.perf_counter_ns() - started) / 1e6)
+            _record_timing(timing, f"actual_{split}", row["path"], rank, started)
             legal = legal_prediction(text, confs)
             if legal is not None:
                 reads.append({"rank": rank, "text": legal[0], "confidence": legal[1]})
@@ -220,6 +263,11 @@ def _read_actual(reader, image_rows: list[dict[str, Any]], cfg, corner_detector,
                         "selected_rank": selected["rank"] if selected else None,
                         "confidence": selected["confidence"] if selected else None,
                         "correct": bool(selected and selected["text"] == row["label"])})
+        done = len(records)
+        if done % 250 == 0 or done == len(image_rows):
+            print(json.dumps({"progress": f"actual_{split}", "images_processed": done,
+                              "image_total": len(image_rows), "read_calls_so_far": len(timing)},
+                             ensure_ascii=False), flush=True)
     return records
 
 
@@ -253,7 +301,7 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
     if len(pad) != 2 or min(pad) < 0:
         raise ValueError("model box_pad must be a pair of nonnegative values")
 
-    timings: list[float] = []
+    timings: list[dict[str, Any]] = []
     tune = _read_csv(tune_csv)
     jitter_samples = measured_box_deltas(jitter_path)
     tune_gt, tune_jitter = _read_tune(reader, tune, tune_csv, pad, seed, jitter_samples, timings)
@@ -272,17 +320,13 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
         for split, manifest, purpose in (("val", val_manifest, "val"),
                                          ("devhard", dev_manifest, "dev-hard")):
             rows = _fixed_rows(index_path, manifest, purpose)
-            records = _read_actual(reader, rows, cfg, corner_detector, pad, timings)
+            records = _read_actual(reader, rows, cfg, corner_detector, pad, timings, split)
             actual_traces.extend((split, record) for record in records)
             result["actual"][split] = {
                 group: _actual_group_summary(items, ceiling_path, split, group)
                 for group, items in _groups(records).items()}
-    if timings:
-        ordered = sorted(timings)
-        result["timing"] = {"read_calls": len(ordered), "mean_ms": statistics.fmean(ordered),
-                            "p95_ms": ordered[min(len(ordered)-1, math.ceil(.95*len(ordered))-1)],
-                            "max_ms": ordered[-1], "over_10ms": sum(value > 10 for value in ordered),
-                            "torch_threads": torch.get_num_threads()}
+    result["timing"] = summarize_read_timings(timings, threads=torch.get_num_threads())
+    result["timing"]["all_calls_elapsed_ms"] = [row["elapsed_ms"] for row in timings]
     output.parent.mkdir(parents=True, exist_ok=True)
     trace = output.with_suffix(".jsonl")
     records = [("tune/gt_bbox", tune_gt), ("tune/measured_jitter", tune_jitter)]
@@ -293,6 +337,33 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
         for split, item in actual_traces:
             stream.write(json.dumps({"evaluation": f"actual/{split}", **item}, ensure_ascii=False) + "\n")
     result["records_jsonl"] = str(trace.resolve())
+    timing_csv = output.with_name(output.stem + ".read_timing.csv")
+    with timing_csv.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("call_index", "stage", "path", "candidate_rank", "elapsed_ms"))
+        writer.writeheader()
+        writer.writerows(timings)
+    result["timing"]["calls_csv"] = str(timing_csv.resolve())
+    config_source = config_path or (Path(os.environ["LPR_CONFIG"]) if os.environ.get("LPR_CONFIG") else None)
+    config_digest = hashlib.sha256(json.dumps(cfg.model_dump(mode="json"), sort_keys=True,
+                                               separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    provenance_files = {
+        "model": model_path, "corner_model": corner_path,
+        "tune_csv": tune_csv, "jitter_source": jitter_path,
+        "index": index_path, "val_manifest": val_manifest,
+        "dev_manifest": dev_manifest, "ceiling_report": ceiling_path,
+        "eval_source": Path(__file__).resolve(),
+        "box_reader_source": ALGORITHM / "lpr" / "recognize" / "box_reader.py",
+        "pipeline_source": ALGORITHM / "lpr" / "pipeline.py",
+        "boxcrop_source": ALGORITHM / "lpr" / "boxcrop.py",
+        "corner_source": ALGORITHM / "lpr" / "corner_net.py",
+    }
+    result["provenance"] = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "config_path": str(config_source.resolve()) if config_source else None,
+        "config_sha256": config_digest,
+        "files": {name: {"path": str(path.resolve()), "sha256": _sha256_file(path)}
+                  for name, path in provenance_files.items() if path.is_file()},
+    }
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
