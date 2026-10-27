@@ -23,6 +23,9 @@ ARCH = "mobilenet_v3_small_stem_hattn_bigru96_ctc_v1"
 class BoxNet(nn.Module):
     """Keep 20 width positions and learn which feature rows contain each character."""
 
+    architecture = ARCH
+    input_size = INPUT_SIZE
+
     def __init__(self, *, imagenet: bool = False) -> None:
         super().__init__()
         from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
@@ -48,9 +51,9 @@ class BoxNet(nn.Module):
         return self.classifier(sequence)
 
 
-def box_tensor(image: np.ndarray) -> torch.Tensor:
+def box_tensor(image: np.ndarray, input_size: tuple[int, int] = INPUT_SIZE) -> torch.Tensor:
     """The same BGR->RGB resize and ImageNet normalization in training and inference."""
-    rgb = cv2.cvtColor(cv2.resize(image, INPUT_SIZE, interpolation=cv2.INTER_AREA),
+    rgb = cv2.cvtColor(cv2.resize(image, input_size, interpolation=cv2.INTER_AREA),
                        cv2.COLOR_BGR2RGB)
     tensor = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1))).float().div_(255.)
     return tensor.sub_(torch.tensor((.485, .456, .406))[:, None, None]).div_(
@@ -59,10 +62,30 @@ def box_tensor(image: np.ndarray) -> torch.Tensor:
 
 def checkpoint(model: BoxNet, *, temperature: float = 1.,
                box_pad: tuple[float, float] = BOX_PAD) -> dict:
-    return {"architecture": ARCH, "charset_sha": CHARSET_SHA,
-            "input_size": list(INPUT_SIZE), "box_pad": list(box_pad),
+    return {"architecture": model.architecture, "charset_sha": CHARSET_SHA,
+            "input_size": list(model.input_size), "box_pad": list(box_pad),
             "temperature": float(temperature),
             "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}}
+
+
+def model_from_checkpoint(saved: dict) -> nn.Module:
+    """Construct only registered architectures; no pretrained downloads on load."""
+    from .box_reader_v2 import ARCH_V2, INPUT_SIZE_V2, BoxNetV2
+    constructors = {ARCH: (BoxNet, INPUT_SIZE), ARCH_V2: (BoxNetV2, INPUT_SIZE_V2)}
+    if (not isinstance(saved, dict) or saved.get("architecture") not in constructors
+            or saved.get("charset_sha") != CHARSET_SHA):
+        raise ValueError("unsupported box reader checkpoint")
+    constructor, input_size = constructors[saved["architecture"]]
+    if saved.get("input_size") != list(input_size):
+        raise ValueError("unsupported box reader checkpoint input_size")
+    state = saved.get("state_dict")
+    if not isinstance(state, dict) or not state or any(
+            not isinstance(k, str) or not isinstance(v, torch.Tensor)
+            or not torch.isfinite(v).all() for k, v in state.items()):
+        raise ValueError("box reader state_dict must contain finite tensors")
+    model = constructor()
+    model.load_state_dict(state, strict=True)
+    return model
 
 
 class BoxPlateReader:
@@ -78,6 +101,7 @@ class BoxPlateReader:
             raise ValueError("box_pad must contain two finite ratios in [0, 1]")
         self.version = version
         self.model = model.cpu().eval()
+        self.input_size = tuple(model.input_size)
         self.temperature = float(temperature)
         self.box_pad = tuple(float(v) for v in box_pad)
 
@@ -85,21 +109,11 @@ class BoxPlateReader:
     def from_file(cls, path: Path, *, version: str) -> "BoxPlateReader":
         from . import read_manifest
 
-        entry = read_manifest(Path(path).parent).get(Path(path).name)
-        if entry is not None and entry.get("input_size") != list(INPUT_SIZE):
-            raise ValueError("box reader manifest input_size mismatch")
         saved = torch.load(path, map_location="cpu", weights_only=True)
-        if (not isinstance(saved, dict) or saved.get("architecture") != ARCH
-                or saved.get("charset_sha") != CHARSET_SHA
-                or saved.get("input_size") != list(INPUT_SIZE)):
-            raise ValueError("unsupported box reader checkpoint")
-        state = saved.get("state_dict")
-        if not isinstance(state, dict) or not state or any(
-                not isinstance(k, str) or not isinstance(v, torch.Tensor)
-                or not torch.isfinite(v).all() for k, v in state.items()):
-            raise ValueError("box reader state_dict must contain finite tensors")
-        model = BoxNet()
-        model.load_state_dict(state, strict=True)
+        model = model_from_checkpoint(saved)
+        entry = read_manifest(Path(path).parent).get(Path(path).name)
+        if entry is not None and entry.get("input_size") != list(model.input_size):
+            raise ValueError("box reader manifest input_size mismatch")
         return cls(version, model, temperature=saved["temperature"], box_pad=saved["box_pad"])
 
     def read(self, plate_image: np.ndarray) -> tuple[str, list[float]]:
@@ -107,7 +121,7 @@ class BoxPlateReader:
                 or plate_image.ndim != 3 or plate_image.shape[2] != 3
                 or min(plate_image.shape[:2]) <= 0):
             return "", []
-        tensor = box_tensor(plate_image)
+        tensor = box_tensor(plate_image, self.input_size)
         with torch.inference_mode():
             logits = self.model(tensor[None]) / self.temperature
             if not torch.isfinite(logits).all():

@@ -114,17 +114,19 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         if not reader.fieldnames or not required.issubset(reader.fieldnames):
             raise ValueError(f"{path} must contain {sorted(required)}")
         rows = list(reader)
-    if len(rows) != 2100:
-        raise ValueError(f"safe tune index must contain 2,100 origins; got {len(rows)}")
+    is_v2_tune = len(rows) == 2400
+    if len(rows) not in {2100, 2400}:
+        raise ValueError(f"safe tune index must contain 2,100 or 2,400 origins; got {len(rows)}")
     short_names = TUNE_SUBSETS
     folds, paths, hashes, subsets = defaultdict(int), set(), set(), defaultdict(int)
     from lpr.plate_rules import match_layout
 
     for row in rows:
-        if row["subset"] in short_names:
+        if row["subset"] in short_names | {"green"}:
             row["subset"] = "ccpd_" + row["subset"]
         subset = row["subset"].removeprefix("ccpd_")
-        if subset not in TUNE_SUBSETS:
+        allowed_subsets = TUNE_SUBSETS | ({"green"} if is_v2_tune else set())
+        if subset not in allowed_subsets:
             raise ValueError(f"unexpected safe tune subset: {row['subset']!r}")
         fold = row["calibration_fold"]
         if fold not in {"fit", "report"}:
@@ -140,6 +142,8 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
             raise ValueError("safe tune calibration fold must be fit or report")
         if match_layout(row["label"]) is None:
             raise ValueError(f"invalid safe tune plate label: {row['label']!r}")
+        if is_v2_tune and ((subset == "green") != (len(row["label"]) == 8)):
+            raise ValueError("safe green tune rows must be 8-character plates; hard rows must be 7-character plates")
         bbox_from_quad(row["quad"])
         try:
             int(row["brightness"])
@@ -149,10 +153,19 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         hashes.add(digest)
         folds[fold] += 1
         subsets[subset] += 1
-    if folds != {"fit": 1050, "report": 1050}:
-        raise ValueError(f"safe tune must contain 1,050 origins per fold; got {dict(folds)}")
-    if subsets != {name: 300 for name in TUNE_SUBSETS}:
-        raise ValueError(f"safe tune must contain 300 origins per hard subset; got {dict(subsets)}")
+    fold_size = 1200 if is_v2_tune else 1050
+    if folds != {"fit": fold_size, "report": fold_size}:
+        raise ValueError(f"safe tune must contain {fold_size:,} origins per fold; got {dict(folds)}")
+    expected_subsets = {name: 300 for name in TUNE_SUBSETS} | ({"green": 300} if is_v2_tune else {})
+    if subsets != expected_subsets:
+        raise ValueError(f"safe tune must contain 300 origins per hard/green subset; got {dict(subsets)}")
+    for fold in ("fit", "report"):
+        fold_counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            if row["calibration_fold"] == fold:
+                fold_counts[row["subset"].removeprefix("ccpd_")] += 1
+        if fold_counts != {name: 150 for name in expected_subsets}:
+            raise ValueError(f"safe tune {fold} fold must have 150 rows per group; got {dict(fold_counts)}")
     return rows
 
 
@@ -160,8 +173,12 @@ def _groups(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped["all"].append(row)
+        label = row.get("truth", row.get("label", ""))
+        grouped[f"all_{len(label)}char"].append(row)
         grouped[row["subset"]].append(row)
-        if row["subset"] == "ccpd_db" and row["brightness"] is not None and row["brightness"] <= 19:
+        if row["subset"] == "ccpd_green" and len(label) == 8:
+            grouped["ccpd_green_8char"].append(row)
+        if row["subset"] == "ccpd_db" and row.get("brightness") is not None and row["brightness"] <= 19:
             grouped["ccpd_db_brightness_le_19"].append(row)
         if row["subset"] in {"ccpd_tilt", "ccpd_rotate"}:
             grouped["ccpd_tilt_plus_rotate"].append(row)
@@ -199,15 +216,23 @@ def _read_tune(reader, rows: list[dict[str, str]], source: Path,
             crop = crop_box(image, bbox, *pad)
             if crop.size == 0:
                 prediction = None
+                raw_text, raw_confidences = "", []
             else:
                 started = time.perf_counter_ns()
                 text, confs = reader.read(crop)
                 _record_timing(timing, mode, raw["path"], None, started)
+                raw_text = str(text)
+                raw_confidences = [float(value) for value in confs]
                 prediction = legal_prediction(text, confs)
             output.append({"path": raw["path"], "subset": raw["subset"],
                            "brightness": int(raw["brightness"]) if raw["brightness"].isdigit() else None,
                            "truth": raw["label"], "prediction": prediction[0] if prediction else "",
                            "confidence": prediction[1] if prediction else None,
+                           "raw_prediction": raw_text,
+                           "raw_char_confidences": raw_confidences,
+                           "legal": prediction is not None,
+                           "rejection_reason": None if prediction is not None else
+                               ("empty_crop" if not crop.size else "illegal_layout_or_confidence"),
                            "correct": bool(prediction and prediction[0] == raw["label"])})
     return gt_records, jitter_records
 
@@ -245,20 +270,33 @@ def _read_actual(reader, image_rows: list[dict[str, Any]], cfg, corner_detector,
                if _in_roi(candidate, cfg.lane_roi(None))]
         candidates = _merge_candidates(net, classic, 3)[:3]
         reads = []
+        candidate_reads = []
         for rank, candidate in enumerate(candidates):
             crop = crop_box(image, candidate.bbox, *pad)
             if crop.size == 0:
+                candidate_reads.append({"rank": rank, "bbox": list(candidate.bbox),
+                                        "raw_prediction": "", "raw_char_confidences": [],
+                                        "legal": False, "confidence": None,
+                                        "rejection_reason": "empty_crop"})
                 continue
             started = time.perf_counter_ns()
             text, confs = reader.read(crop)
             _record_timing(timing, f"actual_{split}", row["path"], rank, started)
             legal = legal_prediction(text, confs)
+            candidate_reads.append({
+                "rank": rank, "bbox": list(candidate.bbox),
+                "raw_prediction": str(text),
+                "raw_char_confidences": [float(value) for value in confs],
+                "legal": legal is not None,
+                "confidence": legal[1] if legal is not None else None,
+                "rejection_reason": None if legal is not None else "illegal_layout_or_confidence"})
             if legal is not None:
                 reads.append({"rank": rank, "text": legal[0], "confidence": legal[1]})
         selected = max(reads, key=lambda item: item["confidence"], default=None)
         records.append({"path": row["path"], "subset": row["subset"], "truth": row["label"],
                         "brightness": row["brightness"], "candidate_count": len(candidates),
                         "legal_read_count": len(reads),
+                        "candidate_reads": candidate_reads,
                         "prediction": selected["text"] if selected else "",
                         "selected_rank": selected["rank"] if selected else None,
                         "confidence": selected["confidence"] if selected else None,
@@ -290,6 +328,7 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
     import cv2
     from lpr.config import load_config
     from lpr.recognize import load_box_reader, load_corner_detector
+    from lpr.recognize.box_reader import INPUT_SIZE
 
     torch.set_num_threads(2)
     cv2.setNumThreads(1)
@@ -298,6 +337,7 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
     corner_detector = load_corner_detector(corner_path)
     reader = load_box_reader(model_path)
     pad = tuple(reader.box_pad)
+    input_size = tuple(getattr(reader, "input_size", INPUT_SIZE))
     if len(pad) != 2 or min(pad) < 0:
         raise ValueError("model box_pad must be a pair of nonnegative values")
 
@@ -306,7 +346,8 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
     jitter_samples = measured_box_deltas(jitter_path)
     tune_gt, tune_jitter = _read_tune(reader, tune, tune_csv, pad, seed, jitter_samples, timings)
     result: dict[str, Any] = {
-        "schema": "box-reader-eval-v1", "model": str(model_path.resolve()),
+        "schema": "box-reader-eval-v2" if getattr(reader, "version", "") == "box_reader_v2" else "box-reader-eval-v1",
+        "model": str(model_path.resolve()), "input_size": list(input_size),
         "box_pad": list(pad), "seed": seed,
         "jitter_source": {"path": str(jitter_path.resolve()),
                           "sha256": hashlib.sha256(jitter_path.read_bytes()).hexdigest(),
