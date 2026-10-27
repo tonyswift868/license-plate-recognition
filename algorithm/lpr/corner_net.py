@@ -495,6 +495,10 @@ class CornerNet:
         try:
             checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
             score_threshold = SCORE_THRESHOLD
+            if (isinstance(checkpoint, dict) and checkpoint.get("architecture") ==
+                    "plate_det_v1_resnet18_stage3_fpn_box_keypoints"):
+                from .plate_det import PlateDetector
+                return PlateDetector.from_checkpoint(checkpoint, version=version)
             if isinstance(checkpoint, dict) and checkpoint.get("architecture") == KeypointModel.architecture:
                 if tuple(checkpoint.get("input_size", ())) != INPUT_SIZE:
                     raise ModelLoadError("keypoint checkpoint input_size mismatch")
