@@ -75,18 +75,28 @@ class PlateDetectorModelTests(unittest.TestCase):
         model = PlateDetModel(pretrained=False)
         payload = {"architecture": ARCHITECTURE, "input_size": [128, 128],
                    "score_threshold": .25, "state_dict": model.state_dict()}
+        expected_state = {name: value.clone() for name, value in model.state_dict().items()}
         worker = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(dir=worker) as temp_dir:
             checkpoint = Path(temp_dir) / "plate_det.pt"
             torch.save(payload, checkpoint)
             del model, payload
+            original_detect = PlateDetector.detect
             with patch("torch.hub.load_state_dict_from_url",
-                       side_effect=AssertionError("checkpoint loading must not download weights")):
+                       side_effect=AssertionError("checkpoint loading must not download weights")), \
+                    patch.object(PlateDetector, "detect", autospec=True,
+                                 side_effect=original_detect) as initialize:
                 loaded = CornerNet.from_file(checkpoint, version="plate_det_v1")
+            initialize.assert_called_once()
+            self.assertEqual(initialize.call_args.args[1].shape, (720, 1280, 3))
+            self.assertEqual(initialize.call_args.args[1].dtype, np.uint8)
+            self.assertEqual(initialize.call_args.args[2], 3)
         self.assertIsInstance(loaded, PlateDetector)
         self.assertEqual(loaded.version, "plate_det_v1")
         self.assertEqual(loaded.image_size, 128)
         self.assertTrue(all(torch.isfinite(value).all() for value in loaded.model.state_dict().values()))
+        self.assertTrue(all(torch.equal(value, expected_state[name])
+                            for name, value in loaded.model.state_dict().items()))
 
 
 if __name__ == "__main__":
