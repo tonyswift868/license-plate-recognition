@@ -100,6 +100,120 @@ def _glyph_mask(character: str, width: int, height: int, font_path: Path):
     return cv2.resize(glyph, (width, height), interpolation=cv2.INTER_AREA if width < w else cv2.INTER_LINEAR)
 
 
+def _masked_row_median(values, valid):
+    """Vectorized float32 row medians, leaving rows with no valid samples as NaN."""
+    import numpy as np
+    counts = np.count_nonzero(valid, axis=1)
+    result = np.full((values.shape[0], values.shape[2]), np.nan, dtype=np.float32)
+    active = counts > 0
+    if np.any(active):
+        masked = np.where(valid[active, :, None], values[active], np.nan)
+        result[active] = np.nanmedian(masked, axis=1).astype(np.float32, copy=False)
+    return result
+
+
+def _row_background(pixels, clean, side):
+    """Estimate left/right row colors, honoring clean-side and fallback rules."""
+    import numpy as np
+    height = pixels.shape[0]
+    left_valid = clean[:, :side]
+    right_valid = clean[:, -side:]
+    left = _masked_row_median(pixels[:, :side], left_valid)
+    right = _masked_row_median(pixels[:, -side:], right_valid)
+    left_ok, right_ok = np.isfinite(left[:, 0]), np.isfinite(right[:, 0])
+
+    # If both margins are covered, use other clean pixels on that row. Rows
+    # with no clean pixels remain NaN and are filled from the global median.
+    both_missing = ~left_ok & ~right_ok
+    if np.any(both_missing):
+        row_fallback = _masked_row_median(pixels, clean)
+        left[both_missing] = row_fallback[both_missing]
+        right[both_missing] = row_fallback[both_missing]
+    only_left_missing = ~left_ok & right_ok
+    left[only_left_missing] = right[only_left_missing]
+    only_right_missing = left_ok & ~right_ok
+    right[only_right_missing] = left[only_right_missing]
+    return left, right
+
+
+def _erase_province_glyph(cell, rng=None):
+    """Inpaint the old province glyph using Otsu color distance, not a tail percentile."""
+    import cv2
+    import numpy as np
+    cell = np.asarray(cell)
+    if cell.dtype != np.uint8 or cell.ndim != 3 or cell.shape[2] != 3 or not cell.size:
+        raise ValueError("province cell must be a nonempty uint8 BGR image")
+    border = np.concatenate((cell[:3].reshape(-1, 3), cell[-3:].reshape(-1, 3),
+                             cell[:, :2].reshape(-1, 3), cell[:, -2:].reshape(-1, 3)), axis=0)
+    background = np.median(border.astype(np.float32), axis=0)
+    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    background_luma = float(cv2.cvtColor(background[None, None, :].astype(np.uint8),
+                                         cv2.COLOR_BGR2GRAY)[0, 0])
+    dark_text = background_luma >= 145
+    left_luma = np.median(gray[:, :2], axis=1)
+    right_luma = np.median(gray[:, -2:], axis=1)
+    # The brighter side is the robust background estimate for dark text; the
+    # darker side serves the same purpose for white-on-blue glyphs.
+    row_background = np.maximum(left_luma, right_luma) if dark_text else np.minimum(left_luma, right_luma)
+    contrast = row_background[:, None] - gray if dark_text else gray - row_background[:, None]
+    contrast = np.clip(contrast, 0, 255)
+    contrast_u8 = np.rint(contrast).astype(np.uint8)
+    otsu_threshold, _ = cv2.threshold(contrast_u8, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    threshold = max(14.0, float(otsu_threshold))
+    # Keep the Otsu core, then include low-contrast antialias pixels adjacent to
+    # it. This avoids losing the majority of old strokes when Otsu's threshold
+    # lands on a dense black/white foreground mode.
+    core = (contrast >= threshold) & (contrast > 0)
+    # A broad cell-local neighborhood catches soft JPEG/blurred strokes several
+    # pixels beyond the high-contrast Otsu core while remaining inside the first
+    # slot (the second character starts outside the .145 cell bound).
+    core_neighborhood = cv2.dilate(core.astype(np.uint8), np.ones((13, 13), np.uint8), iterations=1) > 0
+    ink = core | ((contrast >= 14.0) & core_neighborhood)
+    ink = cv2.dilate(ink.astype(np.uint8) * 255, np.ones((2, 2), np.uint8), iterations=1)
+
+    if np.any(ink):
+        # Telea blends the old high-contrast strokes back into dense masks. The
+        # province cell has side margins in the frozen layout, so estimate its
+        # smooth plate background row by row using unmasked border pixels only.
+        # If one side is covered by ink, use the other; if both are covered, use
+        # a same-row clean pixel or global clean-cell median. The caller clips
+        # writes to this cell's inverse-projected polygon.
+        side = max(1, min(8, cell.shape[1] // 4))
+        pixels = cell.astype(np.float32)
+        clean = ink == 0
+        clean_pixels = pixels[clean]
+        global_fill = (np.median(clean_pixels, axis=0) if clean_pixels.size
+                       else background.astype(np.float32))
+        left, right = _row_background(pixels, clean, side)
+        missing = ~np.isfinite(left[:, 0])
+        if np.any(missing):
+            left[missing] = global_fill
+            right[missing] = global_fill
+        fraction = np.linspace(0.0, 1.0, cell.shape[1], dtype=np.float32)[None, :, None]
+        background_rows = left[:, None, :] * (1.0 - fraction) + right[:, None, :] * fraction
+        background_rows = np.broadcast_to(background_rows, pixels.shape).copy()
+        clean_residual = pixels[clean] - background_rows[clean]
+        noise_std = (float(np.clip(np.median(np.abs(clean_residual)), .35, 2.5))
+                     if clean_residual.size else .75)
+        if rng is None:
+            rng = np.random.default_rng(0)
+        noise = (rng.normal(0.0, noise_std, background_rows.shape).astype(np.float32)
+                 if hasattr(rng, "normal") else 0.0)
+        background_rows = np.clip(background_rows + noise, 0, 255)
+        cleaned = cell.copy()
+        cleaned[ink > 0] = np.clip(np.rint(background_rows[ink > 0]), 0, 255).astype(np.uint8)
+    else:
+        noise_std = 0.0
+        cleaned = cell.copy()
+    return cleaned, ink, background, {"otsu_threshold": float(otsu_threshold),
+                                      "applied_threshold": threshold,
+                                      "mask_fraction": float(np.mean(ink > 0)),
+                                      "background_noise_std": noise_std,
+                                      "dark_text": dark_text,
+                                      "core_mask": core,
+                                      "fill_method": "row-boundary-interpolation"}
+
+
 def replace_province(image_bgr, quad, source_label: str, target_province: str,
                      rng: Any, *, font_path: str | Path = DEFAULT_FONT
                      ) -> tuple[Any, str, dict[str, object]]:
@@ -134,32 +248,20 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
     if cell.size == 0:
         raise ValueError("empty province glyph cell")
 
-    # Estimate foreground from the border/background of this slot and remove
-    # only dark/bright glyph pixels before drawing the new same-color glyph.
-    border = np.concatenate((cell[:3].reshape(-1, 3), cell[-3:].reshape(-1, 3),
-                             cell[:, :2].reshape(-1, 3), cell[:, -2:].reshape(-1, 3)), axis=0)
-    background = np.median(border.astype(np.float32), axis=0)
-    distance = np.linalg.norm(cell.astype(np.float32) - background, axis=2)
-    glyph = (distance > max(24.0, float(np.percentile(distance, 70)))).astype(np.uint8) * 255
-    glyph = cv2.morphologyEx(glyph, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-    if int(glyph.sum()) < 255 * 8:
-        # Bright blue/green backgrounds can have gradients; fall back to the
-        # upper tail of local color distance instead of erasing the full cell.
-        threshold = max(14.0, float(np.percentile(distance, 82)))
-        glyph = (distance > threshold).astype(np.uint8) * 255
-    cleaned = cv2.inpaint(cell, glyph, 2, cv2.INPAINT_TELEA)
+    # Remove old strokes with a bimodal color-distance threshold and small AA
+    # coverage margin, independently of the new glyph renderer.
+    cleaned, glyph, background, erase_meta = _erase_province_glyph(cell, rng)
 
     # Preserve the original glyph's foreground color (white on blue, dark on
     # green/yellow) and softly match its blur/noise before the source perspective.
-    foreground = cell[glyph > 0]
-    foreground_points = cv2.findNonZero(glyph)
+    core_mask = erase_meta.pop("core_mask")
+    dark_text = bool(erase_meta["dark_text"])
+    foreground = cell[core_mask]
+    foreground_points = cv2.findNonZero(core_mask.astype(np.uint8))
     source_glyph_height = (cv2.boundingRect(foreground_points)[3]
                            if foreground_points is not None else 0)
-    background_luma = float(cv2.cvtColor(background[None, None, :].astype(np.uint8),
-                                         cv2.COLOR_BGR2GRAY)[0, 0])
     style_fallback = foreground_points is None or foreground.size < 24 or source_glyph_height < 12
     if style_fallback:
-        dark_text = len(source_label) == 8 or background_luma >= 145
         text_color = np.asarray([16.0, 16.0, 16.0] if dark_text else
                                 [240.0, 240.0, 240.0], dtype=np.float32)
     else:
@@ -229,7 +331,10 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
                                "source_glyph_height": source_glyph_height,
                                "rendered_glyph_height": rendered_glyph_height,
                                "rendered_glyph_width": glyph_width,
-                               "style_fallback": style_fallback}
+                               "style_fallback": style_fallback,
+                               "erase_mask_fraction": erase_meta["mask_fraction"],
+                               "erase_threshold": erase_meta["applied_threshold"],
+                               "erase_background_noise_std": erase_meta["background_noise_std"]}
 
 
 __all__ = ["replace_province", "normalized_first_char"]

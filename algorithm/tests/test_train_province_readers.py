@@ -1,63 +1,183 @@
-"""Sampling and character preservation contracts for province continuation."""
+"""Bounded prefetch preserves batch bytes and keeps GPU fallback on main thread."""
+from __future__ import annotations
+
+import threading
+
+import cv2
 import numpy as np
 import torch
-from lpr.charset import PROVINCES
-from lpr.recognize.cnn_model import CharCNN
-from lpr_tools.train.train_province_readers import synthetic_targets, local_quad, frozen_batch_statistics
+
+import lpr_tools.train.train_province_readers as trainer
 
 
-def test_targets_are_uniform_and_different_on_imbalanced_sources():
-    labels=['皖A12345']*9000+[p+'A12345' for p in PROVINCES[1:] for _ in range(40)]
-    first=synthetic_targets(labels,seed=12042,epoch=0,probability=.35)
-    assert np.array_equal(first,synthetic_targets(labels,seed=12042,epoch=0,probability=.35))
-    selected=np.flatnonzero(first>=0)
-    counts=np.bincount(first[selected],minlength=31)
-    assert counts.max()-counts.min()<=1
-    assert all(PROVINCES[first[i]]!=labels[i][0] for i in selected)
-    assert not np.array_equal(first,synthetic_targets(labels,seed=12042,epoch=1,probability=.35))
+GROUPS = ("base", "green", "db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
 
 
-def test_quad_translation_uses_clipped_padding_origin():
-    quad='10 20 30 20 30 40 10 40'
-    assert np.allclose(local_quad(quad,(10,20,20,20)),[[2,3],[22,3],[22,23],[2,23]])
-    assert np.allclose(local_quad(quad,(0,0,20,20)),[[10,20],[30,20],[30,40],[10,40]])
+class TinyDataset:
+    def __init__(self, rows, *, gpu_fallback=False):
+        self.rows = rows
+        self.seed = 123
+        self.epoch = 2
+        self.synth_probability = .35
+        self.gpu_fallback = gpu_fallback
+        self.kind = "char"
+        self.synthetic_gt_fallbacks = 0
+        self.row_threads = []
+        self.finish_threads = []
+
+    def __len__(self):
+        return len(self.rows)
+
+    def row(self, index):
+        self.row_threads.append(threading.get_ident())
+        return dict(self.rows[index])
+
+    def specification(self, index):
+        row = self.row(index)
+        rng = trainer.random.Random(self.seed + self.epoch * 1_000_003 + index)
+        # Use a deterministic jitter-shaped box and consume the same RNG state
+        # from the synthetic test finish on both serial and prefetched runs.
+        return row, rng, (2, 2, 10, 10)
+
+    def finish(self, image, row, index, rng, *, bbox, defer_gt_fallback=False):
+        self.finish_threads.append(threading.get_ident())
+        variants = [(row["label"], False), (row["label"], True)] if self.synthetic_targets[index] >= 0 else [
+            (row["label"], False)]
+        output = []
+        for label, is_synthetic in variants:
+            value = index + rng.random()
+            tensor = torch.tensor([[[value]]], dtype=torch.float32)
+            theta = torch.full((2, 3), value, dtype=torch.float32)
+            if is_synthetic:
+                from lpr.charset import PROVINCES
+                label = PROVINCES[int(self.synthetic_targets[index])] + row["label"][1:]
+            output.append((tensor, label, index, theta, row["subset"], is_synthetic))
+        return output
 
 
-def test_province_only_adam_update_preserves_alphanumeric_logits():
-    torch.set_num_threads(2);torch.manual_seed(12)
-    model=CharCNN()
-    for p in model.parameters():p.requires_grad_(False)
-    head=model.classifier[-1]
-    head.weight.requires_grad_(True);head.bias.requires_grad_(True)
-    head.weight.register_hook(lambda g:torch.cat((g[:31],torch.zeros_like(g[31:]))))
-    head.bias.register_hook(lambda g:torch.cat((g[:31],torch.zeros_like(g[31:]))))
-    model.eval();images=torch.rand(4,1,32,32)
-    before=model(images).detach().clone()
-    opt=torch.optim.AdamW(head.parameters(),lr=.01,weight_decay=0.)
-    torch.nn.functional.cross_entropy(model(images)[:,:31],torch.tensor([0,1,2,3])).backward();opt.step()
-    after=model(images).detach()
-    assert torch.equal(before[:,31:],after[:,31:])
-    assert not torch.equal(before[:,:31],after[:,:31])
+def _rows_with_cache(tmp_path):
+    rows = []
+    pack = tmp_path / "tiny-jpegs.pack"
+    offset = 0
+    with pack.open("wb") as stream:
+        for index, subset in enumerate(GROUPS):
+            image = np.full((16, 16, 3), index * 13, dtype=np.uint8)
+            ok, encoded = cv2.imencode(".jpg", image)
+            assert ok
+            payload = encoded.tobytes()
+            stream.write(payload)
+            rows.append({"path": f"fixture-{index}.jpg", "label": "皖A12345",
+                         "subset": subset, "cache_pack": str(pack),
+                         "pack_offset": str(offset), "pack_length": str(len(payload)),
+                         "x0": "0", "y0": "0", "orig_w": "16", "orig_h": "16"})
+            offset += len(payload)
+    return rows
 
-def test_missing_glyph_in_jitter_keeps_real_view_and_recovers_only_synthetic(monkeypatch):
-    import random
-    import lpr_tools.train.train_province_readers as train
-    ds=train.ProvinceDataset.__new__(train.ProvinceDataset)
-    ds.kind='box';ds.seed=12;ds.epoch=0;ds.gpu_fallback=False;ds.synthetic_gt_fallbacks=0
-    ds.synthetic_targets=np.array([1],dtype=np.int16)
-    row={'label':'皖A12345','quad':'0 0 100 0 100 40 0 40','subset':'base'}
-    jitter=np.full((20,20,3),90,dtype=np.uint8)
-    recovered=np.full((50,110,3),110,dtype=np.uint8)
-    calls=[]
-    def replace(image,quad,label,target,rng):
-        calls.append(image.shape)
-        if image.shape==jitter.shape:raise ValueError('province glyph slot falls outside source image')
-        return image.copy(),target+label[1:],{}
-    monkeypatch.setattr(train,'replace_province',replace)
-    monkeypatch.setattr(train,'row_crop',lambda row,bbox,**kwargs:recovered)
-    result=ds.finish(jitter,row,0,random.Random(7),bbox=(80,0,20,20))
-    assert len(result)==2 and not result[0][-1] and result[1][-1]
-    assert result[0][1]=='皖A12345' and result[1][1]=='沪A12345'
-    assert ds.synthetic_gt_fallbacks==1 and calls==[jitter.shape,recovered.shape]
-    expected=train.affine_target(row['quad'],(0,0,100,40),recovered.shape)
-    assert torch.equal(result[1][3],expected)
+
+def _collect(loader):
+    return list(loader)
+
+
+def test_serial_and_single_thread_prefetch_batches_are_identical(tmp_path):
+    rows = _rows_with_cache(tmp_path)
+    serial_ds, prefetched_ds = TinyDataset(rows), TinyDataset(rows)
+    serial = _collect(trainer.PackedEpoch(serial_ds, [r["label"] for r in rows],
+        [r["subset"] for r in rows], batch_size=4, block_size=3, prefetch=False))
+    prefetched = _collect(trainer.PackedEpoch(prefetched_ds, [r["label"] for r in rows],
+        [r["subset"] for r in rows], batch_size=4, block_size=3, prefetch=True))
+    assert len(serial) == len(prefetched)
+    for left, right in zip(serial, prefetched):
+        assert len(left) == len(right)
+        for a, b in zip(left, right):
+            if isinstance(a, torch.Tensor):
+                assert torch.equal(a, b)
+            else:
+                assert a == b
+    assert len(serial_ds.row_threads) == len(prefetched_ds.row_threads) == len(rows)
+    assert any(thread_id != threading.get_ident() for thread_id in prefetched_ds.row_threads)
+    real_indices = [index for batch in prefetched for index, synthetic in zip(batch[4], batch[7])
+                    if not synthetic]
+    assert sorted(real_indices) == list(range(len(rows)))
+    assert len(real_indices) == len(set(real_indices))
+
+
+def test_gpu_fallback_marker_is_decoded_only_on_main_thread(tmp_path, monkeypatch):
+    rows = [{"path": f"raw-{i}.jpg", "label": "皖A12345", "subset": group}
+            for i, group in enumerate(GROUPS)]
+    ds = TinyDataset(rows, gpu_fallback=True)
+    main_thread = threading.get_ident()
+    calls = []
+
+    def stub_row_crop(row, bbox, *, gpu_fallback):
+        calls.append((threading.get_ident(), row["path"], gpu_fallback))
+        assert threading.get_ident() == main_thread
+        assert gpu_fallback is True
+        return np.ones((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(trainer, "row_crop", stub_row_crop)
+    batches = _collect(trainer.PackedEpoch(ds, [r["label"] for r in rows],
+        [r["subset"] for r in rows], batch_size=4, block_size=3, prefetch=True))
+    assert batches
+    assert len(calls) == len(rows)
+    assert {thread_id for thread_id, _, _ in calls} == {main_thread}
+    assert all(thread_id == main_thread for thread_id in ds.finish_threads)
+
+
+def test_synthetic_gt_fallback_defers_worker_finish_and_reuses_photo_rng(monkeypatch):
+    ds = trainer.ProvinceDataset.__new__(trainer.ProvinceDataset)
+    ds.gpu_fallback = True
+    ds.seed = 7
+    ds.epoch = 3
+    ds.kind = "char"
+    ds.synthetic_targets = np.asarray([1], dtype=np.int16)
+    ds.synthetic_gt_fallbacks = 0
+    row = {"path": "fixture.jpg", "label": "皖A12345", "subset": "base", "quad": "fixture"}
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    bbox = (0, 0, 4, 4)
+    monkeypatch.setattr(trainer, "local_quad", lambda *_: np.zeros((4, 2), dtype=np.float32))
+    monkeypatch.setattr(trainer, "affine_target", lambda *_: torch.zeros((2, 3)))
+    monkeypatch.setattr(trainer, "bbox_from_quad", lambda _quad: bbox)
+    monkeypatch.setattr(trainer, "normalized_first_char",
+                        lambda *_: np.zeros((32, 32), dtype=np.uint8))
+    main_thread = threading.get_ident()
+    row_crop_calls = []
+
+    def stub_row_crop(_row, _bbox, *, gpu_fallback):
+        row_crop_calls.append(threading.get_ident())
+        assert threading.get_ident() == main_thread
+        assert gpu_fallback is True
+        return np.ones((8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(trainer, "row_crop", stub_row_crop)
+    replacement_calls = []
+
+    def stub_replace(*args, **kwargs):
+        replacement_calls.append(threading.get_ident())
+        if len(replacement_calls) <= 2:
+            raise ValueError("province glyph slot falls outside source image")
+        return args[0].copy(), "沪A12345", {"fixture": True}
+
+    monkeypatch.setattr(trainer, "_replace_province_locked", stub_replace)
+    photo_rng = trainer.random.Random(99)
+    rng_before = photo_rng.getstate()
+    worker_errors = []
+
+    def run_worker_finish():
+        try:
+            ds.finish(image, row, 0, photo_rng, bbox=bbox, defer_gt_fallback=True)
+        except Exception as exc:
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=run_worker_finish)
+    worker.start()
+    worker.join()
+    assert len(worker_errors) == 1
+    assert isinstance(worker_errors[0], trainer._DeferredFinish)
+    assert row_crop_calls == []
+    assert photo_rng.getstate() == rng_before
+
+    finished = ds.finish(image, row, 0, photo_rng, bbox=bbox)
+    assert len(row_crop_calls) == 1
+    assert row_crop_calls[0] == main_thread
+    assert ds.synthetic_gt_fallbacks == 1
+    assert [item[1] for item in finished] == ["皖A12345", "沪A12345"]

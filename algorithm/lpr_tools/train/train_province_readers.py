@@ -23,7 +23,9 @@ import json
 import math
 import random
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 import torch
@@ -42,6 +44,16 @@ from lpr_tools.train.province_data import province_repeat_additions
 from lpr_tools.train.province_synth import replace_province, normalized_first_char
 
 FORMAT='province-reader-training-v1'
+render_lock=threading.Lock()
+
+
+class _DeferredFinish(Exception):
+    """A cached crop needs a GT full-image fallback on the main thread."""
+
+
+def _replace_province_locked(*args, **kwargs):
+    with render_lock:
+        return replace_province(*args, **kwargs)
 
 
 def local_quad(quad, bbox):
@@ -100,7 +112,7 @@ class ProvinceDataset(BoxDataset):
         if self.kind!='box':bbox=bbox_from_quad(row['quad'])
         return row,rng,bbox
 
-    def finish(self,image,row,index,rng,*,bbox):
+    def finish(self,image,row,index,rng,*,bbox,defer_gt_fallback=False):
         quad=local_quad(row['quad'],bbox)
         theta=affine_target(row['quad'],bbox,image.shape)
         variants=[(image,row['label'],False,quad,theta)]
@@ -110,10 +122,14 @@ class ProvinceDataset(BoxDataset):
             target=PROVINCES[int(self.synthetic_targets[index])]
             synth_quad=quad;synth_theta=theta
             try:
-                generated,label,_=replace_province(image,quad,row['label'],target,
+                generated,label,_=_replace_province_locked(image,quad,row['label'],target,
                     np.random.default_rng([self.seed,self.epoch,index]))
             except ValueError as error:
                 if str(error)!='province glyph slot falls outside source image':raise
+                if defer_gt_fallback:
+                    # Do not let the CPU prefetch thread trigger torchvision
+                    # CUDA decode or consume the Python photo RNG.
+                    raise _DeferredFinish from error
                 # Keep the measured real crop unchanged. A synthetic label must
                 # correspond to a visible replacement, so only that additional
                 # view falls back to its GT crop when jitter removed the slot.
@@ -121,7 +137,7 @@ class ProvinceDataset(BoxDataset):
                 gt_image=row_crop(row,gt_box,gpu_fallback=self.gpu_fallback)
                 synth_quad=local_quad(row['quad'],gt_box)
                 synth_theta=affine_target(row['quad'],gt_box,gt_image.shape)
-                generated,label,_=replace_province(gt_image,synth_quad,row['label'],target,
+                generated,label,_=_replace_province_locked(gt_image,synth_quad,row['label'],target,
                     np.random.default_rng([self.seed,self.epoch,index]))
                 self.synthetic_gt_fallbacks+=1
             variants.append((generated,label,True,synth_quad,synth_theta))
@@ -140,11 +156,47 @@ class ProvinceDataset(BoxDataset):
         return result
 
 
+class _PackedStream:
+    """A TAR handle lazily opened and used only by the current prepare thread."""
+    def __init__(self):
+        self.stream=None
+        self.path=None
+        self.total_size=None
+
+    def read_span(self,rows):
+        paths={str(row['cache_pack']) for row in rows if row.get('cache_pack')}
+        if not paths:
+            return None,None,None
+        if len(paths)!=1:
+            raise ValueError('one packed epoch may use only one immutable JPEG TAR')
+        path=Path(next(iter(paths)))
+        if self.stream is None:
+            self.path=path
+            self.stream=path.open('rb')
+            self.total_size=self.stream.seek(0,2)
+        elif path!=self.path:
+            raise ValueError('packed JPEG TAR changed within an epoch')
+        offsets=[int(row['pack_offset']) for row in rows if row.get('cache_pack')]
+        ends=[int(row['pack_offset'])+int(row['pack_length']) for row in rows if row.get('cache_pack')]
+        start_pos=min(offsets);end_pos=max(ends)
+        if (start_pos<0 or end_pos>self.total_size or end_pos-start_pos>40_000_000
+                or any(int(row['pack_length'])<=0 for row in rows if row.get('cache_pack'))):
+            raise ValueError('cache block span exceeds bounded IO or has invalid offsets')
+        self.stream.seek(start_pos)
+        return self.stream.read(end_pos-start_pos),start_pos,end_pos
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+            self.stream=None
+
+
 class PackedEpoch:
-    """One bounded cache block; full-resolution misses decode on main CUDA thread."""
-    def __init__(self,ds,labels,subsets,*,batch_size=128,block_size=128):
+    """One bounded CPU-prepared block; optional single-thread prefetch overlaps GPU work."""
+    def __init__(self,ds,labels,subsets,*,batch_size=128,block_size=128,prefetch=True):
         self.ds=ds;self.labels=labels;self.subsets=subsets
         self.batch_size=batch_size;self.block_size=block_size;self.raw_fallbacks=0
+        self.prefetch=bool(prefetch);self.prepare_seconds=0.
 
     def __iter__(self):
         ds=self.ds
@@ -152,41 +204,87 @@ class PackedEpoch:
         self.weights,self.base_groups,self.extra_provinces=real_plan(self.labels,self.subsets,ds.seed,ds.epoch)
         rng=np.random.default_rng([ds.seed,ds.epoch])
         batch=[];weights=[]
-        packed=next((ds.row(i).get('cache_pack') for i in range(len(ds)) if ds.row(i).get('cache_pack')),None)
-        stream=Path(packed).open('rb') if packed else None
+        stream=_PackedStream()
         try:
-            for block in rng.permutation(math.ceil(len(ds)/self.block_size)):
-                begin=int(block)*self.block_size;end=min(len(ds),begin+self.block_size)
-                specifications=[ds.specification(i) for i in range(begin,end)]
-                available=[row for row,_,_ in specifications if row.get('cache_pack')]
-                if available:
-                    offsets=[int(r['pack_offset']) for r in available]
-                    end_pos=max(int(r['pack_offset'])+int(r['pack_length']) for r in available)
-                    start_pos=min(offsets)
-                    if end_pos-start_pos>40_000_000:raise ValueError('cache block span exceeds bounded IO')
-                    stream.seek(start_pos);data=stream.read(end_pos-start_pos)
-                for relative in rng.permutation(len(specifications)):
-                    row,photo_rng,bbox=specifications[int(relative)];index=begin+int(relative)
-                    cached=None
-                    if row.get('cache_pack'):
-                        encoded=np.frombuffer(data,np.uint8,count=int(row['pack_length']),offset=int(row['pack_offset'])-start_pos)
-                        cached=cv2.imdecode(encoded,cv2.IMREAD_COLOR)
-                        if cached is None:raise ValueError('invalid immutable cache JPEG')
-                    if cached is not None and cache_contains(row,bbox,BOX_PAD,cached.shape):
-                        image=row_crop(row,bbox,cached_image=cached)
-                    else:
-                        self.raw_fallbacks+=1
-                        image=row_crop(row,bbox,gpu_fallback=ds.gpu_fallback)
-                    for item in ds.finish(image,row,index,photo_rng,bbox=bbox):
-                        batch.append(item)
-                        # Expected synthetic logical share = 35%, while real
-                        # sources retain their full original weighted exposure.
-                        weights.append(float(self.weights[index])*(1/(1-ds.synth_probability) if item[-1] else 1.))
-                        if len(batch)==self.batch_size:
-                            yield collate(batch,weights);batch=[];weights=[]
+            blocks=list(rng.permutation(math.ceil(len(ds)/self.block_size)))
+            jobs=[(int(block)*self.block_size,
+                   min(len(ds),(int(block)+1)*self.block_size)) for block in blocks]
+            if self.prefetch:
+                with ThreadPoolExecutor(max_workers=1,thread_name_prefix='batch12-cpu-prefetch') as executor:
+                    yield from self._consume_jobs(jobs,executor,stream,rng,batch,weights)
+            else:
+                yield from self._consume_jobs(jobs,None,stream,rng,batch,weights)
             if batch:yield collate(batch,weights)
         finally:
-            if stream:stream.close()
+            # Executor context exits and joins its sole worker before the TAR
+            # and dataset mmap are closed by the training loop.
+            stream.close()
+
+    def _consume_jobs(self,jobs,executor,stream,rng,batch,weights):
+        pending=iter(jobs)
+        job=next(pending,None)
+        future=executor.submit(self._prepare,stream,*job) if executor is not None and job else None
+        while job is not None:
+            begin,end=job
+            prepared=(future.result() if future is not None else
+                      self._prepare(stream,begin,end))
+            next_job=next(pending,None)
+            future=(executor.submit(self._prepare,stream,*next_job)
+                    if executor is not None and next_job is not None else None)
+            for relative in rng.permutation(end-begin):
+                relative=int(relative)
+                row,photo_rng,bbox,item=prepared[relative]
+                index=begin+relative
+                if item is None:
+                    # Source JPEG decode and the resulting crop stay on the
+                    # training thread when the audited cache does not cover it.
+                    self.raw_fallbacks+=1
+                    image=row_crop(row,bbox,gpu_fallback=self.ds.gpu_fallback)
+                    items=self.ds.finish(image,row,index,photo_rng,bbox=bbox)
+                elif item[0]=='deferred_finish':
+                    _,image=item
+                    # The failed replacement does not consume photo_rng.
+                    items=self.ds.finish(image,row,index,photo_rng,bbox=bbox)
+                else:
+                    items=item[1]
+                for value in items:
+                    batch.append(value)
+                    weights.append(float(self.weights[index])*
+                                   (1/(1-self.ds.synth_probability) if value[-1] else 1.))
+                    if len(batch)==self.batch_size:
+                        yield collate(batch,weights)
+                        batch.clear();weights.clear()
+            job=next_job
+
+    def _prepare(self,stream,begin,end):
+        started=time.perf_counter()
+        specifications=[self.ds.specification(index) for index in range(begin,end)]
+        rows=[row for row,_,_ in specifications]
+        data,start_pos,_=stream.read_span(rows)
+        prepared=[]
+        for relative,(row,photo_rng,bbox) in enumerate(specifications):
+            index=begin+relative
+            cached=None
+            if row.get('cache_pack'):
+                encoded=np.frombuffer(data,np.uint8,count=int(row['pack_length']),
+                                      offset=int(row['pack_offset'])-start_pos)
+                cached=cv2.imdecode(encoded,cv2.IMREAD_COLOR)
+                if cached is None:raise ValueError('invalid immutable cache JPEG')
+            if cached is not None and cache_contains(row,bbox,BOX_PAD,cached.shape):
+                image=row_crop(row,bbox,cached_image=cached,gpu_fallback=False)
+            elif self.ds.gpu_fallback:
+                prepared.append((row,photo_rng,bbox,None))
+                continue
+            else:
+                image=row_crop(row,bbox,gpu_fallback=False)
+            try:
+                items=self.ds.finish(image,row,index,photo_rng,bbox=bbox,
+                                     defer_gt_fallback=True)
+                prepared.append((row,photo_rng,bbox,('items',items)))
+            except _DeferredFinish:
+                prepared.append((row,photo_rng,bbox,('deferred_finish',image)))
+        self.prepare_seconds+=time.perf_counter()-started
+        return prepared
 
 
 def collate(items,weights):
@@ -251,7 +349,8 @@ def run(args):
     samples=samples.get('samples_by_subset',samples.get('subsets',samples))
     ds=ProvinceDataset(index,samples,training=True,seed=args.seed,gpu_fallback=device.type=='cuda',
                        kind=args.kind,synth_probability=args.synth_probability)
-    loader=PackedEpoch(ds,labels,subsets,batch_size=args.batch_size,block_size=args.block_size)
+    loader=PackedEpoch(ds,labels,subsets,batch_size=args.batch_size,block_size=args.block_size,
+                       prefetch=not args.no_cpu_prefetch)
     model=restore_model(args.init,args.kind).to(device)
     # Frozen running statistics permit exact repeated-tensor weighting. CNN
     # dropout is disabled; none of the other model architectures has dropout.
@@ -411,6 +510,8 @@ def main():
     p.add_argument('--synth-probability',type=float,default=.35);p.add_argument('--lr',type=float,default=.00008)
     p.add_argument('--seed',type=int,default=12042);p.add_argument('--resume',action='store_true')
     p.add_argument('--smoke',action='store_true');p.add_argument('--profile-batches',type=int,default=0)
+    p.add_argument('--no-cpu-prefetch',action='store_true',
+                   help='disable the single bounded CPU prefetch thread for serial comparisons')
     p.add_argument('--cpu-python',type=Path,default=Path('.venv/Scripts/python.exe').resolve())
     print(json.dumps(run(p.parse_args()),default=str),flush=True)
 

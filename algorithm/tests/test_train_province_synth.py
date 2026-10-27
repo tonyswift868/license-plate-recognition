@@ -8,7 +8,10 @@ cv2 = pytest.importorskip("cv2")
 pytest.importorskip("PIL")
 from PIL import Image, ImageDraw, ImageFont
 
-from lpr_tools.train.province_synth import _glyph_mask, normalized_first_char, replace_province
+from lpr_tools.train.province_synth import (
+    _canonical, _erase_province_glyph, _glyph_mask, _row_background,
+    normalized_first_char, replace_province,
+)
 
 
 def _plate(color: str, label: str):
@@ -35,6 +38,55 @@ def _plate(color: str, label: str):
     image = cv2.warpPerspective(canonical, cv2.getPerspectiveTransform(dst, quad),
                                 (image.shape[1], image.shape[0]))
     return image, quad
+
+
+def _row_background_reference(pixels, clean, side):
+    left = np.empty((pixels.shape[0], 3), dtype=np.float32)
+    right = np.empty_like(left)
+    global_fill = np.median(pixels[clean], axis=0) if np.any(clean) else np.zeros(3, np.float32)
+    for row_index in range(pixels.shape[0]):
+        row = pixels[row_index]
+        lv = row[:side][clean[row_index, :side]]
+        rv = row[-side:][clean[row_index, -side:]]
+        lc = np.median(lv, axis=0) if len(lv) else None
+        rc = np.median(rv, axis=0) if len(rv) else None
+        if lc is None and rc is None:
+            available = row[clean[row_index]]
+            fallback = np.median(available, axis=0) if len(available) else global_fill
+            lc = rc = fallback
+        elif lc is None:
+            lc = rc
+        elif rc is None:
+            rc = lc
+        left[row_index], right[row_index] = lc, rc
+    return left, right
+
+
+@pytest.mark.parametrize("mask_case", ["random", "left_covered", "right_covered", "row_fallback", "all_covered"])
+def test_vectorized_row_background_matches_loop_reference(mask_case):
+    rng = np.random.default_rng(127)
+    pixels = rng.integers(0, 256, size=(80, 34, 3), dtype=np.uint8).astype(np.float32)
+    clean = rng.random((80, 34)) > .42
+    if mask_case == "left_covered":
+        clean[:, :8] = False
+    elif mask_case == "right_covered":
+        clean[:, -8:] = False
+    elif mask_case == "row_fallback":
+        clean[11, :8] = False
+        clean[11, -8:] = False
+        clean[11, 8:-8] = True
+    elif mask_case == "all_covered":
+        clean[:] = False
+    if mask_case != "all_covered":
+        # Ensure a global clean fallback exists, while retaining row 11's case.
+        clean[0, 12] = True
+    expected = _row_background_reference(pixels, clean, 8)
+    actual = _row_background(pixels, clean, 8)
+    if mask_case == "all_covered":
+        assert np.isnan(actual[0]).all() and np.isnan(actual[1]).all()
+        return
+    for got, want in zip(actual, expected):
+        np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.parametrize("color,label", [("blue", "皖A12345"), ("green", "皖A123456")])
@@ -98,3 +150,23 @@ def test_uniform_source_uses_visible_style_fallback_without_losing_the_row():
     normalized = normalized_first_char(changed, quad, "green")
     assert normalized.shape == (32, 32) and normalized.dtype == np.uint8
     assert np.isfinite(normalized).all() and normalized.max() == 255
+
+
+@pytest.mark.parametrize("color,label", [("blue", "皖A12345"), ("green", "皖A123456")])
+def test_erase_only_removes_old_province_ink_before_any_new_glyph(color, label):
+    image, quad = _plate(color, label)
+    plate, _, _ = _canonical(image, quad)
+    x0, x1 = round(plate.shape[1] * .012), round(plate.shape[1] * .145)
+    y0, y1 = round(plate.shape[0] * .06), round(plate.shape[0] * .94)
+    cell = plate[y0:y1, x0:x1]
+    cleaned, mask, background, stats = _erase_province_glyph(cell)
+    source_distance = np.linalg.norm(cell.astype(np.float32) - background, axis=2)
+    source_ink = source_distance > 24
+    residual_distance = np.linalg.norm(cleaned.astype(np.float32) - background, axis=2)
+    residual_ink = residual_distance > 24
+    source_count = int(source_ink.sum())
+    residual_count = int(residual_ink.sum())
+    assert source_count > 0 and int((mask > 0).sum()) >= source_count
+    assert residual_count / source_count <= .02, {
+        "source_ink": source_count, "residual_ink": residual_count, "mask": stats,
+    }
