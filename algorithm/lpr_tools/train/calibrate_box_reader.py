@@ -9,17 +9,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-import cv2
-import torch
-
 from lpr.charset import CHAR_TO_INDEX
-from lpr.recognize import read_manifest, write_manifest_entry
-from lpr.recognize.box_reader import ARCH, BoxNet, INPUT_SIZE, box_tensor, checkpoint
-from lpr.recognize.crnn import _greedy_decode
-from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, _ctc_loss, _ece_summary, fit_temperature
 from lpr_tools.train.box_data import bbox_from_quad
-from lpr.boxcrop import crop_box
-from lpr.io_utils import imread
 from lpr.plate_rules import match_layout
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -29,6 +20,7 @@ DEFAULT_BEST = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "best.pt
 DEFAULT_MODEL = ROOT / "algorithm" / "models" / "box_reader_v1.pt"
 DEFAULT_REPORT = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "calibration_report.json"
 EXPECTED_PER_FOLD = 1050
+MIN_RELEASE_EPOCHS = 30
 
 
 def _sha256_file(path: Path) -> str:
@@ -83,9 +75,65 @@ def read_calibration_rows(index_path: Path) -> tuple[list[dict[str, str]], list[
     return rows["fit"], rows["report"]
 
 
+def validate_training_history(history_path: Path, best_path: Path, train_data_path: Path,
+                              tune_path: Path) -> dict[str, Any]:
+    """Prove the selected checkpoint came from at least 30 complete GPU epochs."""
+    history_path = Path(history_path).resolve()
+    best_path = Path(best_path).resolve()
+    train_data_path = Path(train_data_path).resolve()
+    tune_path = Path(tune_path).resolve()
+    if not best_path.is_file():
+        raise FileNotFoundError(f"best release checkpoint is missing: {best_path}")
+    data = json.loads(history_path.read_text(encoding="utf-8"))
+    recipe = data.get("recipe", {})
+    epochs = data.get("history", [])
+    if recipe.get("smoke") is not False:
+        raise ValueError("release calibration refuses a smoke checkpoint")
+    if not str(recipe.get("device", "")).startswith("cuda"):
+        raise ValueError("release calibration requires a CUDA training history")
+    if int(recipe.get("epochs", 0)) < MIN_RELEASE_EPOCHS or len(epochs) < MIN_RELEASE_EPOCHS:
+        raise ValueError(f"release checkpoint requires at least {MIN_RELEASE_EPOCHS} complete epochs")
+    if Path(recipe.get("train", "")).resolve() != train_data_path:
+        raise ValueError("training history points at a different pool index")
+    if Path(recipe.get("tune", "")).resolve() != tune_path:
+        raise ValueError("training history points at a different tune index")
+    if Path(recipe.get("out", "")).resolve() != best_path.parent:
+        raise ValueError("best checkpoint is outside the output directory recorded by training history")
+    train_sha = _sha256_file(train_data_path)
+    tune_sha = _sha256_file(tune_path)
+    if data.get("train_sha256") != train_sha or data.get("tune_sha256") != tune_sha:
+        raise ValueError("training history pool/tune SHA-256 does not match current indexes")
+    with train_data_path.open(encoding="utf-8-sig", newline="") as stream:
+        train_count = sum(1 for _ in csv.DictReader(stream))
+    epoch_ids = [int(item.get("epoch", -1)) for item in epochs]
+    if epoch_ids != list(range(1, len(epochs) + 1)):
+        raise ValueError("training history epochs are not consecutive from epoch 1")
+    for item in epochs:
+        if int(item.get("samples", -1)) != train_count or int(item.get("unique_samples", -1)) != train_count:
+            raise ValueError(f"epoch {item.get('epoch')} did not consume the complete training pool")
+    best_epoch = int(data.get("best_epoch", -1))
+    if best_epoch not in epoch_ids:
+        raise ValueError("best_epoch is missing from completed training history")
+    expected_best = max(epochs, key=lambda item: float(item["tune"]["accuracy"]))
+    if best_epoch != int(expected_best["epoch"]):
+        raise ValueError("best checkpoint epoch disagrees with tune-selected history")
+    if int(data.get("total_exposures", -1)) != train_count * len(epochs):
+        raise ValueError("total exposure count does not match complete epoch history")
+    return {"path": str(history_path), "sha256": _sha256_file(history_path),
+            "epochs": len(epochs), "best_epoch": best_epoch,
+            "training_samples_per_epoch": train_count, "total_exposures": train_count * len(epochs),
+            "device": recipe["device"], "smoke": False}
+
+
 def _collect_logits(model: BoxNet, rows: list[dict[str, str]], box_pad: tuple[float, float],
                     index_path: Path
                     ) -> list[torch.Tensor]:
+    import torch
+
+    from lpr.boxcrop import crop_box
+    from lpr.io_utils import imread
+    from lpr.recognize.box_reader import BoxNet, box_tensor
+
     logits_list = []
     for row in rows:
         path = Path(row["path"])
@@ -108,6 +156,11 @@ def _collect_logits(model: BoxNet, rows: list[dict[str, str]], box_pad: tuple[fl
 
 def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
                  temperature: float) -> dict[str, Any]:
+    import torch
+
+    from lpr.recognize.crnn import _greedy_decode
+    from lpr_tools.train.calibrate_crnn_v2 import _ctc_loss, _ece_summary
+
     before_nll = after_nll = 0.0
     correct, confidence_before, confidence_after = [], [], []
     predictions = []
@@ -136,13 +189,23 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
 
 def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
               model_path: Path = DEFAULT_MODEL, report_path: Path = DEFAULT_REPORT,
-              train_data_path: Path = DEFAULT_TRAIN_DATA) -> dict[str, Any]:
+              train_data_path: Path = DEFAULT_TRAIN_DATA,
+              history_path: Path | None = None) -> dict[str, Any]:
+    import cv2
+    import torch
+
+    from lpr.recognize import read_manifest, write_manifest_entry
+    from lpr.recognize.box_reader import ARCH, BoxNet, INPUT_SIZE, checkpoint
+    from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
+
     if model_path.exists():
         raise FileExistsError(f"refusing to replace existing released model: {model_path}")
     old_manifest = read_manifest(model_path.parent)
     if model_path.name in old_manifest:
         raise ValueError(f"manifest already contains {model_path.name}; refusing to replace")
     train_pool = training_pool_provenance(train_data_path)
+    history_path = history_path or best_path.parent / "history.json"
+    history = validate_training_history(history_path, best_path, train_data_path, index_path)
     fit_rows, report_rows = read_calibration_rows(index_path)
     torch.set_num_threads(2)
     cv2.setNumThreads(1)
@@ -165,15 +228,19 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
     model_path.parent.mkdir(parents=True, exist_ok=True)
     exported = checkpoint(model, temperature=fitted["temperature"], box_pad=box_pad)
     torch.save(exported, model_path)
+    if model_path.stat().st_size > 20 * 1024 * 1024:
+        raise ValueError("calibrated model exceeds the 20 MB release limit")
     write_manifest_entry(model_path, version="box_reader_v1", train_data=train_pool["path"],
                          val_char_acc=None, input_size=INPUT_SIZE)
     manifest_after = read_manifest(model_path.parent)
     if any(manifest_after.get(name) != entry for name, entry in old_manifest.items()):
         raise AssertionError("manifest registration changed a pre-existing entry")
-    digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    digest = _sha256_file(model_path)
     result = {"schema": "box-reader-temperature-v1", "best_checkpoint": str(best_path.resolve()),
+              "best_checkpoint_sha256": _sha256_file(best_path),
               "tune_index": str(index_path.resolve()), "tune_sha256": _sha256_file(index_path),
               "training_pool": train_pool,
+              "training_history": history,
               "folds": {"fit": {"n": len(fit_rows), "origins": len({r['sha256'] for r in fit_rows})},
                         "report": {"n": len(report_rows), "origins": len({r['sha256'] for r in report_rows}),
                                    "path_overlap": 0, "sha_overlap": 0}},
@@ -197,10 +264,12 @@ def main(argv=None) -> int:
     parser.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     parser.add_argument("--train-data", type=Path, default=DEFAULT_TRAIN_DATA)
     parser.add_argument("--best", type=Path, default=DEFAULT_BEST)
+    parser.add_argument("--history", type=Path)
     parser.add_argument("--model-out", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     args = parser.parse_args(argv)
-    result = calibrate(args.index, args.best, args.model_out, args.report, args.train_data)
+    result = calibrate(args.index, args.best, args.model_out, args.report,
+                       args.train_data, args.history)
     print(json.dumps({"temperature": result["fit"]["temperature"],
                       "report_nll_before": result["report_before_calibration"]["ctc_nll_before"],
                       "report_nll_after": result["report"]["ctc_nll_after"],

@@ -14,6 +14,8 @@ import math
 import mmap
 import os
 import random
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -218,7 +220,7 @@ def run(args) -> dict:
     torch.manual_seed(args.seed)
     if args.workers != 0:
         raise ValueError("resource-constrained release uses DataLoader workers=0")
-    ram_limit = 1_000_000_000 if args.smoke and args.device == "cpu" else 2_400_000_000
+    ram_limit = 1_000_000_000 if args.smoke and args.device == "cpu" else 2_700_000_000
     if args.epochs < 30 and not args.smoke:
         raise ValueError("release training requires at least 30 complete epochs")
     if not args.smoke:
@@ -228,11 +230,15 @@ def run(args) -> dict:
         hashes = audit["output_hashes"]
         if file_sha256(args.tune) != hashes["tune.csv"] or file_sha256(args.sampler) != hashes["sampler.json"]:
             raise ValueError("tune or sampler differs from the isolation audit")
-        cache_audit_path = args.train.parent / "audit.json"
-        cache_audit = json.loads(cache_audit_path.read_text(encoding="utf-8-sig"))
-        if (cache_audit.get("pool_sha256") != hashes["pool.csv"]
-                or file_sha256(args.train) != cache_audit.get("cache_index_sha256")):
-            raise ValueError("cache training index differs from the audited full pool")
+        if args.decode_jpeg:
+            if args.device != "cuda" or file_sha256(args.train) != hashes["pool.csv"]:
+                raise ValueError("CUDA JPEG training requires the audited original pool")
+        else:
+            cache_audit_path = args.train.parent / "audit.json"
+            cache_audit = json.loads(cache_audit_path.read_text(encoding="utf-8-sig"))
+            if (cache_audit.get("pool_sha256") != hashes["pool.csv"]
+                    or file_sha256(args.train) != cache_audit.get("cache_index_sha256")):
+                raise ValueError("cache training index differs from the audited full pool")
         checks = audit["content_checks"]
         if any(checks[key] != 0 for key in ("train_tune_sha_overlap", "train_protected_sha_overlap",
                                            "tune_protected_sha_overlap")):
@@ -242,15 +248,22 @@ def run(args) -> dict:
         if free_ram_bytes() < 4_000_000_000:
             raise RuntimeError("less than 4 GB free RAM; wait before GPU training")
         torch.cuda.set_per_process_memory_fraction(.42)
+        # .42 is the dispatch ceiling; also honor a strict decimal 5 GB allocator cap.
+        strict_fraction = min(.42, 5_000_000_000/torch.cuda.get_device_properties(0).total_memory)
+        torch.cuda.set_per_process_memory_fraction(strict_fraction)
         torch.backends.cudnn.benchmark = False
     device = torch.device(args.device)
     metadata = json.loads(args.sampler.read_text(encoding="utf-8"))
     samples = metadata.get("samples_by_subset", metadata.get("subsets", metadata))
     dataset = BoxDataset(args.train, samples, training=True, seed=args.seed)
     tune = BoxDataset(args.tune, samples, training=False, seed=args.seed)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0,
-                        drop_last=False, collate_fn=collate,
-                        generator=torch.Generator().manual_seed(args.seed))
+    if args.decode_jpeg:
+        from lpr_tools.train.gpu_box_batches import GpuBoxBatches
+        loader = GpuBoxBatches(dataset, args.batch_size, collate, read_threads=3)
+    else:
+        loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0,
+                            drop_last=False, collate_fn=collate,
+                            generator=torch.Generator().manual_seed(args.seed))
     tune_loader = DataLoader(tune, batch_size=args.batch_size, shuffle=False,
                              num_workers=0, collate_fn=collate)
     model = BoxNet(imagenet=args.imagenet).to(device)
@@ -291,15 +304,22 @@ def run(args) -> dict:
                                   "seconds": time.perf_counter()-started}), flush=True)
         if not seen.all():
             raise RuntimeError("incomplete epoch")
-        score = evaluate(model, tune_loader, device)
+        payload = checkpoint(model) if not args.smoke else None
+        if not args.smoke:
+            torch.save(payload, args.out / "last.pt")
+        if args.device == "cuda":
+            # All selection inference, like final evaluation, uses the office CPU venv.
+            scored = subprocess.run([str(args.cpu_python), "-m", "lpr_tools.train.score_box_reader",
+                                     "--model", str(args.out / "last.pt"), "--tune", str(args.tune)],
+                                    check=True, text=True, capture_output=True, encoding="utf-8")
+            score = json.loads(scored.stdout)
+        else:
+            score = evaluate(model, tune_loader, device)
         record = {"epoch": epoch+1, "samples": len(dataset), "unique_samples": int(seen.sum()),
                   "loss": loss_sum/len(dataset), "tune": score,
                   "lr": optimizer.param_groups[0]["lr"],
                   "seconds": time.perf_counter()-epoch_started}
         history.append(record)
-        payload = checkpoint(model) if not args.smoke else None
-        if not args.smoke:
-            torch.save(payload, args.out / "last.pt")
         if score["accuracy"] > best:
             best = score["accuracy"]
             if not args.smoke:
@@ -310,9 +330,21 @@ def run(args) -> dict:
                   "total_exposures": len(dataset)*(epoch+1),
                   "ram_peak_bytes": max(ram_peak, process_ram_bytes(peak=True)),
                   "gpu_allocated_peak": torch.cuda.max_memory_allocated() if device.type == "cuda" else 0,
+                  "gpu_reserved_peak": torch.cuda.max_memory_reserved() if device.type == "cuda" else 0,
+                  "io_reduced_for_low_memory": getattr(loader, "reduced_for_memory", False),
                   "wall_seconds": time.perf_counter()-started,
                   "train_sha256": file_sha256(args.train), "tune_sha256": file_sha256(args.tune)}
         (args.out / "history.json").write_text(json.dumps(report, default=str, indent=2), encoding="utf-8")
+        projection = {"completed_epochs": epoch+1, "latest_epoch_seconds": record["seconds"],
+                      "mean_epoch_seconds": sum(r["seconds"] for r in history)/len(history),
+                      "projected_total_seconds": sum(r["seconds"] for r in history)/len(history)*args.epochs,
+                      "exceeds_eight_hours": sum(r["seconds"] for r in history)/len(history)*args.epochs > 28800}
+        (args.out / "projection.json").write_text(json.dumps(projection, indent=2), encoding="utf-8")
+        if epoch == 0:
+            with Path("algorithm/out/receipts/第十批.md").open("a", encoding="utf-8") as receipt:
+                receipt.write("\n首个正式epoch已完成："+json.dumps(projection, ensure_ascii=False)+"\n")
+            if projection["exceeds_eight_hours"]:
+                raise RuntimeError("first-epoch projection exceeds 8 hours; reduce scale before continuing")
         print(json.dumps(record), flush=True)
     return report
 
@@ -332,6 +364,8 @@ def main():
     parser.add_argument("--lr", type=float, default=.001)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--imagenet", action="store_true")
+    parser.add_argument("--decode-jpeg", action="store_true", help="batch torchvision CUDA JPEG decode of original images")
+    parser.add_argument("--cpu-python", type=Path, default=Path(".venv/Scripts/python.exe").resolve())
     parser.add_argument("--smoke", action="store_true", help="explicit non-release tiny CPU smoke")
     parser.add_argument("--prepare-cache", type=Path)
     args = parser.parse_args()

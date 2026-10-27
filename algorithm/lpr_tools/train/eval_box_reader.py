@@ -11,6 +11,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import time
@@ -31,6 +32,7 @@ DEV_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv")
 CEILING_REPORT = Path(r"D:\keshe2\algorithm\out\tmp_arch\ceiling_v2\report.json")
 MODEL = ALGORITHM / "models" / "box_reader_v1.pt"
 JITTER_SOURCE = ROOT / "algorithm" / "out" / "receipts" / "batch9" / "geometry" / "train_per_image.jsonl"
+TUNE_SUBSETS = {"db", "blur", "tilt", "rotate", "fn", "challenge", "weather"}
 
 
 def legal_prediction(text: str, confidences: Iterable[float]) -> tuple[str, float] | None:
@@ -66,14 +68,49 @@ def _resolve_image(path: str, source: Path) -> Path:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        required = {"path", "label", "subset", "brightness", "quad"}
+        required = {"path", "label", "subset", "brightness", "quad", "sha256", "calibration_fold"}
         if not reader.fieldnames or not required.issubset(reader.fieldnames):
             raise ValueError(f"{path} must contain {sorted(required)}")
         rows = list(reader)
-    short_names = {"db", "blur", "tilt", "rotate", "fn", "challenge", "weather"}
+    if len(rows) != 2100:
+        raise ValueError(f"safe tune index must contain 2,100 origins; got {len(rows)}")
+    short_names = TUNE_SUBSETS
+    folds, paths, hashes, subsets = defaultdict(int), set(), set(), defaultdict(int)
+    from lpr.plate_rules import match_layout
+
     for row in rows:
         if row["subset"] in short_names:
             row["subset"] = "ccpd_" + row["subset"]
+        subset = row["subset"].removeprefix("ccpd_")
+        if subset not in TUNE_SUBSETS:
+            raise ValueError(f"unexpected safe tune subset: {row['subset']!r}")
+        fold = row["calibration_fold"]
+        if fold not in {"fit", "report"}:
+            raise ValueError(f"unexpected safe tune calibration fold: {fold!r}")
+        resolved = _resolve_image(row["path"], path)
+        path_key = os.path.normcase(os.path.normpath(str(resolved)))
+        digest = row["sha256"].lower()
+        if path_key in paths or digest in hashes:
+            raise ValueError("safe tune must contain unique source paths and content hashes")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("safe tune rows require SHA-256 source identities")
+        if row["calibration_fold"] not in {"fit", "report"}:
+            raise ValueError("safe tune calibration fold must be fit or report")
+        if match_layout(row["label"]) is None:
+            raise ValueError(f"invalid safe tune plate label: {row['label']!r}")
+        bbox_from_quad(row["quad"])
+        try:
+            int(row["brightness"])
+        except ValueError as exc:
+            raise ValueError("safe tune brightness must be an integer") from exc
+        paths.add(path_key)
+        hashes.add(digest)
+        folds[fold] += 1
+        subsets[subset] += 1
+    if folds != {"fit": 1050, "report": 1050}:
+        raise ValueError(f"safe tune must contain 1,050 origins per fold; got {dict(folds)}")
+    if subsets != {name: 300 for name in TUNE_SUBSETS}:
+        raise ValueError(f"safe tune must contain 300 origins per hard subset; got {dict(subsets)}")
     return rows
 
 
@@ -134,6 +171,7 @@ def _read_tune(reader, rows: list[dict[str, str]], source: Path,
 
 
 def _fixed_rows(index_path: Path, manifest_path: Path, purpose: str) -> list[dict[str, Any]]:
+    from lpr_tools.data.ccpd import parse_ccpd_name
     from lpr_tools.eval.index_samples import fixed_manifest_samples
     from lpr_tools.data.manifest import image_path
 
@@ -142,7 +180,8 @@ def _fixed_rows(index_path: Path, manifest_path: Path, purpose: str) -> list[dic
     for sample in samples:
         result.append({"path": str(image_path(sample.row, manifest_path).resolve()),
                        "label": sample.row.plate_no, "subset": sample.subset,
-                       "brightness": None, "quad": " ".join(str(v) for point in sample.row.quad for v in point)})
+                       "brightness": parse_ccpd_name(sample.row.path).brightness,
+                       "quad": " ".join(str(v) for point in sample.row.quad for v in point)})
     return result
 
 
@@ -233,9 +272,6 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
         for split, manifest, purpose in (("val", val_manifest, "val"),
                                          ("devhard", dev_manifest, "dev-hard")):
             rows = _fixed_rows(index_path, manifest, purpose)
-            from lpr_tools.data.ccpd import parse_ccpd_name
-            for row in rows:
-                row["brightness"] = parse_ccpd_name(row["path"]).brightness
             records = _read_actual(reader, rows, cfg, corner_detector, pad, timings)
             actual_traces.extend((split, record) for record in records)
             result["actual"][split] = {

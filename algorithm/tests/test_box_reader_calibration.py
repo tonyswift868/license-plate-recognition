@@ -8,6 +8,7 @@ from lpr_tools.train.calibrate_box_reader import (
     _report_fold,
     read_calibration_rows,
     training_pool_provenance,
+    validate_training_history,
 )
 
 
@@ -50,6 +51,38 @@ def test_manifest_training_provenance_identifies_pool_not_calibration_index(tmp_
     assert actual == {"path": str(pool.resolve()), "sha256": hashlib.sha256(contents).hexdigest()}
     with pytest.raises(FileNotFoundError, match="training pool index"):
         training_pool_provenance(tmp_path / "missing.csv")
+
+
+def test_release_history_requires_thirty_complete_cuda_epochs(tmp_path):
+    import hashlib
+    import json
+
+    train = tmp_path / "pool.csv"
+    tune = tmp_path / "tune.csv"
+    train.write_text("path,label\na,皖A12345\nb,皖A23456\nc,皖A34567\n", encoding="utf-8")
+    tune.write_text("path,label\na,皖A12345\n", encoding="utf-8")
+    best = tmp_path / "best.pt"
+    best.write_bytes(b"best")
+    records = [{"epoch": epoch, "samples": 3, "unique_samples": 3,
+                "tune": {"accuracy": epoch / 100}} for epoch in range(1, 31)]
+    history = {
+        "recipe": {"smoke": False, "device": "cuda", "epochs": 30,
+                   "train": str(train.resolve()), "tune": str(tune.resolve()),
+                   "out": str(tmp_path.resolve())},
+        "history": records, "best_epoch": 30, "total_exposures": 90,
+        "train_sha256": hashlib.sha256(train.read_bytes()).hexdigest(),
+        "tune_sha256": hashlib.sha256(tune.read_bytes()).hexdigest(),
+    }
+    history_path = tmp_path / "history.json"
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    evidence = validate_training_history(history_path, best, train, tune)
+    assert evidence["epochs"] == 30
+    assert evidence["total_exposures"] == 90
+
+    history["history"] = records[:29]
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    with pytest.raises(ValueError, match="at least 30 complete epochs"):
+        validate_training_history(history_path, best, train, tune)
 
 
 def test_positive_temperature_keeps_report_string_predictions():

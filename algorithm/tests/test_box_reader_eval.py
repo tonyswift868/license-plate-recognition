@@ -11,6 +11,7 @@ from lpr_tools.train.eval_box_reader import (
     bbox_from_quad,
     choose_highest_legal,
     measured_box_deltas,
+    _read_csv,
 )
 
 
@@ -47,6 +48,36 @@ def test_highest_legal_reader_uses_minimum_character_confidence():
         ("皖B23456", [0.98, 0.97, 0.91, 0.99, 0.95, 0.96, 0.94]),
     ]
     assert choose_highest_legal(values) == ("皖B23456", 0.91)
+
+
+def test_safe_tune_csv_requires_fixed_groups_and_disjoint_folds(tmp_path):
+    import csv
+
+    path = tmp_path / "tune.csv"
+    fields = ("path", "label", "subset", "brightness", "quad", "sha256", "calibration_fold")
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        names = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
+        for subset_index, subset in enumerate(names):
+            for index in range(300):
+                global_index = subset_index * 300 + index
+                writer.writerow({"path": f"D:/synthetic/{global_index}.jpg", "label": "皖A12345",
+                                 "subset": subset, "brightness": "20",
+                                 "quad": "0 0 100 0 100 40 0 40",
+                                 "sha256": f"{global_index:064x}",
+                                 "calibration_fold": "fit" if index < 150 else "report"})
+    assert len(_read_csv(path)) == 2100
+
+    with path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    rows[1]["sha256"] = rows[0]["sha256"]
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="unique source paths and content hashes"):
+        _read_csv(path)
 
 
 def test_measured_jitter_uses_only_matched_training_rows(tmp_path):
