@@ -427,6 +427,7 @@ def _validate_training_history(kind: str, wrapper: dict[str, Any], data_dir: Pat
     if not init_path.is_file() or provenance.get("init_sha256") != _sha256(init_path):
         raise ValueError("training initialization checkpoint SHA mismatch")
     optional_sources = {
+        "char_input_source_sha256": _ROOT / "algorithm" / "lpr_tools" / "train" / "province_char_input.py",
         "augmentation_source_sha256": _ROOT / "algorithm" / "lpr_tools" / "train" / "province_synth.py",
         "font_sha256": Path(r"C:\Windows\Fonts\simhei.ttf"),
     }

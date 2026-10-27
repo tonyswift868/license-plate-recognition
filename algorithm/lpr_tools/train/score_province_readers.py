@@ -87,7 +87,8 @@ def score(kind: str, model_path: Path, data_dir: Path, output: Path | None = Non
     from lpr.recognize.crnn import CrnnNet, CrnnReader
     from lpr.recognize.cnn_model import CharCNN
     from lpr.recognize.box_reader import BoxPlateReader, model_from_checkpoint
-    from lpr_tools.train.province_synth import normalized_first_char, replace_province
+    from lpr_tools.train.province_synth import replace_province
+    from lpr_tools.train.province_char_input import normalized_first_char
 
     if kind not in {"box", "crnn", "char"}:
         raise ValueError("kind must be box, crnn, or char")

@@ -41,7 +41,8 @@ from lpr_tools.train.box_data_v2 import build_balanced_multiplicity
 from lpr_tools.train.train_box_reader import BoxDataset, cache_contains, free_ram_bytes, process_ram_bytes, row_crop
 from lpr_tools.train.train_box_reader_v2 import affine_target
 from lpr_tools.train.province_data import province_repeat_additions
-from lpr_tools.train.province_synth import replace_province, normalized_first_char
+from lpr_tools.train.province_synth import replace_province
+from lpr_tools.train.province_char_input import normalized_first_char
 
 FORMAT='province-reader-training-v1'
 render_lock=threading.Lock()
@@ -380,6 +381,7 @@ def run(args):
                 'sampler_sha256':file_sha256(args.sampler),
                 'augmentation_source_sha256':file_sha256(Path(__file__).with_name('province_synth.py')),
                 'font_sha256':file_sha256(Path(r'C:\Windows\Fonts\simhei.ttf'))}
+    if args.kind=='char':provenance['char_input_source_sha256']=file_sha256(Path(__file__).with_name('province_char_input.py'))
     history=[];best=-1.;best_epoch=0;elapsed=0.;start_epoch=0;skip=0
     if args.resume:
         saved=torch.load(args.out/'last.pt',map_location='cpu',weights_only=True)
