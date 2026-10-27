@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,9 +35,9 @@ def _fresh_trace(output, options):
         val_manifest=options["val_manifest"], devhard_manifest=options["devhard_manifest"],
         pad_x=options["pad_x"], pad_y=options["pad_y"], output=output,
         detector_model=options["detector_model"], box_model=options["box_model"],
-        detector_loader=options["detector_loader"], box_loader=options["box_loader"], search=True)
-    if report["status"] != "complete" or not report.get("search", {}).get("best"):
-        raise ValueError("fresh model evaluation did not yield a complete feasible base policy")
+        detector_loader=options["detector_loader"], box_loader=options["box_loader"], search=False)
+    if report["status"] != "complete":
+        raise ValueError("fresh model inference did not complete successfully")
     return output, output.with_suffix(".report.json")
 
 
@@ -49,6 +50,43 @@ def _auto_review(trace, base_report, target, split_path=None):
     if main(args) != 0:
         raise ValueError("automatic policy review failed")
     return json.loads(target.read_text(encoding="utf-8"))
+
+
+def _fit_threshold_report(trace, split_path, original_report, target):
+    """Run the fixed exact threshold search on fit rows only, without opening hold labels."""
+    from .three_route import exact_search, read_jsonl_gz, sha256, validate_records
+    from .route_split import path_key
+
+    records, metadata = read_jsonl_gz(trace)
+    assignments_doc = json.loads(Path(split_path).read_text(encoding="utf-8"))
+    assignments = {path_key(path): half for path, half in assignments_doc["assignments"].items()}
+    if set(assignments) != {path_key(row["path"]) for row in records}:
+        raise ValueError("fit-only threshold split paths do not match the trace")
+    fit_records = [row for row in records if assignments[path_key(row["path"])] == "fit"]
+    hold_count = len(records) - len(fit_records)
+    if not fit_records or not hold_count:
+        raise ValueError("fit/hold threshold search requires nonempty halves")
+    validate_records(fit_records)
+    scan = exact_search(fit_records, progress=lambda event: print(
+        json.dumps({"fit_threshold_progress": event}, separators=(",", ":")), flush=True))
+    if not scan.get("complete") or not scan.get("best"):
+        raise ValueError("fit-only exact threshold search has no feasible rule")
+    original = json.loads(Path(original_report).read_text(encoding="utf-8"))
+    payload = {"status": "complete", "selection_scope": "fit-only",
+        "trace": str(Path(trace).resolve()), "trace_sha256": sha256(trace),
+        "trace_metadata": metadata, "trace_metadata_sha256": hashlib.sha256(json.dumps(
+            metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "original_trace_report": str(Path(original_report).resolve()),
+        "original_trace_report_sha256": sha256(original_report),
+        "original_full_search_ignored": "full-trace threshold search is not used for selection",
+        "split_json": str(Path(split_path).resolve()),
+        "split_sha256": sha256(split_path), "fit_rows": len(fit_records),
+        "hold_rows_unscored": hold_count, "search": scan}
+    target = Path(target)
+    if target.exists():
+        raise FileExistsError(f"refusing to overwrite fit threshold report: {target}")
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
 
 
 def _features(trace, target, options):
@@ -71,6 +109,16 @@ def _split(trace, features, target):
             row = json.loads(line)
             if "_meta" not in row:
                 hashes[row["path"]] = row["image_sha256"]
+    write_split(records, hashes, sha256(trace), target)
+    return target
+
+
+def _content_split(trace, target):
+    """Auto-only reruns need content isolation but no locator replay/features."""
+    from .route_split import write_split
+    from .three_route import read_jsonl_gz, sha256
+    records, _ = read_jsonl_gz(trace)
+    hashes = {row["path"]: sha256(Path(row["path"])) for row in records}
     write_split(records, hashes, sha256(trace), target)
     return target
 
@@ -120,16 +168,26 @@ def run_workflow(output_dir, *, mode="all", fresh=False, trace=None, base_report
             trace, directory / "route_features.jsonl.gz", options)
         gc.collect()
         split_path = _split(trace, feature_path, directory / "split.json")
+    else:
+        split_path = _content_split(trace, directory / "split.json")
     auto_path = directory / "auto-review.json"
-    automatic = _auto_review(trace, base_report, auto_path, split_path)
+    fit_base_report = base_report
+    if split_path:
+        fit_base_report = _fit_threshold_report(trace, split_path, base_report,
+                                                directory / "fit-threshold-report.json")
+    automatic = _auto_review(trace, fit_base_report, auto_path, split_path)
     if automatic.get("selected_policy") is None:
         raise ValueError("no reviewed automatic policy satisfies both precision constraints")
     result = {"mode": mode, "fresh": fresh, "trace": str(trace),
-              "base_report": str(base_report), "auto_report": str(auto_path),
+              "base_report": str(base_report), "fit_base_report": str(fit_base_report),
+              "auto_report": str(auto_path),
               "auto_policy": automatic["selected_policy"],
               "selected_total_accepted": automatic["selected_total_accepted"]}
     if mode != "auto":
         baseline = {**automatic, "selected_policy": "000",
+                    "eligible": None,
+                    "baseline_expected_accepted": sum(automatic["policies"]["000"][s]["accepted"]
+                                                       for s in ("val", "devhard")),
                     "selected_total_accepted": sum(automatic["policies"]["000"][s]["accepted"]
                                                    for s in ("val", "devhard")),
                     "selection_override": "task1 freezes the original three-route acceptance set"}

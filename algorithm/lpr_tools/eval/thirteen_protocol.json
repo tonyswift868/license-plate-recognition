@@ -1,0 +1,13 @@
+{
+  "schema": "batch13-preregistration-v1",
+  "written_before": "new-detector inference and all batch13 fit/hold scoring",
+  "split": "route_split seed42; identical bytes grouped; singleton rebalance; same assignments for both combinations",
+  "base_thresholds": "exact_search on fit rows only; val and devhard each precision >= .995; original exact-search tie ordering",
+  "automatic_family": "16 existing inline/safe switch policies; a fixed p2 counterfactual is created only for the fit-selected ungated winner",
+  "province_gate": "after first original automatic decision, require at least two distinct valid routes in its same candidate and same rect to support its predicted province character; B solo may use any one rect in that same candidate; otherwise reject automatic pass and go to manual fallback without searching further automatic events",
+  "automatic_selection": "choose the highest-coverage ungated policy among the 16 whose fit val/devhard precision is each >= .995; deterministic ties: baseline 000/safe-000, fewer legacy switches, lexical ID. Then, if any nonempty fit auto subgroup among dark/green/fn/challenge/non-Anhui has precision < .99, evaluate only the paired p2 gate for that winner; adopt p2 only if its fit val/devhard precision each remain >= .995, otherwise retain the ungated winner. The p2 comparison never selects among other switch policies.",
+  "fallback_family": "unchanged 33 fallback_rules_v1.json rules; choose once against baseline000 on fit only, green >= old-default on same fit; maximize hard correct, dark correct, tilt+rotate correct, val correct, then lowest complexity, ID",
+  "evaluation": "freeze ungated winner and paired p2 adoption using fit only before scoring either on hold/full; no hold-driven reselection or new rules. Report p2 counterfactual coverage cost and subgroup precision in both halves. If hold/full precision fails, report unmet target and do not call it production recommendation",
+  "business_contract": "three_route_expected.runtime_projection retains existing special-color and error behavior",
+  "remaining_errors": "diagnostic truth use after freezing only; no policy tuning"
+}

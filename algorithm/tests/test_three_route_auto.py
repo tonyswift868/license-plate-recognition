@@ -79,7 +79,7 @@ def test_invalid_attempts_never_pass_even_with_zero_confidence_threshold():
     assert reference_decision(row, "111")["status"] == "NO_AUTO"
 
 
-def test_family_is_exactly_sixteen_and_requires_each_split_precision():
+def test_family_is_exactly_thirty_two_and_requires_fit_split_precision():
     rows = []
     for split in ("val", "devhard"):
         rows.extend([
@@ -89,8 +89,10 @@ def test_family_is_exactly_sixteen_and_requires_each_split_precision():
                     rects=[_rect(segment=_attempt("wrong", .95), reader=_attempt("wrong", .95))]),
         ])
     result = evaluate_family(rows)
-    assert set(result["policies"]) == ({f"{index:03b}" for index in range(8)} |
-                                        {f"safe-{index:03b}" for index in range(8)})
+    assert set(result["fit_policies"]) == ({f"{index:03b}" for index in range(8)} |
+        {f"safe-{index:03b}" for index in range(8)} |
+        {f"p2-{index:03b}" for index in range(8)} |
+        {f"p2-safe-{index:03b}" for index in range(8)})
     assert result["baseline_policy"] == "000"
     assert result["selected_policy"] is None  # every accepting policy is only 50% precise
     assert set(result["eligible"]) == set()
@@ -139,19 +141,74 @@ def test_dark_subgroup_is_ccpd_db_only_and_whole_accuracy_uses_fixed_fallback():
     assert metrics["val"]["whole_plate_correct"] == 2
 
 
+def test_non_wan_subgroup_is_a_fit_metric_stratum():
+    rows = [_record(truth="皖A12345", path="/wan.jpg"),
+            _record(truth="沪A12345", path="/non-wan.jpg")]
+    metrics = score_policy(rows, "000")
+    assert metrics["val/non_wan"]["n"] == 1
+    assert metrics["val/non_wan"]["accepted"] == 0
+
+
 def test_unknown_policy_id_is_rejected():
     with pytest.raises(ValueError):
         reference_decision(_record(), "0101")
 
 
-def test_fit_hold_assignments_are_reported_but_do_not_change_auto_selection():
+def test_full_trace_threshold_report_is_rejected_before_auto_selection(tmp_path):
+    import json
+    from lpr_tools.eval.three_route_auto import _load_base_report
+    p = tmp_path / "full-report.json"
+    p.write_text(json.dumps({"status":"complete", "search":{"complete":True,
+        "best":{"tau_agree":.8,"tau_box":.9,"accepted":10}}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="fit-only"):
+        _load_base_report(p)
+
+
+def test_fit_hold_selection_does_not_use_hold_truth():
     rows = [_record(truth="A", split="val", path="/val.jpg",
                     rects=[_rect(segment=_attempt("A", .95), reader=_attempt("A", .95))]),
             _record(truth="A", split="devhard", path="/hard.jpg",
                     rects=[_rect(segment=_attempt("A", .95), reader=_attempt("A", .95))])]
     assignments = {"/val.jpg": "fit", "/hard.jpg": "hold"}
-    without = evaluate_family(rows)
     with_halves = evaluate_family(rows, assignments=assignments)
-    assert without["selected_policy"] == with_halves["selected_policy"]
-    assert with_halves["policies"]["000"]["fit"]["n"] == 1
+    changed_hold = evaluate_family([{**rows[0]}, {**rows[1], "truth": "not-A"}], assignments=assignments)
+    assert with_halves["selected_policy"] == changed_hold["selected_policy"]
+    assert with_halves["selected_policy"] is None  # fit lacks a devhard row; hold cannot make it eligible
+    assert with_halves["fit_policies"]["000"]["val"]["n"] == 1
     assert with_halves["policies"]["000"]["hold"]["n"] == 1
+
+
+def test_province_support_gate_rejects_single_route_and_ignores_truth():
+    one = _record(truth="皖A12345", rects=[_rect(segment=_attempt("皖A12345", .99),
+        reader=_attempt("沪A12345", .5))], boxes={"0": _attempt("粤A12345", .5)})
+    assert reference_decision(one, "011")["status"] == "OK"
+    rejected = reference_decision(one, "p2-011")
+    assert rejected["status"] == "NO_AUTO"
+    assert rejected["event"] == "province_single_route_rejected"
+    two = {**one, "boxes": {"0": _attempt("皖B12345", .98)}}
+    accepted = reference_decision(two, "p2-011")
+    assert accepted["status"] == "OK"
+    assert reference_decision({**two, "truth": "different"}, "p2-011") == accepted
+
+
+def test_fit_selects_ungated_then_uses_only_fit_subgroup_trigger_for_gate():
+    rows = []
+    assignments = {}
+    for split in ("val", "devhard"):
+        for index in range(200):
+            path = f"/{split}-{index}.jpg"
+            # 011 adds one wrong single-route green plate among 200. It still
+            # clears 99.5% globally, while p2 removes the single-route vote.
+            truth = "皖A12345" if index else "粤A12345"
+            segment = _attempt("皖A12345", .99)
+            reader = _attempt("皖A12345" if index else "沪B12345", .5)
+            rows.append(_record(path=path, split=split, truth=truth,
+                subset="ccpd_green" if index == 0 else "ccpd_base",
+                plate_color="green" if index == 0 else "blue",
+                rects=[_rect(segment=segment, reader=reader)], boxes={"0": _attempt("粤C12345", .4)}))
+            assignments[path] = "fit"
+    result = evaluate_family(rows, assignments=assignments)
+    assert result["ungated_fit_winner"] == "010"
+    assert result["province_gate"]["watched_fit_subgroups_below_99"]["green"]["accepted"] > 0
+    assert result["province_gate"]["adopted"] is True
+    assert result["selected_policy"] == "p2-010"

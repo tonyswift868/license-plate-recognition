@@ -18,7 +18,7 @@ from lpr_tools.eval.route_split import assert_content_separation, path_key, spli
 from lpr_tools.eval.three_route import (
     _fallback, _reference_fallback, _valid, read_jsonl_gz, sha256,
 )
-from lpr_tools.eval.three_route_auto import reference_decision
+from lpr_tools.eval.three_route_auto import reference_decision, _policy
 
 
 PREREG_PATH = Path(__file__).with_name("fallback_rules_v1.json")
@@ -82,9 +82,7 @@ def _read_features(path):
 def _load_policy(path, trace_path):
     policy = json.loads(Path(path).read_text(encoding="utf-8"))
     selected = policy.get("selected_policy")
-    code = selected[5:] if isinstance(selected, str) and selected.startswith("safe-") else selected
-    if not isinstance(code, str) or len(code) != 3 or any(bit not in "01" for bit in code):
-        raise ValueError("auto policy report lacks a selected 3-bit or safe-3-bit policy")
+    parsed = _policy(selected)
     if policy.get("trace_rows") != 3100:
         raise ValueError("auto policy report must cover exactly 3100 rows")
     if policy.get("trace") and Path(policy["trace"]).resolve() != Path(trace_path).resolve():
@@ -103,10 +101,9 @@ def _load_policy(path, trace_path):
     if any(key not in thresholds or not math.isfinite(float(thresholds[key])) or
            not 0 <= float(thresholds[key]) <= 1 for key in legacy_thresholds):
         raise ValueError("auto policy report lacks valid legacy S/R thresholds")
-    switches = {"legacy_sr_agree": code[0] == "1",
-                "legacy_solo_segment": code[1] == "1",
-                "legacy_solo_reader": code[2] == "1"}
-    return policy, {"policy_id": selected, "safe_augment": selected.startswith("safe-"),
+    switches = {key: parsed[key] for key in ("legacy_sr_agree", "legacy_solo_segment",
+                "legacy_solo_reader", "province_support")}
+    return policy, {"policy_id": selected, "safe_augment": parsed["safe_augment"],
                     "base_thresholds": {"tau_agree": float(tau_agree),
                                         "tau_box": float(tau_box)}, **switches}
 
@@ -544,22 +541,6 @@ def run_refine(trace_path, features_path, auto_policy_path, output_dir=None,
         feature_views.append(_fallback_feature_view(
             feature_by_path[path_key(record["path"])], fallbacks, record))
 
-    auto_counts = defaultdict(lambda: {"n": 0, "accepted": 0, "correct": 0})
-    for record, auto in zip(records, auto_rows):
-        row = auto_counts[record["split"]]
-        row["n"] += 1
-        if auto["status"] == "OK":
-            row["accepted"] += 1
-            row["correct"] += int(auto.get("plate") == record["truth"])
-    for split in ("val", "devhard"):
-        row = auto_counts[split]
-        if row["accepted"] <= 0 or row["correct"] * 1000 < row["accepted"] * 995:
-            raise ValueError(f"frozen auto policy fails 99.5% precision on {split}: {row}")
-        reported = auto_policy.get("policies", {}).get(selected_auto["policy_id"], {}).get(split)
-        if not reported or (row["accepted"] != int(reported.get("accepted", -1)) or
-                            row["correct"] != int(reported.get("accepted_correct", -1))):
-            raise ValueError(f"selected auto replay differs from policy report on {split}")
-
     fit_indices = [i for i, row in enumerate(records)
                    if assignments[path_key(row["path"])] == "fit"]
     hold_indices = [i for i, row in enumerate(records)
@@ -594,6 +575,24 @@ def run_refine(trace_path, features_path, auto_policy_path, output_dir=None,
 
     selected_rule = (rules_by_id[frozen_rule_id] if frozen_rule_id is not None else
                      min(eligible, key=selection_key) if eligible else None)
+    # Audit the already-frozen automatic policy only after fallback fit selection.
+    # These full counts cannot affect either rule choice or eligibility.
+    auto_counts = defaultdict(lambda: {"n": 0, "accepted": 0, "correct": 0})
+    for record, auto in zip(records, auto_rows):
+        row = auto_counts[record["split"]]
+        row["n"] += 1
+        if auto["status"] == "OK":
+            row["accepted"] += 1
+            row["correct"] += int(auto.get("plate") == record["truth"])
+    for split in ("val", "devhard"):
+        row = auto_counts[split]
+        if (row["accepted"] <= 0 or row["correct"] * 1000 < row["accepted"] * 995) and \
+                auto_policy.get("selection_scope") != "fit_only":
+            raise ValueError(f"frozen auto policy fails 99.5% precision on {split}: {row}")
+        reported = auto_policy.get("policies", {}).get(selected_auto["policy_id"], {}).get(split)
+        if not reported or (row["accepted"] != int(reported.get("accepted", -1)) or
+                            row["correct"] != int(reported.get("accepted_correct", -1))):
+            raise ValueError(f"selected auto replay differs from policy report on {split}")
     if selected_rule:
         selected_id = selected_rule["id"]
         hold_result = {}

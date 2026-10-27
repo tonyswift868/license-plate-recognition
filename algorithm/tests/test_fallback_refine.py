@@ -56,7 +56,22 @@ def test_auto_policy_uses_report_selected_safe_policy_and_dynamic_thresholds(tmp
     assert selected == {"policy_id": "safe-011", "safe_augment": True,
                         "base_thresholds": {"tau_agree": .87, "tau_box": .96},
                         "legacy_sr_agree": False, "legacy_solo_segment": True,
-                        "legacy_solo_reader": True}
+                        "legacy_solo_reader": True, "province_support": False}
+
+
+def test_auto_policy_loads_province_gate_for_fallback_replay(tmp_path):
+    trace = tmp_path / "trace.gz"
+    trace.write_bytes(b"trace")
+    report_path = tmp_path / "auto.json"
+    report_path.write_text(json.dumps({
+        "selected_policy": "p2-safe-011", "trace_rows": 3100,
+        "thresholds": {"tau_agree": .87, "tau_box": .96,
+                       "legacy_sr": .82, "legacy_solo_segment": .93,
+                       "legacy_solo_reader": .98}}), encoding="utf-8")
+    _, selected = _load_policy(report_path, trace)
+    assert selected["province_support"] is True
+    assert selected["safe_augment"] is True
+    assert selected["policy_id"] == "p2-safe-011"
 
 
 def test_frozen_rule_reuse_binds_baseline_auto_and_all_input_hashes(tmp_path):
