@@ -265,13 +265,22 @@ def run(args):
         head.weight.requires_grad_(True);head.bias.requires_grad_(True)
         head.weight.register_hook(lambda gradient: torch.cat((gradient[:31],torch.zeros_like(gradient[31:]))))
         head.bias.register_hook(lambda gradient: torch.cat((gradient[:31],torch.zeros_like(gradient[31:]))))
-    optimizer=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],lr=args.lr,
+    parameters=[p for p in model.parameters() if p.requires_grad]
+    if args.kind=='box':
+        # Retain v2's smaller localization LR and geometry supervision while
+        # adapting the recognition features to the new province distribution.
+        local_ids={id(p) for p in model.stn.parameters()}
+        parameters=[{'params':model.stn.parameters(),'lr':args.lr*.2},
+                    {'params':[p for p in parameters if id(p) not in local_ids],'lr':args.lr}]
+    optimizer=torch.optim.AdamW(parameters,lr=args.lr,
         weight_decay=0. if args.kind=='char' else 1e-4,fused=device.type=='cuda')
     scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs,eta_min=args.lr*.08)
     ctc=nn.CTCLoss(blank=NUM_CLASSES,reduction='none',zero_infinity=False)
     provenance={'init':str(args.init.resolve()),'init_sha256':file_sha256(args.init),
                 'index_sha256':file_sha256(index),'audit_sha256':file_sha256(args.data_dir/'province_audit.json'),
-                'sampler_sha256':file_sha256(args.sampler)}
+                'sampler_sha256':file_sha256(args.sampler),
+                'augmentation_source_sha256':file_sha256(Path(__file__).with_name('province_synth.py')),
+                'font_sha256':file_sha256(Path(r'C:\Windows\Fonts\simhei.ttf'))}
     history=[];best=-1.;best_epoch=0;elapsed=0.;start_epoch=0;skip=0
     if args.resume:
         saved=torch.load(args.out/'last.pt',map_location='cpu',weights_only=True)
@@ -311,7 +320,7 @@ def run(args):
             else:
                 per_example=ctc(logits.float().log_softmax(-1),targets.to(device),
                     torch.full((len(texts),),logits.shape[0],dtype=torch.long),lengths)/lengths.to(device)
-                if pred_theta is not None:per_example+=.3*(pred_theta-thetas.to(device)).square().mean((1,2))
+                if pred_theta is not None:per_example+=(pred_theta-thetas.to(device)).square().mean((1,2))
             gpu_weights=weights.to(device)
             loss=(per_example*gpu_weights).sum()/gpu_weights.sum()
             if not torch.isfinite(loss):raise RuntimeError('nonfinite training loss')
@@ -332,7 +341,9 @@ def run(args):
                             'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
                             'synthetic_provinces':dict(synthetic_provinces),'synthetic_province_weights':dict(synthetic_province_weights)}
                     atomic_save(payload(steps,counts),args.out/'last.pt')
-                    (args.out/'paused.json').write_text(json.dumps({'reason':'insufficient memory; safely checkpointed',
+                    request=args.out/'stop-request.json'
+                    reason=(json.loads(request.read_text(encoding='utf-8-sig')).get('reason') if request.exists() else 'insufficient memory; safely checkpointed')
+                    (args.out/'paused.json').write_text(json.dumps({'reason':reason,
                         'epoch':epoch+1,'cursor':steps,'rss':rss,'free_ram':free,'required_free_bytes':3_500_000_000}))
                     raise SystemExit(75)
             if args.profile_batches and steps>=args.profile_batches:

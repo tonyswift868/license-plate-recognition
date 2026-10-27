@@ -46,7 +46,7 @@ def normalized_first_char(image_bgr, quad, label_or_color: str):
     if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
         raise ValueError("image must be uint8 BGR")
     plate, _, _ = _canonical(image, quad)
-    x0, x1 = int(round(plate.shape[1] * .035)), int(round(plate.shape[1] * .205))
+    x0, x1 = int(round(plate.shape[1] * .012)), int(round(plate.shape[1] * .145))
     y0, y1 = int(round(plate.shape[0] * .06)), int(round(plate.shape[0] * .94))
     gray = cv2.cvtColor(plate[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     if gray.size == 0:
@@ -57,7 +57,9 @@ def normalized_first_char(image_bgr, quad, label_or_color: str):
     _, binary = cv2.threshold(unified, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     points = cv2.findNonZero(binary)
     if points is None or len(points) < 4:
-        raise ValueError("province glyph has no foreground after polarity normalization")
+        # Very dark or flat source slots still represent valid training rows.
+        # Keep their normalized output shape and let the caller's target decide.
+        return normalize_char(unified)
     x, y, w, h = cv2.boundingRect(points)
     if w < 2 or h < 4:
         raise ValueError("province glyph foreground is too small")
@@ -68,30 +70,34 @@ def normalized_first_char(image_bgr, quad, label_or_color: str):
 
 
 @lru_cache(maxsize=256)
-def _glyph_mask_cached(character: str, width: int, height: int, font_name: str):
+def _glyph_mask_cached(character: str, size: int, font_name: str):
     import numpy as np
     from PIL import Image, ImageDraw
-    font_size = max(8, int(height * .92))
-    mask = Image.new("L", (width, height), 0)
+    # Render square first. The target plate cell is narrow and tall; fitting the
+    # font to that cell directly would shrink the glyph height to ~half-size.
+    mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    font = _font(font_name, font_size)
+    font = _font(font_name, int(size * .88))
     left, top, right, bottom = draw.textbbox((0, 0), character, font=font)
     text_w, text_h = right - left, bottom - top
     if text_w <= 0 or text_h <= 0:
         raise ValueError("font could not render province character")
-    scale = min((width * .78) / text_w, (height * .84) / text_h, 1.0)
-    if scale < 1:
-        font = _font(font_name, max(8, int(font_size * scale)))
-        left, top, right, bottom = draw.textbbox((0, 0), character, font=font)
-        text_w, text_h = right - left, bottom - top
-    x = (width - text_w) // 2 - left
-    y = (height - text_h) // 2 - top
+    x = (size - text_w) // 2 - left
+    y = (size - text_h) // 2 - top
     draw.text((x, y), character, fill=255, font=font)
     return np.asarray(mask, dtype=np.uint8).copy()
 
 
 def _glyph_mask(character: str, width: int, height: int, font_path: Path):
-    return _glyph_mask_cached(character, width, height, str(font_path))
+    import cv2
+    import numpy as np
+    source = _glyph_mask_cached(character, max(width, height), str(font_path))
+    points = cv2.findNonZero(source)
+    if points is None:
+        raise ValueError("font rendered an empty province glyph")
+    x, y, w, h = cv2.boundingRect(points)
+    glyph = source[y:y + h, x:x + w]
+    return cv2.resize(glyph, (width, height), interpolation=cv2.INTER_AREA if width < w else cv2.INTER_LINEAR)
 
 
 def replace_province(image_bgr, quad, source_label: str, target_province: str,
@@ -120,7 +126,9 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
 
     plate, source_to_plate, _ = _canonical(image, quad)
     height, width = plate.shape[:2]
-    x0, x1 = int(round(width * .035)), int(round(width * .205))
+    # Match the production layout: first slot ends at x=.127; the next glyph
+    # cell begins around x=.153. The .145 boundary preserves a safety margin.
+    x0, x1 = int(round(width * .012)), int(round(width * .145))
     y0, y1 = int(round(height * .06)), int(round(height * .94))
     cell = plate[y0:y1, x0:x1].copy()
     if cell.size == 0:
@@ -144,11 +152,28 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
     # Preserve the original glyph's foreground color (white on blue, dark on
     # green/yellow) and softly match its blur/noise before the source perspective.
     foreground = cell[glyph > 0]
-    if foreground.size:
-        text_color = np.median(foreground.astype(np.float32), axis=0)
+    foreground_points = cv2.findNonZero(glyph)
+    source_glyph_height = (cv2.boundingRect(foreground_points)[3]
+                           if foreground_points is not None else 0)
+    background_luma = float(cv2.cvtColor(background[None, None, :].astype(np.uint8),
+                                         cv2.COLOR_BGR2GRAY)[0, 0])
+    style_fallback = foreground_points is None or foreground.size < 24 or source_glyph_height < 12
+    if style_fallback:
+        dark_text = len(source_label) == 8 or background_luma >= 145
+        text_color = np.asarray([16.0, 16.0, 16.0] if dark_text else
+                                [240.0, 240.0, 240.0], dtype=np.float32)
     else:
-        text_color = np.asarray([235.0, 235.0, 235.0], dtype=np.float32)
-    mask = _glyph_mask(target_province, x1 - x0, y1 - y0, font_path)
+        text_color = np.median(foreground.astype(np.float32), axis=0)
+    if foreground_points is None:
+        glyph_height = min(y1 - y0 - 4, 60)
+    else:
+        glyph_height = min(y1 - y0 - 4, max(54, min(64, source_glyph_height)))
+    glyph_width = min(x1 - x0 - 4, max(22, round(glyph_height * .43)))
+    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    glyph_mask = _glyph_mask(target_province, glyph_width, glyph_height, font_path)
+    gx = (mask.shape[1] - glyph_width) // 2
+    gy = (mask.shape[0] - glyph_height) // 2
+    mask[gy:gy + glyph_height, gx:gx + glyph_width] = glyph_mask
     angle = float(rng.uniform(-1.8, 1.8)) if hasattr(rng, "uniform") else 0.0
     scale = float(rng.uniform(.94, 1.04)) if hasattr(rng, "uniform") else 1.0
     affine = cv2.getRotationMatrix2D(((x1 - x0 - 1) / 2, (y1 - y0 - 1) / 2), angle, scale)
@@ -163,6 +188,8 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
     noise_std = min(3.0, max(.35, float(np.std(cell.astype(np.float32) - cleaned.astype(np.float32)) * .08)))
     noise = rng.normal(0.0, noise_std, rendered.shape).astype(np.float32) if hasattr(rng, "normal") else 0.0
     rendered = np.clip(rendered + noise, 0, 255).astype(np.uint8)
+    rendered_points = cv2.findNonZero(mask)
+    rendered_glyph_height = cv2.boundingRect(rendered_points)[3] if rendered_points is not None else 0
 
     # Project only the small first-character slot back, keeping the full source
     # frame untouched elsewhere and avoiding a full-frame warp per synthetic row.
@@ -185,6 +212,11 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
     alpha_src = np.full((y1 - y0, x1 - x0), 255, dtype=np.uint8)
     patch_alpha = cv2.warpPerspective(alpha_src, local_to_crop, (ix1 - ix0, iy1 - iy0),
                                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    patch_alpha = np.where(patch_alpha >= 128, 255, 0).astype(np.uint8)
+    projected_slot = np.rint(source_corners - np.asarray([ix0, iy0], dtype=np.float32)).astype(np.int32)
+    polygon_mask = np.zeros_like(patch_alpha)
+    cv2.fillConvexPoly(polygon_mask, projected_slot, 255)
+    patch_alpha = cv2.bitwise_and(patch_alpha, polygon_mask)
     base = image[iy0:iy1, ix0:ix1].astype(np.float32)
     weight = (patch_alpha.astype(np.float32) / 255.0)[..., None]
     result = image.copy()
@@ -193,7 +225,11 @@ def replace_province(image_bgr, quad, source_label: str, target_province: str,
     new_label = target_province + source_label[1:]
     return result, new_label, {"source_province": source_label[0], "target_province": target_province,
                                "slot_xyxy_canonical": [x0, y0, x1, y1],
-                               "local_blur_variance": local_blur, "noise_std": noise_std}
+                               "local_blur_variance": local_blur, "noise_std": noise_std,
+                               "source_glyph_height": source_glyph_height,
+                               "rendered_glyph_height": rendered_glyph_height,
+                               "rendered_glyph_width": glyph_width,
+                               "style_fallback": style_fallback}
 
 
 __all__ = ["replace_province", "normalized_first_char"]
