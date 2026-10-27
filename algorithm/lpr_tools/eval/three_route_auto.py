@@ -1,8 +1,8 @@
 """Replay a preregistered, finite family of three-route automatic rules.
 
-This evaluator is deliberately read-only with respect to production runtime.
-It does not tune thresholds: the archived three-route thresholds and three
-legacy switches are fixed before scoring.
+This evaluator never changes production runtime. Its input thresholds must
+come from a fit-only report with a shared content-safe split. The one-command
+three_route_workflow --mode auto prepares those inputs from a cached trace.
 """
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ SPLITS = ("val", "devhard")
 
 def _policy(policy):
     if isinstance(policy, str):
-        safe = policy.startswith("safe-")
-        policy_id = policy[5:] if safe else policy
-        if len(policy_id) != 3 or any(bit not in "01" for bit in policy_id):
-            raise ValueError("policy ID must be 000..111 or safe-000..safe-111")
-        bits = tuple(bit == "1" for bit in policy_id)
-        return {"policy_id": policy, "safe_augment": safe,
+        province_support = policy.startswith("p2-")
+        base_id = policy[3:] if province_support else policy
+        safe = base_id.startswith("safe-")
+        bits_id = base_id[5:] if safe else base_id
+        if len(bits_id) != 3 or any(bit not in "01" for bit in bits_id):
+            raise ValueError("policy ID must be 000..111, safe-000..111, p2-000..111, or p2-safe-000..111")
+        bits = tuple(bit == "1" for bit in bits_id)
+        return {"policy_id": policy, "safe_augment": safe, "province_support": province_support,
                 "base_thresholds": {"tau_agree": TAU_AGREE, "tau_box": TAU_BOX},
                 "legacy_sr_agree": bits[0], "legacy_solo_segment": bits[1],
                 "legacy_solo_reader": bits[2]}
@@ -42,7 +44,10 @@ def _policy(policy):
                 ("legacy_sr_agree", "legacy_solo_segment", "legacy_solo_reader")}
     short_id = "".join("1" if switches[key] else "0" for key in switches)
     safe = bool(policy.get("safe_augment", False))
+    province_support = bool(policy.get("province_support", False))
     policy_id = f"safe-{short_id}" if safe else short_id
+    if province_support:
+        policy_id = f"p2-{policy_id}"
     if policy.get("policy_id", policy_id) != policy_id:
         raise ValueError("policy_id does not match switch values")
     thresholds = policy.get("base_thresholds", {})
@@ -50,7 +55,7 @@ def _policy(policy):
     tau_box = float(thresholds.get("tau_box", TAU_BOX))
     if not all(math.isfinite(value) and value >= 0 for value in (tau_agree, tau_box)):
         raise ValueError("base thresholds must be finite nonnegative values")
-    return {"policy_id": policy_id, "safe_augment": safe,
+    return {"policy_id": policy_id, "safe_augment": safe, "province_support": province_support,
             "base_thresholds": {"tau_agree": tau_agree, "tau_box": tau_box}, **switches}
 
 
@@ -109,9 +114,35 @@ def reference_decision(record, policy="000"):
     if selected["safe_augment"]:
         baseline = _baseline_decision(record, thresholds["tau_agree"], thresholds["tau_box"])
         if baseline is not None:
-            return baseline
-        return _legacy_decision(record, selected)
-    return _combined_decision(record, selected)
+            decision = baseline
+        else:
+            decision = _legacy_decision(record, selected)
+    else:
+        decision = _combined_decision(record, selected)
+    if selected["province_support"] and decision["status"] == "OK" and not _has_province_support(record, decision):
+        return {"status": "NO_AUTO", "plate": None, "confidence": 0.0,
+                "route": None, "candidate_index": None, "rect_index": None,
+                "event": "province_single_route_rejected"}
+    return decision
+
+
+def _has_province_support(record, decision):
+    """Require two distinct valid route predictions to support the accepted province character."""
+    plate = decision.get("plate")
+    if not isinstance(plate, str) or not plate:
+        return False
+    ci = decision.get("candidate_index")
+    rects = [row for row in record.get("rects", []) if int(row["candidate_index"]) == int(ci)]
+    if decision.get("rect_index") is not None:
+        rects = [row for row in rects if int(row["rect_index"]) == int(decision["rect_index"])]
+    boxes = record.get("boxes", {})
+    for rect in rects:
+        routes = (rect.get("segment"), rect.get("reader"), boxes.get(str(ci)))
+        support = {index for index, attempt in enumerate(routes)
+                   if _valid_route(attempt) and attempt["plate"].startswith(plate[0])}
+        if len(support) >= 2:
+            return True
+    return False
 
 
 def _combined_decision(record, selected):
@@ -222,6 +253,9 @@ def _groups(record):
     color = record.get("plate_color", record.get("color", record.get("lead_color", "")))
     if str(color).lower() == "green":
         groups.add(f"{split}/green")
+    truth = record.get("truth")
+    if isinstance(truth, str) and truth and truth[0] != "皖":
+        groups.add(f"{split}/non_wan")
     return groups
 
 
@@ -267,32 +301,78 @@ def _qualifies(metrics):
     return True
 
 
+def _subgroup_precision(metrics, group):
+    rows = [metrics.get(f"{split}/{group}", {}) for split in SPLITS]
+    accepted = sum(row.get("accepted", 0) for row in rows)
+    correct = sum(row.get("accepted_correct", 0) for row in rows)
+    return {"accepted": accepted, "correct": correct,
+            "precision": correct / accepted if accepted else None}
+
+
+def _subgroup_below_99(metrics):
+    watched = ("ccpd_db_brightness_le_19", "green", "ccpd_fn", "ccpd_challenge", "non_wan")
+    return {group: value for group in watched
+            if (value := _subgroup_precision(metrics, group))["accepted"] and
+            value["correct"] * 100 < value["accepted"] * 99}
+
+
 def evaluate_family(records, base_thresholds=None, expected_baseline_count=None, assignments=None):
     records = list(records)
     base_thresholds = {"tau_agree": float((base_thresholds or {}).get("tau_agree", TAU_AGREE)),
                        "tau_box": float((base_thresholds or {}).get("tau_box", TAU_BOX))}
-    results = {}
-    for safe in (False, True):
-        for index in range(8):
-            short_id = f"{index:03b}"
-            policy_id = f"safe-{short_id}" if safe else short_id
-            policy = {"policy_id": policy_id, "safe_augment": safe,
-                      "base_thresholds": base_thresholds,
-                      "legacy_sr_agree": short_id[0] == "1",
-                      "legacy_solo_segment": short_id[1] == "1",
-                      "legacy_solo_reader": short_id[2] == "1"}
-            results[policy_id] = score_policy(records, policy, assignments)
-    eligible = [policy_id for policy_id, metrics in results.items() if _qualifies(metrics)]
-    # Explicit tie order: integrated baseline, then fewer switches, then lexical id.
-    selected_id = None
-    best_count = max((sum(results[item][split]["accepted"] for split in SPLITS)
+    if assignments is None:
+        assignments = {path_key(row["path"]): "fit" for row in records}
+    else:
+        assignments = {path_key(path): half for path, half in assignments.items()}
+    fit_records = [row for row in records if assignments[path_key(row["path"])] == "fit"]
+    policy_specs = []
+    for province_support in (False, True):
+        for safe in (False, True):
+            for index in range(8):
+                short_id = f"{index:03b}"
+                policy_id = f"safe-{short_id}" if safe else short_id
+                if province_support:
+                    policy_id = f"p2-{policy_id}"
+                policy_specs.append({"policy_id": policy_id, "safe_augment": safe,
+                    "province_support": province_support, "base_thresholds": base_thresholds,
+                    "legacy_sr_agree": short_id[0] == "1",
+                    "legacy_solo_segment": short_id[1] == "1",
+                    "legacy_solo_reader": short_id[2] == "1"})
+    fit_results = {policy["policy_id"]: score_policy(fit_records, policy) for policy in policy_specs}
+    eligible = [policy_id for policy_id, metrics in fit_results.items()
+                if not policy_id.startswith("p2-") and _qualifies(metrics)]
+    best_count = max((sum(fit_results[item].get(split, {}).get("accepted", 0) for split in SPLITS)
                       for item in eligible), default=0)
+    ungated_winner = None
     if eligible:
-        selected_id = min((item for item in eligible
-                           if sum(results[item][split]["accepted"] for split in SPLITS) == best_count),
-                          key=lambda value: (value not in {"000", "safe-000"},
-                                             value.count("1"), value))
-    baseline_accepted = sum(results["000"][split]["accepted"] for split in SPLITS)
+        ungated_winner = min((item for item in eligible
+                              if sum(fit_results[item].get(split, {}).get("accepted", 0) for split in SPLITS) == best_count),
+                             key=lambda value: (value not in {"000", "safe-000"}, value.count("1"), value))
+    watched_fit = _subgroup_below_99(fit_results[ungated_winner]) if ungated_winner else {}
+    p2_id = f"p2-{ungated_winner}" if ungated_winner else None
+    p2_fit_eligible = bool(p2_id and _qualifies(fit_results[p2_id]))
+    gate_adopted = bool(watched_fit and p2_fit_eligible)
+    selected_id = p2_id if gate_adopted else ungated_winner
+    selected_eligible = list(eligible)
+    if gate_adopted and selected_id not in selected_eligible:
+        selected_eligible.append(selected_id)
+    # Fit determines both the winner and whether its fixed province-gated
+    # counterfactual is adopted. Hold never chooses or changes either policy.
+    results = {policy_id: {**metrics, "fit_only_rule_comparison": True}
+               for policy_id, metrics in fit_results.items()}
+    full_ids = {"000"}
+    if ungated_winner:
+        full_ids.add(ungated_winner)
+    if selected_id:
+        full_ids.add(selected_id)
+    if p2_id:
+        full_ids.add(p2_id)
+    for policy_id in full_ids:
+        spec = next(policy for policy in policy_specs if policy["policy_id"] == policy_id)
+        results[policy_id] = score_policy(records, spec, assignments)
+    selected_full_count = (sum(results[selected_id][split]["accepted"] for split in SPLITS)
+                           if selected_id is not None else None)
+    baseline_accepted = sum(fit_results["000"].get(split, {}).get("accepted", 0) for split in SPLITS)
     if expected_baseline_count is not None and baseline_accepted != int(expected_baseline_count):
         raise ValueError(f"baseline accepted {baseline_accepted} differs from base report {expected_baseline_count}")
     return {"schema": "three-route-auto-v1", "thresholds": {
@@ -300,12 +380,28 @@ def evaluate_family(records, base_thresholds=None, expected_baseline_count=None,
                 "legacy_sr": LEGACY_SR, "legacy_solo_segment": LEGACY_SOLO_SEGMENT,
                 "legacy_solo_reader": LEGACY_SOLO_READER},
             "rule_order": "combined policies per rect: baseline S/R,S/B,R/B; optional legacy S/R (segment output, max confidence); optional legacy solo segment then reader; after all rects per candidate: baseline B solo. Safe augment first exhausts the complete baseline decision, then tries legacy S/R and solo rules in candidate/rect order.",
-            "selection_scope": "exactly the preregistered sixteen policies; no threshold sweep",
+            "selection_scope": "fit_only",
+            "selection_description": "first choose among 16 ungated policies on fit only; if a watched fit subgroup is below 99%, inspect only that winner's paired p2 gate and adopt if both fit splits retain >=99.5%; report the ungated winner and p2 counterfactual on hold without reselection",
+            "province_support_rule": "when enabled, accepted predicted province character must be supported by at least two distinct valid route outputs on the same candidate and rect; B-solo may use any rect on that candidate; no truth/subset/filename input",
             "whole_plate_fallback": "fixed existing agreement_then_reader; not varied for policy selection",
             "n": len(records), "baseline_policy": "000", "baseline_expected_accepted": expected_baseline_count,
-            "policies": results,
-            "eligible": eligible, "selected_policy": selected_id,
-            "selected_total_accepted": best_count if selected_id is not None else None}
+            "fit_policies": fit_results, "policies": results,
+            "eligible": selected_eligible, "ungated_eligible": eligible,
+            "selected_policy": selected_id,
+            "ungated_fit_winner": ungated_winner,
+            "province_gate": {"watched_fit_subgroups_below_99": watched_fit,
+                "counterfactual_policy": p2_id,
+                "counterfactual_fit_meets_global_995": p2_fit_eligible,
+                "adopted": gate_adopted,
+                "adoption_rule": "adopt paired p2 only when a watched fit subgroup is below 99% and paired p2 fit val/devhard each meet 99.5%; otherwise retain ungated fit winner",
+                "fit_accepted_cost": (best_count - sum(fit_results[p2_id][split]["accepted"] for split in SPLITS))
+                    if p2_id else None},
+            "selected_total_accepted": selected_full_count,
+            "selected_fit_accepted": (sum(fit_results[selected_id][split]["accepted"] for split in SPLITS)
+                                      if selected_id is not None else None),
+            "selected_full_accepted": selected_full_count,
+            "selection_half": "fit",
+            "hold_used_for_selection": False}
 
 
 def read_trace(path):
@@ -336,6 +432,8 @@ def _sha256(path):
 
 def _load_base_report(path):
     report = json.loads(Path(path).read_text(encoding="utf-8"))
+    if report.get("selection_scope") != "fit-only":
+        raise ValueError("base thresholds must be fit-only; use three_route_workflow --mode auto")
     best = report.get("search", {}).get("best")
     if report.get("status") != "complete" or report.get("search", {}).get("complete") is not True or not isinstance(best, dict):
         raise ValueError("base report must contain a complete search.best result")
@@ -366,7 +464,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trace", default=r"D:\keshe2\algorithm\out\tmp_arch\three_v1\live.jsonl.gz")
     parser.add_argument("--base-report", default=r"D:\keshe2\algorithm\out\tmp_arch\three_v1\report.json")
-    parser.add_argument("--split-json", help="optional shared path-to-fit/hold assignment JSON")
+    parser.add_argument("--split-json", required=True, help="shared content-safe fit/hold assignment JSON")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     output_path = Path(args.out)
@@ -385,7 +483,7 @@ def main(argv=None):
     if isinstance(expected_by_split, dict):
         for split in SPLITS:
             expected = expected_by_split.get(split, {})
-            actual = result["policies"]["000"][split]
+            actual = result["policies"]["000"][f"fit/{split}"]
             if expected and (int(expected.get("accepted", -1)) != actual["accepted"] or
                              int(expected.get("correct", -1)) != actual["accepted_correct"]):
                 raise ValueError(f"baseline {split} accepted/correct differs from base report")
