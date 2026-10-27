@@ -35,3 +35,6 @@ workers/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 本机 GPU 训练环境（10-27，只用于训练，不入库）
+.venv-gpu/

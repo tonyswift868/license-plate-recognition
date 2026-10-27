@@ -58,3 +58,11 @@ class PlateReader(Protocol):
         """校正后的整块车牌 BGR（7 位 252×80、8 位 276×80）→ (车牌字符串, 逐位置信度)。
         字符只能取自 CHARSET；读不出时返回 ("", [])。状态判定由流水线按 5.4 与附录 A 统一完成。"""
         ...
+
+
+class BoxReader(PlateReader, Protocol):
+    """“检测框直接读”的整牌识别（10-27 新增，员工 A）。read() 的输入是 lpr.boxcrop.crop_box 的裁片（不做透视校正）。
+
+    box_pad = (pad_x, pad_y)：训练与推理共用的外扩比例，随模型文件保存，流水线按它裁片。"""
+
+    box_pad: tuple[float, float]
