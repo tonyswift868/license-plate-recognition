@@ -1,4 +1,4 @@
-"""Fit and audit a bounded CTC temperature for box_reader_v1."""
+"""Fit and audit a bounded CTC temperature for direct box readers."""
 from __future__ import annotations
 
 import argparse
@@ -25,6 +25,7 @@ DEFAULT_CACHE_AUDIT = DEFAULT_CACHE_INDEX.parent / "audit.json"
 EXPECTED_PER_FOLD = 1050
 MIN_RELEASE_EPOCHS = 30
 EXPECTED_POOL_COUNT = 210_616
+V2_MIN_RELEASE_EPOCHS = 60
 
 
 def _sha256_file(path: Path) -> str:
@@ -62,8 +63,12 @@ def read_calibration_rows(index_path: Path) -> tuple[list[dict[str, str]], list[
                 raise ValueError("calibration rows require a SHA-256 source identity")
             bbox_from_quad(row["quad"])
             rows[fold].append(row)
-    if any(len(rows[fold]) != EXPECTED_PER_FOLD for fold in rows):
-        raise ValueError(f"expected {EXPECTED_PER_FOLD} rows per fit/report fold; got "
+    v2_tune = sum(map(len, rows.values())) == 2400
+    expected_per_fold = 1200 if v2_tune else EXPECTED_PER_FOLD
+    if sum(map(len, rows.values())) not in {2100, 2400}:
+        raise ValueError("calibration index must contain the fixed 2,100-row or 2,400-row tune set")
+    if any(len(rows[fold]) != expected_per_fold for fold in rows):
+        raise ValueError(f"expected {expected_per_fold} rows per fit/report fold; got "
                          f"{ {fold: len(values) for fold, values in rows.items()} }")
     for fold, selected in rows.items():
         paths = [os.path.normcase(os.path.normpath(row["path"])) for row in selected]
@@ -76,7 +81,115 @@ def read_calibration_rows(index_path: Path) -> tuple[list[dict[str, str]], list[
     report_hashes = {row["sha256"].lower() for row in rows["report"]}
     if fit_paths & report_paths or fit_hashes & report_hashes:
         raise ValueError("fit/report calibration folds share paths or source bytes")
+    if v2_tune:
+        expected_groups = {"db", "blur", "tilt", "rotate", "fn", "challenge", "weather", "green"}
+        for fold_name, selected in rows.items():
+            group_counts: dict[str, int] = {}
+            for row in selected:
+                subset = row["subset"].removeprefix("ccpd_")
+                group_counts[subset] = group_counts.get(subset, 0) + 1
+                if (subset == "green") != (len(row["label"]) == 8):
+                    raise ValueError("calibration green rows must be 8-character plates and hard rows 7-character plates")
+            if group_counts != {name: 150 for name in expected_groups}:
+                raise ValueError(f"{fold_name} fold must contain 150 origins in each hard/green group; got {group_counts}")
+    elif any(len(row["label"]) != 7 for fold in rows.values() for row in fold):
+        raise ValueError("batch10 calibration rows must all be 7-character plates")
     return rows["fit"], rows["report"]
+
+
+def validate_v2_training_history(history_path: Path, best_path: Path, train_index_path: Path,
+                                 tune_path: Path, audit_path: Path) -> dict[str, Any]:
+    """Check the 60-epoch balanced run and its full-pool/tune identities."""
+    history_path, best_path = Path(history_path).resolve(), Path(best_path).resolve()
+    train_index_path, tune_path, audit_path = (Path(p).resolve() for p in
+                                               (train_index_path, tune_path, audit_path))
+    data = json.loads(history_path.read_text(encoding="utf-8-sig"))
+    recipe, epochs = data.get("recipe", {}), data.get("history", [])
+    if recipe.get("smoke") is not False or not str(recipe.get("device", "")).startswith("cuda"):
+        raise ValueError("v2 release calibration requires a full CUDA training run")
+    if int(recipe.get("epochs", 0)) < V2_MIN_RELEASE_EPOCHS:
+        raise ValueError(f"v2 requires at least {V2_MIN_RELEASE_EPOCHS} complete epochs")
+    if len(epochs) < V2_MIN_RELEASE_EPOCHS or data.get("epochs_completed") != len(epochs):
+        raise ValueError("v2 training history does not prove 60 completed epochs")
+    if [int(item.get("epoch", -1)) for item in epochs] != list(range(1, len(epochs)+1)):
+        raise ValueError("v2 training epochs are not consecutive")
+    if Path(recipe.get("train", "")).resolve() != train_index_path:
+        raise ValueError("v2 history points to a different training cache index")
+    if Path(recipe.get("tune", "")).resolve() != tune_path:
+        raise ValueError("v2 history points to a different safe tuning index")
+    if Path(recipe.get("audit", "")).resolve() != audit_path:
+        raise ValueError("v2 history points to a different isolation audit")
+    train_sha, tune_sha, audit_sha = (_sha256_file(p) for p in
+                                      (train_index_path, tune_path, audit_path))
+    if data.get("train_sha256") != train_sha or data.get("tune_sha256") != tune_sha:
+        raise ValueError("v2 history training/tune index SHA mismatch")
+    if data.get("audit_sha256") != audit_sha:
+        raise ValueError("v2 history isolation audit SHA mismatch")
+    audit = json.loads(audit_path.read_text(encoding="utf-8-sig"))
+    if (audit.get("schema") != "box-reader-v2-metadata-v1"
+            or audit.get("passed") is not True):
+        raise ValueError("v2 isolation audit schema is unsupported")
+    source_groups = {str(k): int(v) for k, v in data.get("group_source_counts", {}).items()}
+    expected_group_names = {"base", "green", "db", "blur", "tilt", "rotate", "fn", "challenge", "weather"}
+    if set(source_groups) != expected_group_names or min(source_groups.values(), default=0) <= 0:
+        raise ValueError("v2 history must identify all nine nonempty source groups")
+    if (audit.get("training", {}).get("unique_rows") != sum(source_groups.values())
+            or audit.get("training", {}).get("by_group") != source_groups
+            or audit.get("source_hashes", {}).get("packed_cache_index_sha256") != train_sha
+            or audit.get("outputs", {}).get("tune.csv", {}).get("sha256") != tune_sha):
+        raise ValueError("v2 history/audit pool counts or source hashes disagree")
+    if any(audit.get("training", {}).get(name) != 0 for name in
+           ("train_tune_sha_overlap", "train_protected_sha_overlap", "train_batch8_holdout_sha_overlap")):
+        raise ValueError("v2 training pool overlaps the safe tune, protected manifests, or batch8 holdout")
+    tune_audit = audit.get("tune", {})
+    if (tune_audit.get("train_tune_sha_overlap") != 0
+            or tune_audit.get("tune_protected_sha_overlap") != 0
+            or tune_audit.get("green_batch8_holdout_sha_overlap") != 0
+            or tune_audit.get("fold_sha_overlap") != 0
+            or tune_audit.get("prior_batch8_hard_tune_sha_overlap") != 2100):
+        raise ValueError("v2 safe tune isolation audit is incomplete or records overlap")
+    unique_count = int(data.get("training_unique_samples", -1))
+    exposure_count = int(data.get("exposures_per_epoch", -1))
+    if unique_count != sum(source_groups.values()) or exposure_count < unique_count:
+        raise ValueError("v2 source-group counts or balanced epoch exposure count are inconsistent")
+    planned_group_exposures = {str(k): int(v) for k, v in
+                               audit.get("balanced_epoch", {}).get("group_exposures", {}).items()}
+    if (planned_group_exposures != {name: exposure_count // len(expected_group_names)
+                                    for name in expected_group_names}
+            or exposure_count != audit.get("balanced_epoch", {}).get("exposures_each_epoch")):
+        raise ValueError("v2 history epoch exposures differ from the audited balanced-sampler plan")
+    sampler_sha = data.get("sampler_sha256")
+    if (not sampler_sha
+            or sampler_sha != audit.get("outputs", {}).get("sampler.json", {}).get("sha256")):
+        raise ValueError("v2 jitter sampler SHA does not match the isolation audit")
+    exposure_total = 0
+    for item in epochs:
+        groups = {str(k): int(v) for k, v in item.get("group_exposures", {}).items()}
+        if set(groups) != expected_group_names or max(groups.values()) - min(groups.values()) > 1:
+            raise ValueError(f"epoch {item.get('epoch')} is not group-balanced across nine groups")
+        if sum(groups.values()) != int(item.get("samples", -1)):
+            raise ValueError(f"epoch {item.get('epoch')} sample count differs from its group exposures")
+        if int(item.get("samples", -1)) != exposure_count:
+            raise ValueError(f"epoch {item.get('epoch')} has a different balanced exposure count")
+        if int(item.get("unique_samples", -1)) != unique_count:
+            raise ValueError(f"epoch {item.get('epoch')} did not visit the full unique training pool")
+        exposure_total += int(item["samples"])
+    if int(data.get("total_exposures", -1)) != exposure_total:
+        raise ValueError("v2 total exposure count differs from its epoch history")
+    best_epoch = int(data.get("best_epoch", -1))
+    if best_epoch not in range(1, len(epochs)+1):
+        raise ValueError("v2 history best epoch is missing")
+    selected = max(epochs, key=lambda row: float(row["tune"]["accuracy"]))
+    if best_epoch != int(selected["epoch"]):
+        raise ValueError("v2 best checkpoint does not match tune-selected best epoch")
+    expected_best_sha = data.get("best_sha256")
+    if not expected_best_sha or _sha256_file(best_path) != expected_best_sha:
+        raise ValueError("v2 best checkpoint SHA does not match training history")
+    return {"path": str(history_path), "sha256": _sha256_file(history_path),
+            "epochs": len(epochs), "best_epoch": best_epoch,
+            "training_unique_samples": unique_count, "exposures_per_epoch": exposure_count,
+            "total_exposures": exposure_total, "group_source_counts": source_groups,
+            "device": recipe["device"], "audit_sha256": audit_sha}
 
 
 def validate_training_history(history_path: Path, best_path: Path, train_data_path: Path,
@@ -203,8 +316,8 @@ def validate_training_history(history_path: Path, best_path: Path, train_data_pa
                             if packed_cache else None)}
 
 
-def _collect_logits(model: BoxNet, rows: list[dict[str, str]], box_pad: tuple[float, float],
-                    index_path: Path
+def _collect_logits(model, rows: list[dict[str, str]], box_pad: tuple[float, float],
+                    index_path: Path, input_size: tuple[int, int]
                     ) -> list[torch.Tensor]:
     import torch
 
@@ -225,7 +338,7 @@ def _collect_logits(model: BoxNet, rows: list[dict[str, str]], box_pad: tuple[fl
         if crop.size == 0:
             raise ValueError(f"empty GT bbox crop: {path}")
         with torch.inference_mode():
-            logits = model(box_tensor(crop)[None]).detach().cpu().float()
+            logits = model(box_tensor(crop, input_size=input_size)[None]).detach().cpu().float()
         if logits.ndim != 3 or logits.shape[1] != 1 or not torch.isfinite(logits).all():
             raise ValueError(f"invalid model logits for {path}")
         logits_list.append(logits)
@@ -257,9 +370,18 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
         confidence_before.append(min(conf_raw) if conf_raw else 0.0)
         confidence_after.append(min(conf_calibrated) if conf_calibrated else 0.0)
     n = len(rows)
+    by_subset: dict[str, dict[str, int]] = {}
+    for row, is_correct in zip(rows, correct):
+        name = row.get("subset", "unknown").removeprefix("ccpd_")
+        counts = by_subset.setdefault(name, {"correct": 0, "n": 0})
+        counts["correct"] += int(is_correct)
+        counts["n"] += 1
+    for counts in by_subset.values():
+        counts["accuracy"] = counts["correct"] / counts["n"]
     return {"n": n, "temperature": temperature, "ctc_nll_before": before_nll / n,
             "ctc_nll_after": after_nll / n, "argmax_string_invariant": True,
             "accuracy": sum(correct) / n,
+            "accuracy_by_subset": by_subset,
             "confidence_before": _ece_summary(correct, confidence_before),
             "confidence_after": _ece_summary(correct, confidence_after),
             "predictions": predictions}
@@ -268,12 +390,14 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
 def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
               model_path: Path = DEFAULT_MODEL, report_path: Path = DEFAULT_REPORT,
               train_data_path: Path = DEFAULT_TRAIN_DATA,
-              history_path: Path | None = None) -> dict[str, Any]:
+              history_path: Path | None = None,
+              train_index_path: Path | None = None,
+              audit_path: Path | None = None) -> dict[str, Any]:
     import cv2
     import torch
 
     from lpr.recognize import read_manifest, write_manifest_entry
-    from lpr.recognize.box_reader import ARCH, BoxNet, INPUT_SIZE, checkpoint
+    from lpr.recognize.box_reader import checkpoint, model_from_checkpoint
     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
 
     if model_path.exists():
@@ -283,23 +407,32 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
         raise ValueError(f"manifest already contains {model_path.name}; refusing to replace")
     train_pool = training_pool_provenance(train_data_path)
     history_path = history_path or best_path.parent / "history.json"
-    history = validate_training_history(history_path, best_path, train_data_path, index_path)
+    if train_index_path is not None or audit_path is not None:
+        if train_index_path is None or audit_path is None:
+            raise ValueError("v2 calibration requires both --train-index and --audit")
+        history = validate_v2_training_history(history_path, best_path, train_index_path,
+                                               index_path, audit_path)
+    else:
+        history = validate_training_history(history_path, best_path, train_data_path, index_path)
     fit_rows, report_rows = read_calibration_rows(index_path)
     torch.set_num_threads(2)
     cv2.setNumThreads(1)
     saved = torch.load(best_path, map_location="cpu", weights_only=True)
-    if not isinstance(saved, dict) or saved.get("architecture") != ARCH:
+    if not isinstance(saved, dict):
         raise ValueError("best checkpoint must contain BoxReader architecture metadata")
-    model = BoxNet().cpu().eval()
-    model.load_state_dict(saved["state_dict"], strict=True)
+    model = model_from_checkpoint(saved).cpu().eval()
     input_size = saved.get("input_size")
+    if (not isinstance(input_size, list) or len(input_size) != 2
+            or any(not isinstance(value, int) or value <= 0 for value in input_size)):
+        raise ValueError("best checkpoint input_size must be a positive [width, height] pair")
+    input_size = tuple(input_size)
     box_pad = tuple(float(v) for v in saved.get("box_pad", ()))
-    if input_size != list(INPUT_SIZE) or len(box_pad) != 2 or any(not 0 <= v <= 1 for v in box_pad):
-        raise ValueError("best checkpoint input_size or box_pad is invalid")
+    if len(box_pad) != 2 or any(not 0 <= v <= 1 for v in box_pad):
+        raise ValueError("best checkpoint box_pad is invalid")
 
-    fit_logits = _collect_logits(model, fit_rows, box_pad, index_path)
+    fit_logits = _collect_logits(model, fit_rows, box_pad, index_path, input_size)
     fitted = fit_temperature(fit_logits, [row["label"] for row in fit_rows], BOUNDS)
-    report_logits = _collect_logits(model, report_rows, box_pad, index_path)
+    report_logits = _collect_logits(model, report_rows, box_pad, index_path, input_size)
     report = _report_fold(report_rows, report_logits, fitted["temperature"])
     original_report = _report_fold(report_rows, report_logits, 1.0)
 
@@ -308,8 +441,9 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
     torch.save(exported, model_path)
     if model_path.stat().st_size > 20 * 1024 * 1024:
         raise ValueError("calibrated model exceeds the 20 MB release limit")
-    write_manifest_entry(model_path, version="box_reader_v1", train_data=train_pool["path"],
-                         val_char_acc=None, input_size=INPUT_SIZE)
+    model_version = str(model_path.stem)
+    write_manifest_entry(model_path, version=model_version, train_data=train_pool["path"],
+                         val_char_acc=None, input_size=input_size)
     manifest_after = read_manifest(model_path.parent)
     if any(manifest_after.get(name) != entry for name, entry in old_manifest.items()):
         raise AssertionError("manifest registration changed a pre-existing entry")
@@ -341,13 +475,17 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     parser.add_argument("--train-data", type=Path, default=DEFAULT_TRAIN_DATA)
+    parser.add_argument("--train-index", type=Path,
+                        help="v2 full-pool packed cache index whose rows are sampled by the balanced plan")
+    parser.add_argument("--audit", type=Path,
+                        help="v2 passing data isolation and balanced-sampler audit JSON")
     parser.add_argument("--best", type=Path, default=DEFAULT_BEST)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--model-out", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     args = parser.parse_args(argv)
     result = calibrate(args.index, args.best, args.model_out, args.report,
-                       args.train_data, args.history)
+                       args.train_data, args.history, args.train_index, args.audit)
     print(json.dumps({"temperature": result["fit"]["temperature"],
                       "report_nll_before": result["report_before_calibration"]["ctc_nll_before"],
                       "report_nll_after": result["report"]["ctc_nll_after"],

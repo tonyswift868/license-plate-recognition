@@ -141,5 +141,18 @@
     "val_char_acc": null,
     "sha256": "22a4c31c4214a233a45b36b57a373e75a5f3f3ba124febfd997d9c63aa54ac04",
     "created_at": "2026-10-27T13:15:25"
+  },
+  "box_reader_v2.pt": {
+    "name": "box_reader_v2.pt",
+    "version": "box_reader_v2",
+    "charset_sha": "ea8a61c65117",
+    "input_size": [
+      192,
+      64
+    ],
+    "train_data": "D:\\keshe2\\workers\\01\\algorithm\\out\\data\\batch10\\pool.csv",
+    "val_char_acc": null,
+    "sha256": "a45ee15718cf2632bbbd96c7f70fbf1895b6906949a14e4ee6464a9e79813764",
+    "created_at": "2026-10-27T22:40:02"
   }
 }
