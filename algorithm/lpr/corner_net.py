@@ -490,7 +490,8 @@ class CornerNet:
         self.roi_padding_per_side = float(roi_padding_per_side)
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "CornerNet":
+    def from_file(cls, path: Path, *, version: str,
+                  score_threshold_override: float | None = None) -> "CornerNet":
         """只加载安全 state_dict；兼容纯state_dict和本项目版本化checkpoint。"""
         try:
             checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
@@ -498,7 +499,8 @@ class CornerNet:
             if (isinstance(checkpoint, dict) and checkpoint.get("architecture") ==
                     "plate_det_v1_resnet18_stage3_fpn_box_keypoints"):
                 from .plate_det import PlateDetector
-                detector = PlateDetector.from_checkpoint(checkpoint, version=version)
+                detector = PlateDetector.from_checkpoint(
+                    checkpoint, version=version, score_threshold=score_threshold_override)
                 # Initialize preprocessing and peak/box decoding before live frames.
                 warm_frame = np.empty((720, 1280, 3), dtype=np.uint8)
                 warm_frame[:, :, 0] = np.arange(1280, dtype=np.uint16)[None, :] % 256
@@ -506,6 +508,8 @@ class CornerNet:
                 warm_frame[:, :, 2] = 127
                 detector.detect(warm_frame, 3)
                 return detector
+            if score_threshold_override is not None:
+                raise ModelLoadError("threshold override is only supported for plate detectors")
             if isinstance(checkpoint, dict) and checkpoint.get("architecture") == KeypointModel.architecture:
                 if tuple(checkpoint.get("input_size", ())) != INPUT_SIZE:
                     raise ModelLoadError("keypoint checkpoint input_size mismatch")

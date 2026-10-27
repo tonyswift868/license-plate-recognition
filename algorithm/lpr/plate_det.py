@@ -161,7 +161,8 @@ class PlateDetector:
             raise ValueError("detector produces nonfinite outputs during CPU initialization")
 
     @classmethod
-    def from_checkpoint(cls, payload: dict, *, version: str) -> "PlateDetector":
+    def from_checkpoint(cls, payload: dict, *, version: str,
+                        score_threshold: float | None = None) -> "PlateDetector":
         if payload.get("architecture") != ARCHITECTURE:
             raise ModelLoadError("plate detector architecture mismatch")
         size = payload.get("input_size")
@@ -173,17 +174,19 @@ class PlateDetector:
             if not all(torch.isfinite(v).all() for v in model.state_dict().values()):
                 raise ValueError("nonfinite detector weights")
             return cls(model, version=version, image_size=size[0],
-                       score_threshold=payload.get("score_threshold", .25))
+                       score_threshold=(payload.get("score_threshold", .25)
+                                        if score_threshold is None else score_threshold))
         except Exception as exc:
             raise ModelLoadError(f"plate detector checkpoint invalid: {exc}") from exc
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str = "plate_det_v1") -> "PlateDetector":
+    def from_file(cls, path: Path, *, version: str = "plate_det_v1",
+                  score_threshold: float | None = None) -> "PlateDetector":
         try:
             payload = torch.load(Path(path), map_location="cpu", weights_only=True)
             if not isinstance(payload, dict):
                 raise ValueError("checkpoint must be a dictionary")
-            return cls.from_checkpoint(payload, version=version)
+            return cls.from_checkpoint(payload, version=version, score_threshold=score_threshold)
         except ModelLoadError:
             raise
         except Exception as exc:
@@ -203,3 +206,21 @@ class PlateDetector:
             return decode_predictions(outputs, image.shape, transform,
                                       max_candidates=max_candidates,
                                       score_threshold=self.score_threshold)
+
+
+def load_plate_detector(model_path: Path, *, score_threshold: float | None = None) -> PlateDetector:
+    """Manifest-verified factory; an optional threshold never rewrites weights.
+
+    Without an override the checkpoint's threshold (v1:0.25) is retained.
+    The signature also supports the integration tool's factory(Path) contract.
+    """
+    from .corner_net import CornerNet
+    from .recognize import verify_model
+
+    path = Path(model_path)
+    entry = verify_model(path)
+    detector = CornerNet.from_file(path, version=entry["version"],
+                                   score_threshold_override=score_threshold)
+    if not isinstance(detector, PlateDetector):
+        raise ModelLoadError("expected a plate detector checkpoint")
+    return detector
