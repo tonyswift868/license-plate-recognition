@@ -40,6 +40,7 @@ def _segment_decode(rect, classifier, cfg, *, segmenter=None, decoder=None,
         ranker = pipeline._rank
     best = None
     attempted = []
+    error_message = None
     for layout in layout_getter(rect):
         attempted.append(layout)
         try:
@@ -49,20 +50,117 @@ def _segment_decode(rect, classifier, cfg, *, segmenter=None, decoder=None,
             probabilities = classifier.predict_proba(segmented.chars)
             decision = decoder(probabilities, segmented.layout, rect.color, cfg.postprocess)
         except Exception as exc:
-            return {"prediction": None, "status": "SEG_FAILED", "attempted_layouts": attempted,
-                    "error": f"{type(exc).__name__}:{exc}"}
+            error_message = f"{type(exc).__name__}:{exc}"
+            break
         if best is None or ranker(decision) > best[0]:
-            best = (ranker(decision), decision)
+            best = (ranker(decision), decision, probabilities, segmented.layout)
         if getattr(decision.status, "value", decision.status) == "OK":
             break
     if best is None:
         return {"prediction": None, "status": "SEG_FAILED", "attempted_layouts": attempted,
-                "error": None}
+                "error": error_message}
     decision = best[1]
     return {"prediction": decision.plate_no,
             "status": getattr(decision.status, "value", decision.status),
             "confidence": float(decision.confidence),
-            "attempted_layouts": attempted, "error": None}
+            "attempted_layouts": attempted, "error": error_message,
+            "_classifier_probabilities": best[2],
+            "_selected_layout_name": getattr(decision, "layout_name", None)}
+
+
+def _position_top1(probabilities, layout_name, province_prior=None):
+    """Return raw-global and position-constrained top1s for one selected decode."""
+    import numpy as np
+    from lpr.charset import CHARSET, CHAR_TO_INDEX
+    from lpr.plate_rules import LAYOUTS
+
+    probs = np.asarray(probabilities)
+    if probs.ndim != 2 or probs.shape[1] != len(CHARSET) or probs.shape[0] not in LAYOUTS:
+        raise ValueError("selected CharCNN probabilities must be 7/8 x 65")
+    hypotheses = [hyp for hyp in LAYOUTS[probs.shape[0]] if hyp.name == layout_name]
+    if len(hypotheses) != 1:
+        raise ValueError("selected production decode layout is missing or ambiguous")
+    weights = probs.copy()
+    for province, coefficient in (province_prior or {}).items():
+        weights[0, CHAR_TO_INDEX[province]] *= coefficient
+    raw = np.argmax(probs, axis=1).astype(int).tolist()
+    constrained = []
+    for position, allowed in enumerate(hypotheses[0].slots):
+        best = allowed[0]
+        for class_index in allowed[1:]:
+            if weights[position, class_index] > weights[position, best]:
+                best = class_index
+        constrained.append(int(best))
+    return {"raw_top1_indices": raw,
+            "raw_top1": "".join(CHARSET[index] for index in raw),
+            "position_conditioned_top1_indices": constrained,
+            "position_conditioned_top1": "".join(CHARSET[index] for index in constrained)}
+
+
+def _alnum_analysis(segment_read, truth: str, province_prior=None):
+    probabilities = segment_read.get("_classifier_probabilities")
+    layout_name = segment_read.get("_selected_layout_name")
+    if probabilities is None:
+        return {"scored": False, "skip_reason": "segment_failed", "positions": []}
+    import numpy as np
+    probs = np.asarray(probabilities)
+    if probs.ndim != 2 or probs.shape[0] != len(truth) or probs.shape[1] != 65:
+        return {"scored": False, "skip_reason": "char_count_mismatch", "positions": []}
+    if not layout_name:
+        return {"scored": False, "skip_reason": "no_selected_production_layout", "positions": []}
+    top1 = _position_top1(probs, layout_name, province_prior)
+    positions = []
+    for index, character in enumerate(truth[1:], start=1):
+        positions.append({"position": index, "truth": character,
+                          "raw_top1_index": top1["raw_top1_indices"][index],
+                          "raw_top1": top1["raw_top1"][index],
+                          "position_conditioned_top1_index": top1["position_conditioned_top1_indices"][index],
+                          "position_conditioned_top1": top1["position_conditioned_top1"][index]})
+    return {"scored": True, "skip_reason": None, **top1, "positions": positions}
+
+
+def _summarize_alnum(records):
+    from lpr.charset import CHARSET, DIGITS, LETTERS, CHAR_TO_INDEX
+
+    skipped = defaultdict(lambda: {"rows": 0, "characters": 0})
+    class_counts = {char: {"support": 0, "raw_global_correct": 0,
+                           "position_conditioned_correct": 0}
+                    for char in DIGITS + LETTERS}
+    raw_correct = conditioned_correct = character_count = 0
+    for record in records:
+        analysis = record["alnum_classifier"]
+        if not analysis["scored"]:
+            reason = analysis["skip_reason"]
+            skipped[reason]["rows"] += 1
+            skipped[reason]["characters"] += max(0, len(record["truth"]) - 1)
+            continue
+        for position in analysis["positions"]:
+            truth = position["truth"]
+            raw_match = position["raw_top1_index"] == CHAR_TO_INDEX[truth]
+            conditioned_match = position["position_conditioned_top1_index"] == CHAR_TO_INDEX[truth]
+            class_counts[truth]["support"] += 1
+            class_counts[truth]["raw_global_correct"] += int(raw_match)
+            class_counts[truth]["position_conditioned_correct"] += int(conditioned_match)
+            raw_correct += int(raw_match)
+            conditioned_correct += int(conditioned_match)
+            character_count += 1
+    for values in class_counts.values():
+        n = values["support"]
+        values["raw_global_accuracy"] = values["raw_global_correct"] / n if n else None
+        values["position_conditioned_accuracy"] = values["position_conditioned_correct"] / n if n else None
+    return {"n_alnum_characters": character_count,
+            "raw_global_65class_top1": {"correct": raw_correct,
+                                         "accuracy": raw_correct / character_count if character_count else None,
+                                         "by_true_character": class_counts},
+            "position_conditioned_top1": {"correct": conditioned_correct,
+                                          "accuracy": conditioned_correct / character_count if character_count else None,
+                                          "by_true_character": {
+                                              char: {"support": values["support"],
+                                                     "correct": values["position_conditioned_correct"],
+                                                     "accuracy": values["position_conditioned_accuracy"]}
+                                              for char, values in class_counts.items()}},
+            "skipped_rows_by_reason": dict(sorted(skipped.items())),
+            "skipped_characters": sum(value["characters"] for value in skipped.values())}
 
 
 def _gt_rectified(image, quad, label: str, color: str, cv2, np):
@@ -84,8 +182,13 @@ def _gt_rectified(image, quad, label: str, color: str, cv2, np):
 def _segment_record(base_record, truth: str, segment_read: dict):
     plate_pred = segment_read["prediction"]
     segment_province = plate_pred[0] if plate_pred else None
+    # The classifier matrix is retained only long enough to produce the
+    # replayable alphanumeric audit below; NumPy arrays never enter JSON.
+    public_segment_read = {key: value for key, value in segment_read.items()
+                           if not key.startswith("_")}
     return {
-        **base_record, **segment_read,
+        **base_record, **public_segment_read,
+        "_selected_layout_name": segment_read.get("_selected_layout_name"),
         "predicted_province": segment_province,
         "province_correct": segment_province == truth[0],
         # A segmentation failure remains in the full panel denominator.
@@ -138,6 +241,7 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
     from lpr.recognize.cnn_model import CharCNN
     from lpr.recognize.cnn import CnnClassifier
     from lpr_tools.train.province_synth import normalized_first_char, replace_province
+    from lpr_tools.train.province_inference_timing import instrument_method, summarize
     from lpr_tools.train.score_province_readers import _image, _metrics, _quad, _first_char_patch
 
     torch.set_num_threads(2)
@@ -153,6 +257,9 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
         classifier = CnnClassifier("batch12-char-eval", model)
     else:
         classifier = load_classifier("cnn", model_path)
+    inference_calls = []
+    instrument_method(classifier, "predict_proba", inference_calls,
+                      batch_size=lambda args, _kwargs: len(args[0]))
     cfg = load_config(config_path)
     province_indices = np.asarray(PROVINCE_IDX, dtype=np.int64)
     first_records, segment_records = [], []
@@ -185,7 +292,10 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
 
         rect = _gt_rectified(image, quad, truth, color, cv2, np)
         segment_read = _segment_decode(rect, classifier, cfg)
-        segment_records.append(_segment_record(base_record, truth, segment_read))
+        segment_record = _segment_record(base_record, truth, segment_read)
+        segment_record["alnum_classifier"] = _alnum_analysis(
+            segment_read, truth, cfg.postprocess.province_prior)
+        segment_records.append(segment_record)
         del image, rect, char_patch, probabilities
 
     result = {
@@ -197,6 +307,19 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
         "segment_first_character_and_full_plate": {
             "metrics": _summarize(segment_records), "records": segment_records,
             "plate_denominator": "all panel rows; segmentation failures count incorrect"},
+        "alnum_classifier_analysis": {
+            "scope": ("same probabilities from the production-best selected layout; only positions 2+; "
+                      "global 65-class top1 compared with production position-constrained top1; "
+                      "GT is used only for scoring, never layout selection"),
+            "metrics": _summarize_alnum(segment_records),
+            "records": [{"path": row["path"], "panel": row["panel"],
+                         "subset": row.get("subset"), "truth": row["truth"],
+                         "selected_layout_name": row.get("_selected_layout_name"),
+                         **row["alnum_classifier"]} for row in segment_records]},
+        "inference_timing": {
+            **summarize(inference_calls, buckets=(1, 7, 8)),
+            "method": "CharClassifier.predict_proba; GT first-cell N=1 and production segment N=7/8",
+            "scope": "all existing calls including first cold call; no warmup or repeated inference"},
         "overall": {"gt_first_province_accuracy": _metrics(first_records)["province_accuracy"],
                     "segment_province_accuracy": _metrics(segment_records)["province_accuracy"],
                     "segment_full_plate_accuracy": _metrics(segment_records)["plate_accuracy"]},

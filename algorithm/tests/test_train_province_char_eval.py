@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from lpr_tools.train.eval_province_char import (
-    _segment_decode, _segment_record, _summarize,
+    _alnum_analysis, _position_top1, _segment_decode, _segment_record, _summarize,
 )
 
 
@@ -59,3 +59,39 @@ def test_legal_layout_tie_keeps_the_first_production_layout():
     assert layouts == [7, 8]
     assert result["prediction"] == "陕A12345"
     assert result["attempted_layouts"] == [7, 8]
+
+
+def test_new_province_logit_can_steal_global_alnum_top1_but_not_conditioned_top1():
+    from lpr.charset import CHAR_TO_INDEX, CHARSET, DIGIT_IDX, LETTER_IDX
+
+    old = np.zeros((7, len(CHARSET)), dtype=np.float32)
+    new = old.copy()
+    a_idx = CHAR_TO_INDEX["A"]
+    province_idx = CHAR_TO_INDEX["皖"]
+    old[1, a_idx] = new[1, a_idx] = .8
+    old[1, province_idx] = .2
+    new[1, province_idx] = .9
+    # The fine-tune changed a province-class score only; old alphanumeric
+    # logits remain bitwise identical.
+    alnum_idx = tuple(DIGIT_IDX) + tuple(LETTER_IDX)
+    assert np.array_equal(old[:, alnum_idx], new[:, alnum_idx])
+
+    old_audit = _position_top1(old, "L7")
+    new_audit = _position_top1(new, "L7")
+    assert old_audit["raw_top1"][1] == "A"
+    assert new_audit["raw_top1"][1] == "皖"
+    assert new_audit["position_conditioned_top1"][1] == "A"
+
+    analysis = _alnum_analysis({"_classifier_probabilities": new,
+                                "_selected_layout_name": "L7"}, "陕A12345")
+    assert analysis["positions"][0]["truth"] == "A"
+    assert analysis["positions"][0]["raw_top1"] == "皖"
+    assert analysis["positions"][0]["position_conditioned_top1"] == "A"
+
+
+def test_alnum_classifier_audit_skips_failed_or_mismatched_segmentation():
+    failed = _alnum_analysis({"prediction": None}, "陕A12345")
+    mismatch = _alnum_analysis({"_classifier_probabilities": np.zeros((6, 65)),
+                                "_selected_layout_name": "L7"}, "陕A12345")
+    assert failed["skip_reason"] == "segment_failed"
+    assert mismatch["skip_reason"] == "char_count_mismatch"
