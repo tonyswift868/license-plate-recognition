@@ -495,6 +495,17 @@ class CornerNet:
         try:
             checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
             score_threshold = SCORE_THRESHOLD
+            if (isinstance(checkpoint, dict) and checkpoint.get("architecture") ==
+                    "plate_det_v1_resnet18_stage3_fpn_box_keypoints"):
+                from .plate_det import PlateDetector
+                detector = PlateDetector.from_checkpoint(checkpoint, version=version)
+                # Initialize preprocessing and peak/box decoding before live frames.
+                warm_frame = np.empty((720, 1280, 3), dtype=np.uint8)
+                warm_frame[:, :, 0] = np.arange(1280, dtype=np.uint16)[None, :] % 256
+                warm_frame[:, :, 1] = np.arange(720, dtype=np.uint16)[:, None] % 256
+                warm_frame[:, :, 2] = 127
+                detector.detect(warm_frame, 3)
+                return detector
             if isinstance(checkpoint, dict) and checkpoint.get("architecture") == KeypointModel.architecture:
                 if tuple(checkpoint.get("input_size", ())) != INPUT_SIZE:
                     raise ModelLoadError("keypoint checkpoint input_size mismatch")
