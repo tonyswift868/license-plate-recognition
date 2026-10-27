@@ -1,0 +1,9 @@
+{
+  "schema": "fallback-relative-default-selection-amendment-v1",
+  "timing": "The initial fit-only run had no eligible rule and never scored hold. This objective correction is declared after that fit feasibility check and before any hold metric. It is not presented as an untouched preregistration.",
+  "reason": "The task compares green accuracy with the current default (463/500=92.6% on the full set). That default scores 231/250=92.4% in the fixed fit half. Applying ceil(0.926*250)=232 to fit would reject the default itself and all 33 registered candidates.",
+  "guard_relative_default": "Require selected-rule fit-green correct >= unconditional production-default fit-green correct on the identical rows. Evaluate the requested full-set 92.6% and relative hold performance after selection, without another adjustment.",
+  "guard_strict_absolute": "Retain the original max(ceil(0.926*n), default-fit correct) option for reproducing the failed feasibility check.",
+  "unchanged": "The same 33 prewritten routing rules, thresholds, feature firewall, content-safe seed42 split, and hard/dark/tilt/val/complexity/ID tie order remain fixed. No new rule or threshold is introduced.",
+  "hold_policy": "Choose one winner from fit, freeze its ID, then report selected/A/M/L on hold and full. Apply that same ID to the separate automatic-policy review winner without refitting. Do not use hold failure to change the rule, split, or threshold."
+}

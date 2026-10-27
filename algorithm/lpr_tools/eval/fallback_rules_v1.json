@@ -1,0 +1,73 @@
+{
+  "schema": "fallback-refine-preregistration-v1",
+  "registered_at": "2026-10-27",
+  "scope": "fallback selection only; the selected three-route automatic acceptance set and each accepted decision are immutable",
+  "inputs": {
+    "source_trace": "D:/keshe2/algorithm/out/tmp_arch/three_v1/live.jsonl.gz",
+    "features": "route_features output joined by normalized path and candidate_index",
+    "auto_policy": "three_route_auto selected_policy supplied as a frozen input"
+  },
+  "feature_firewall": [
+    "Rules may read only route predictions and non-truth features: candidate color/corners/tilt, image pixel gray mean, candidate/layout lengths, and fallback A/M route outputs/confidences.",
+    "Rules may not read truth, subset, category, filename brightness, truth plate_color, split membership, or evaluation correctness.",
+    "filename brightness may be used only to report the dark subgroup metric, never to choose a route."
+  ],
+  "split": {
+    "seed": 42,
+    "grouping": ["fixed_split", "subset"],
+    "path_order": "normalize separators to '/', Unicode-preserving casefold, then sort by normalized path before shuffling",
+    "shuffle": "one Python-compatible Random(42) stream; traverse groups by (fixed_split, subset) lexical order and shuffle each group's sorted rows",
+    "fit_hold": "first floor(n/2) shuffled rows are fit; remainder are hold; all current groups are even",
+    "expected": {"val_fit": 500, "val_hold": 500, "devhard_fit": 1050, "devhard_hold": 1050, "val_green_fit": 250, "val_green_hold": 250, "each_devhard_subset_fit": 150, "each_devhard_subset_hold": 150}
+  },
+  "fallbacks": {
+    "A": "agreement_then_reader",
+    "M": "majority",
+    "L": "production legacy S/R decision: first per-candidate/rect legacy S/R OK under archived default thresholds; if none, use the existing agreement_then_reader fallback. It is only a fallback text source for images rejected by the selected three-route auto gate; retain the rejected auto result's non-OK/NO_READ status so L cannot enlarge the accepted set",
+    "decision": "Only choose which already-computed A, M, or L fallback result to return. If the chosen fallback has no result, use the other available fallback in A, M, L order. Never change an automatic accepted result.",
+    "status": "A legal fallback output is LOW_CONFIDENCE; if no fallback is legal, retain BAD_INPUT or emit NO_READ. These evaluator labels are not a production runtime mapping; architecture integration maps no-read to SEG_FAILED and preserves existing special-color/error handling."
+  },
+  "rules": [
+    {"id":"A","predicate":"constant A","when_true":"A"},
+    {"id":"M","predicate":"constant M","when_true":"M"},
+    {"id":"L","predicate":"constant L","when_true":"L"},
+    {"id":"G8_A","predicate":"any trace rect/candidate predicted color is green OR any valid rectified reader/fallback route prediction has length 8","when_true":"A","when_false":"M"},
+    {"id":"G8_M","predicate":"any trace rect/candidate predicted color is green OR any valid rectified reader/fallback route prediction has length 8","when_true":"M","when_false":"A"},
+    {"id":"G8_L","predicate":"any trace rect/candidate predicted color is green OR any valid rectified reader/fallback route prediction has length 8","when_true":"L","when_false":"M"},
+    {"id":"T05_A","predicate":"first candidate predicted quad tilt_angle_deg >= 5","when_true":"A","when_false":"M"},
+    {"id":"T05_M","predicate":"first candidate predicted quad tilt_angle_deg >= 5","when_true":"M","when_false":"A"},
+    {"id":"T10_A","predicate":"first candidate predicted quad tilt_angle_deg >= 10","when_true":"A","when_false":"M"},
+    {"id":"T10_M","predicate":"first candidate predicted quad tilt_angle_deg >= 10","when_true":"M","when_false":"A"},
+    {"id":"T15_A","predicate":"first candidate predicted quad tilt_angle_deg >= 15","when_true":"A","when_false":"M"},
+    {"id":"T15_M","predicate":"first candidate predicted quad tilt_angle_deg >= 15","when_true":"M","when_false":"A"},
+    {"id":"T20_A","predicate":"first candidate predicted quad tilt_angle_deg >= 20","when_true":"A","when_false":"M"},
+    {"id":"T20_M","predicate":"first candidate predicted quad tilt_angle_deg >= 20","when_true":"M","when_false":"A"},
+    {"id":"Y40_A","predicate":"image pixel gray mean <= 40","when_true":"A","when_false":"M"},
+    {"id":"Y40_M","predicate":"image pixel gray mean <= 40","when_true":"M","when_false":"A"},
+    {"id":"Y60_A","predicate":"image pixel gray mean <= 60","when_true":"A","when_false":"M"},
+    {"id":"Y60_M","predicate":"image pixel gray mean <= 60","when_true":"M","when_false":"A"},
+    {"id":"Y80_A","predicate":"image pixel gray mean <= 80","when_true":"A","when_false":"M"},
+    {"id":"Y80_M","predicate":"image pixel gray mean <= 80","when_true":"M","when_false":"A"},
+    {"id":"Y100_A","predicate":"image pixel gray mean <= 100","when_true":"A","when_false":"M"},
+    {"id":"Y100_M","predicate":"image pixel gray mean <= 100","when_true":"M","when_false":"A"},
+    {"id":"D0_A","predicate":"B fallback confidence - A fallback confidence >= 0","when_true":"A","when_false":"M"},
+    {"id":"D0_M","predicate":"B fallback confidence - A fallback confidence >= 0","when_true":"M","when_false":"A"},
+    {"id":"D05_A","predicate":"B fallback confidence - A fallback confidence >= 0.05","when_true":"A","when_false":"M"},
+    {"id":"D05_M","predicate":"B fallback confidence - A fallback confidence >= 0.05","when_true":"M","when_false":"A"},
+    {"id":"D10_A","predicate":"B fallback confidence - A fallback confidence >= 0.1","when_true":"A","when_false":"M"},
+    {"id":"D10_M","predicate":"B fallback confidence - A fallback confidence >= 0.1","when_true":"M","when_false":"A"},
+    {"id":"D20_A","predicate":"B fallback confidence - A fallback confidence >= 0.2","when_true":"A","when_false":"M"},
+    {"id":"D20_M","predicate":"B fallback confidence - A fallback confidence >= 0.2","when_true":"M","when_false":"A"},
+    {"id":"G8Y60_A","predicate":"G8 AND image pixel gray mean <= 60","when_true":"A","when_false":"M"},
+    {"id":"G8Y60_M","predicate":"G8 AND image pixel gray mean <= 60","when_true":"M","when_false":"A"},
+    {"id":"G8Y60_L","predicate":"G8 AND image pixel gray mean <= 60","when_true":"L","when_false":"M"}
+  ],
+  "selection": {
+    "fit_only": true,
+    "eligibility": "fit val/ccpd_green correct >= max(ceil(0.926*n), fit val/ccpd_green correct under production legacy baseline L)",
+    "lexicographic_objective": ["max fit devhard correct", "max fit devhard/ccpd_db dark correct", "max fit devhard/ccpd_tilt_plus_rotate correct", "max fit val correct", "min rule complexity", "lexical rule id"],
+    "hold": "Do not score any rule on hold until the selected id is frozen. Then report only selected, A, M, and L on hold once.",
+    "full_set": "After selection and hold report, report selected, A, M, and L on all fixed rows; this is descriptive and does not alter the choice.",
+    "auto_set": "Validate globally that the supplied automatic policy meets 99.5% precision on val and devhard; fallback selection must preserve exact per-row automatic status/plate/confidence/route/candidate/rect."
+  }
+}

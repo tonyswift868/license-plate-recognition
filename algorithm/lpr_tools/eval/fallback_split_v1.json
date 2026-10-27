@@ -1,0 +1,13 @@
+{
+  "schema": "fallback-content-split-amendment-v1",
+  "reason": "Before any fallback fit/hold scoring, the SHA guard rejected 7 cross-half duplicate-byte groups in the initial path-only split. The fixed manifests contain 9 duplicate groups, 18 rows, 3091 unique images; no truth conflicts.",
+  "seed": 42,
+  "method": [
+    "Start with the registered single Random(42), sorted fixed-split/subset strata and sorted normalized paths; first floor(n/2) is fit.",
+    "For each exact-byte duplicate group, assign every member to the initial half of its lexically smallest normalized path.",
+    "Restore exact fit counts per stratum using only singleton images: move hold-to-fit in original shuffled order, or fit-to-hold in reverse original shuffled order.",
+    "Fail rather than split a duplicate group if there are too few singleton rows to restore a stratum. Verify zero SHA overlap between halves."
+  ],
+  "selection_firewall": "Only paths, source SHA and fixed stratum membership affect assignment; no truth, prediction, confidence, candidate rule score or hold result is consulted.",
+  "unchanged": "33 rule definitions, thresholds, fit green guard and lexicographic choice are unchanged. The original registered JSON is preserved. This amendment precedes the first real fallback fit score."
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "three-route-auto-prereg-v1",
+  "purpose": "Predeclare the finite automatic-rule family before trace scoring.",
+  "baseline": {
+    "policy_id": "000",
+    "threshold_source": "complete --base-report search.best; archived current report has tau_agree=0.8839523792266846 and tau_box=0.9605637192726135, accepted=1859",
+    "expected_accepted": "must match the selected base report; never hardcoded for future model runs",
+    "rule_order": "For each candidate in source order and rect in rect_index order: S/R, S/B, R/B at baseline tau_agree. After all rects for that candidate, B solo at tau_box."
+  },
+  "legacy_thresholds": {
+    "same_rect_sr_min_confidence": 0.8225060701370239,
+    "solo_segment_confidence": 0.938401460647583,
+    "solo_reader_confidence": 0.9818063974380493,
+    "disagree_prefer": "segment"
+  },
+  "finite_family": {
+    "switches": ["legacy_sr_agree", "legacy_solo_segment", "legacy_solo_reader"],
+    "combination_order": "000,001,010,011,100,101,110,111; bit 2=SR, bit 1=solo S, bit 0=solo R",
+    "event_order": "Within each rect, baseline S/R then S/B then R/B pairs; if enabled, legacy S/R agreement; if enabled, solo S then solo R. After all rects in a candidate, baseline B solo.",
+    "thresholds_are_fixed": true,
+    "selection_objective": "Among only these eight policies that have at least one automatic pass in each split and >=99.5% auto-pass exact-plate precision in each split, maximize total accepted over val+devhard.",
+    "tie_break": "Prefer 000; then fewer enabled switches; then lexical policy_id."
+  },
+  "safe_augment_family": {
+    "policy_ids": ["safe-000", "safe-001", "safe-010", "safe-011", "safe-100", "safe-101", "safe-110", "safe-111"],
+    "order": "First run the complete baseline decision and return its result unchanged when it auto-passes. Only when baseline has no OK, scan candidates and rects in order for enabled legacy SR agreement, then enabled solo segment, then enabled solo reader. This never lets a later legacy rule steal an existing baseline pass.",
+    "safe-000": "Duplicate of baseline 000; included to make the augmented family explicit.",
+    "selection_scope": "Together with the eight integrated combinations, exactly sixteen preregistered policy IDs; max accepted subject to >=99.5% precision in each fixed split."
+  },
+  "truth_independence": "Rule decisions inspect only route validity, text, confidence, and declared order. Truth is used only after selection to score accepted/correct/whole-plate metrics.",
+  "fallback": "Not varied or used to select an automatic policy; fixed agreement_then_reader is used only to report whole-plate accuracy when automatic policy does not pass.",
+  "outcome_reporting": "Report both split totals, per-split whole-plate accuracy, auto precision, accepted/correct counts, route/subset/category/dark/tilt groups, and fit/hold descriptive groups. No threshold sweep beyond the sixteen declared combinations."
+}
