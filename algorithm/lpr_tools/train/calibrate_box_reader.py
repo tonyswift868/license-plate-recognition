@@ -16,11 +16,15 @@ from lpr.plate_rules import match_layout
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_INDEX = ROOT / "algorithm" / "out" / "data" / "batch10" / "tune.csv"
 DEFAULT_TRAIN_DATA = ROOT / "algorithm" / "out" / "data" / "batch10" / "pool.csv"
+DEFAULT_POOL_AUDIT = ROOT / "algorithm" / "out" / "data" / "batch10" / "audit.json"
 DEFAULT_BEST = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "best.pt"
 DEFAULT_MODEL = ROOT / "algorithm" / "models" / "box_reader_v1.pt"
 DEFAULT_REPORT = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "calibration_report.json"
+DEFAULT_CACHE_INDEX = Path(r"D:\keshe2\algorithm\data\boxcrop_cache\box_reader_v1\index.csv")
+DEFAULT_CACHE_AUDIT = DEFAULT_CACHE_INDEX.parent / "audit.json"
 EXPECTED_PER_FOLD = 1050
 MIN_RELEASE_EPOCHS = 30
+EXPECTED_POOL_COUNT = 210_616
 
 
 def _sha256_file(path: Path) -> str:
@@ -76,12 +80,18 @@ def read_calibration_rows(index_path: Path) -> tuple[list[dict[str, str]], list[
 
 
 def validate_training_history(history_path: Path, best_path: Path, train_data_path: Path,
-                              tune_path: Path) -> dict[str, Any]:
+                              tune_path: Path, *, cache_index_path: Path = DEFAULT_CACHE_INDEX,
+                              cache_audit_path: Path = DEFAULT_CACHE_AUDIT,
+                              pool_audit_path: Path = DEFAULT_POOL_AUDIT,
+                              expected_pool_count: int = EXPECTED_POOL_COUNT) -> dict[str, Any]:
     """Prove the selected checkpoint came from at least 30 complete GPU epochs."""
     history_path = Path(history_path).resolve()
     best_path = Path(best_path).resolve()
     train_data_path = Path(train_data_path).resolve()
     tune_path = Path(tune_path).resolve()
+    cache_index_path = Path(cache_index_path).resolve()
+    cache_audit_path = Path(cache_audit_path).resolve()
+    pool_audit_path = Path(pool_audit_path).resolve()
     if not best_path.is_file():
         raise FileNotFoundError(f"best release checkpoint is missing: {best_path}")
     data = json.loads(history_path.read_text(encoding="utf-8"))
@@ -93,18 +103,75 @@ def validate_training_history(history_path: Path, best_path: Path, train_data_pa
         raise ValueError("release calibration requires a CUDA training history")
     if int(recipe.get("epochs", 0)) < MIN_RELEASE_EPOCHS or len(epochs) < MIN_RELEASE_EPOCHS:
         raise ValueError(f"release checkpoint requires at least {MIN_RELEASE_EPOCHS} complete epochs")
-    if Path(recipe.get("train", "")).resolve() != train_data_path:
-        raise ValueError("training history points at a different pool index")
+    recipe_train = Path(recipe.get("train", "")).resolve()
     if Path(recipe.get("tune", "")).resolve() != tune_path:
         raise ValueError("training history points at a different tune index")
     if Path(recipe.get("out", "")).resolve() != best_path.parent:
         raise ValueError("best checkpoint is outside the output directory recorded by training history")
     train_sha = _sha256_file(train_data_path)
     tune_sha = _sha256_file(tune_path)
-    if data.get("train_sha256") != train_sha or data.get("tune_sha256") != tune_sha:
-        raise ValueError("training history pool/tune SHA-256 does not match current indexes")
+    pool_audit = json.loads(pool_audit_path.read_text(encoding="utf-8-sig"))
+    expected_pool_sha = pool_audit.get("output_hashes", {}).get("pool.csv")
+    if expected_pool_sha != train_sha:
+        raise ValueError("calibration pool SHA-256 does not match the batch10 isolation audit")
     with train_data_path.open(encoding="utf-8-sig", newline="") as stream:
-        train_count = sum(1 for _ in csv.DictReader(stream))
+        pool_count = sum(1 for _ in csv.DictReader(stream))
+    if pool_count != expected_pool_count:
+        raise ValueError(f"audited original pool must contain {expected_pool_count} rows; got {pool_count}")
+    if data.get("tune_sha256") != tune_sha:
+        raise ValueError("training history tune SHA-256 does not match the safe tune index")
+    packed_cache = recipe_train == cache_index_path
+    if packed_cache:
+        if recipe.get("packed_cache") is not True or recipe.get("decode_jpeg") is True:
+            raise ValueError("packed cache training history must use the packed_cache loader")
+        if not cache_index_path.is_file() or not cache_audit_path.is_file():
+            raise FileNotFoundError("packed cache index and audit are required to validate training history")
+        cache_audit = json.loads(cache_audit_path.read_text(encoding="utf-8-sig"))
+        cache_sha = _sha256_file(cache_index_path)
+        if cache_audit.get("pool_sha256") != train_sha:
+            raise ValueError("packed cache audit does not identify the original audited pool")
+        if (cache_audit.get("cache_index_sha256") != cache_sha
+                or data.get("train_sha256") != cache_sha):
+            raise ValueError("packed cache index SHA-256 does not match cache audit and training history")
+        cache_count = int(cache_audit.get("pool_count", -1))
+        with cache_index_path.open(encoding="utf-8-sig", newline="") as stream:
+            cache_reader = csv.DictReader(stream)
+            required_cache_fields = {"path", "label", "subset", "brightness", "sha256", "quad",
+                                     "cache_pack", "pack_offset", "pack_length", "x0", "y0",
+                                     "orig_w", "orig_h"}
+            if not cache_reader.fieldnames or not required_cache_fields.issubset(cache_reader.fieldnames):
+                raise ValueError("packed cache index is missing required image and tar-offset columns")
+            index_count = sum(1 for _ in cache_reader)
+        if cache_count != pool_count or index_count != pool_count:
+            raise ValueError("packed cache count, cache index rows, and original pool count differ")
+        if ("samples" in cache_audit
+                and int(cache_audit["samples"]) != pool_count):
+            raise ValueError("packed cache audit sample count differs from the original pool")
+        if int(cache_audit.get("quality", -1)) != 65:
+            raise ValueError("packed cache must use the audited JPEG quality 65")
+        tar_path = Path(cache_audit.get("cache_tar_path", "")).resolve()
+        if tar_path != cache_index_path.parent / "crops.tar" or not tar_path.is_file():
+            raise ValueError("packed cache audit does not point at the approved crops.tar")
+        if int(cache_audit.get("tar_bytes", -1)) != tar_path.stat().st_size:
+            raise ValueError("packed cache tar size does not match its audit")
+        if int(cache_audit.get("index_bytes", -1)) != cache_index_path.stat().st_size:
+            raise ValueError("packed cache index size does not match its audit")
+        if int(cache_audit.get("total_cache_bytes", -1)) > 3_000_000_000:
+            raise ValueError("packed cache exceeds the 3 GB disk limit")
+        tar_sha = str(cache_audit.get("cache_tar_sha256", "")).lower()
+        if len(tar_sha) != 64 or any(c not in "0123456789abcdef" for c in tar_sha):
+            raise ValueError("packed cache audit has no valid tar SHA-256")
+        train_count = cache_count
+        train_index_sha = cache_sha
+    else:
+        if recipe_train != train_data_path:
+            raise ValueError("training history points at neither audited pool nor approved packed cache")
+        if recipe.get("packed_cache") is True:
+            raise ValueError("packed cache run must use the approved cache index path")
+        if data.get("train_sha256") != train_sha:
+            raise ValueError("training history pool SHA-256 does not match the audited pool")
+        train_count = pool_count
+        train_index_sha = train_sha
     epoch_ids = [int(item.get("epoch", -1)) for item in epochs]
     if epoch_ids != list(range(1, len(epochs) + 1)):
         raise ValueError("training history epochs are not consecutive from epoch 1")
@@ -122,7 +189,18 @@ def validate_training_history(history_path: Path, best_path: Path, train_data_pa
     return {"path": str(history_path), "sha256": _sha256_file(history_path),
             "epochs": len(epochs), "best_epoch": best_epoch,
             "training_samples_per_epoch": train_count, "total_exposures": train_count * len(epochs),
-            "device": recipe["device"], "smoke": False}
+            "device": recipe["device"], "smoke": False,
+            "packed_cache": packed_cache, "training_index_sha256": train_index_sha,
+            "source_pool_count": pool_count,
+            "pool_audit": {"path": str(pool_audit_path), "sha256": _sha256_file(pool_audit_path),
+                           "pool_sha256": expected_pool_sha},
+            "cache_audit": ({"path": str(cache_audit_path), "sha256": _sha256_file(cache_audit_path),
+                             "cache_index_sha256": train_index_sha, "pool_count": pool_count,
+                             "quality": 65, "tar_path": str(tar_path), "tar_sha256": tar_sha,
+                             "tar_bytes": tar_path.stat().st_size,
+                             "index_bytes": cache_index_path.stat().st_size,
+                             "total_cache_bytes": int(cache_audit["total_cache_bytes"])}
+                            if packed_cache else None)}
 
 
 def _collect_logits(model: BoxNet, rows: list[dict[str, str]], box_pad: tuple[float, float],

@@ -28,6 +28,14 @@ def _write_folds(path, *, duplicate_sha=False):
                 })
 
 
+def _write_pool_audit(path, pool):
+    import hashlib
+    import json
+
+    path.write_text(json.dumps({"output_hashes": {
+        "pool.csv": hashlib.sha256(pool.read_bytes()).hexdigest()}}), encoding="utf-8")
+
+
 def test_calibration_fold_requires_1050_disjoint_paths_and_hashes(tmp_path):
     source = tmp_path / "tune.csv"
     _write_folds(source)
@@ -74,15 +82,95 @@ def test_release_history_requires_thirty_complete_cuda_epochs(tmp_path):
         "tune_sha256": hashlib.sha256(tune.read_bytes()).hexdigest(),
     }
     history_path = tmp_path / "history.json"
+    pool_audit_path = tmp_path / "pool-audit.json"
+    _write_pool_audit(pool_audit_path, train)
     history_path.write_text(json.dumps(history), encoding="utf-8")
-    evidence = validate_training_history(history_path, best, train, tune)
+    evidence = validate_training_history(history_path, best, train, tune,
+        pool_audit_path=pool_audit_path, expected_pool_count=3)
     assert evidence["epochs"] == 30
     assert evidence["total_exposures"] == 90
 
     history["history"] = records[:29]
     history_path.write_text(json.dumps(history), encoding="utf-8")
     with pytest.raises(ValueError, match="at least 30 complete epochs"):
-        validate_training_history(history_path, best, train, tune)
+        validate_training_history(history_path, best, train, tune,
+            pool_audit_path=pool_audit_path, expected_pool_count=3)
+
+
+def test_history_accepts_packed_cache_only_when_audit_binds_original_pool(tmp_path):
+    import hashlib
+    import json
+
+    pool = tmp_path / "pool.csv"
+    tune = tmp_path / "tune.csv"
+    cache = tmp_path / "cache" / "index.csv"
+    audit_path = cache.parent / "audit.json"
+    pool_audit_path = tmp_path / "pool-audit.json"
+    train_rows = "path,label\na,皖A12345\nb,皖A23456\nc,皖A34567\n"
+    pool.write_text(train_rows, encoding="utf-8")
+    _write_pool_audit(pool_audit_path, pool)
+    tune.write_text("path,label\na,皖A12345\n", encoding="utf-8")
+    cache.parent.mkdir(parents=True)
+    fields = ("path", "label", "subset", "brightness", "sha256", "quad", "cache_pack",
+              "pack_offset", "pack_length", "x0", "y0", "orig_w", "orig_h")
+    with cache.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for index in range(3):
+            writer.writerow({key: "0" for key in fields})
+    tar = cache.parent / "crops.tar"
+    tar.write_bytes(b"ustar-test")
+    pool_sha = hashlib.sha256(pool.read_bytes()).hexdigest()
+    cache_sha = hashlib.sha256(cache.read_bytes()).hexdigest()
+    audit = {"pool_sha256": pool_sha, "cache_index_sha256": cache_sha,
+             "pool_count": 3, "quality": 65,
+             "cache_tar_path": str(tar.resolve()), "cache_tar_sha256": "a" * 64,
+             "tar_bytes": tar.stat().st_size, "index_bytes": cache.stat().st_size,
+             "total_cache_bytes": tar.stat().st_size + cache.stat().st_size}
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    best = tmp_path / "best.pt"
+    best.write_bytes(b"checkpoint")
+    history_path = tmp_path / "history.json"
+    records = [{"epoch": epoch, "samples": 3, "unique_samples": 3,
+                "tune": {"accuracy": epoch / 100}} for epoch in range(1, 31)]
+    history = {"recipe": {"smoke": False, "device": "cuda", "epochs": 30,
+                          "train": str(cache.resolve()), "tune": str(tune.resolve()),
+                          "out": str(tmp_path.resolve()), "packed_cache": True,
+                          "decode_jpeg": False},
+               "history": records, "best_epoch": 30, "total_exposures": 90,
+               "train_sha256": cache_sha,
+               "tune_sha256": hashlib.sha256(tune.read_bytes()).hexdigest()}
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    evidence = validate_training_history(history_path, best, pool, tune,
+        cache_index_path=cache, cache_audit_path=audit_path,
+        pool_audit_path=pool_audit_path, expected_pool_count=3)
+    assert evidence["packed_cache"] is True
+    assert evidence["training_samples_per_epoch"] == 3
+    assert evidence["cache_audit"]["cache_index_sha256"] == cache_sha
+
+    audit["pool_sha256"] = "0" * 64
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    with pytest.raises(ValueError, match="original audited pool"):
+        validate_training_history(history_path, best, pool, tune,
+            cache_index_path=cache, cache_audit_path=audit_path,
+            pool_audit_path=pool_audit_path, expected_pool_count=3)
+
+    audit["pool_sha256"] = pool_sha
+    audit["cache_index_sha256"] = "0" * 64
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    with pytest.raises(ValueError, match="cache index SHA-256"):
+        validate_training_history(history_path, best, pool, tune,
+            cache_index_path=cache, cache_audit_path=audit_path,
+            pool_audit_path=pool_audit_path, expected_pool_count=3)
+
+    audit["cache_index_sha256"] = cache_sha
+    audit["pool_count"] = 2
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    with pytest.raises(ValueError, match="cache count, cache index rows"):
+        validate_training_history(history_path, best, pool, tune,
+            cache_index_path=cache, cache_audit_path=audit_path,
+            pool_audit_path=pool_audit_path, expected_pool_count=3)
 
 
 def test_positive_temperature_keeps_report_string_predictions():

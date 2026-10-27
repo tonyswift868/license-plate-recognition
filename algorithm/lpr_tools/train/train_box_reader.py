@@ -131,19 +131,32 @@ def cache_contains(row: dict, bbox: tuple, pad: tuple, cached_shape: tuple) -> b
     return left >= x0 and top >= y0 and right <= x0+cached_shape[1] and bottom <= y0+cached_shape[0]
 
 
-def row_crop(row: dict, bbox: tuple, pad: tuple = BOX_PAD) -> np.ndarray:
+def row_crop(row: dict, bbox: tuple, pad: tuple = BOX_PAD, *,
+             cached_image: np.ndarray | None = None, gpu_fallback: bool = False) -> np.ndarray:
+    if cached_image is not None:
+        if cache_contains(row, bbox, pad, cached_image.shape):
+            x, y, w, h = bbox
+            return crop_box(cached_image, (x-int(row["x0"]), y-int(row["y0"]), w, h), *pad)
     if row.get("cache_file"):
         source = read_image(row["cache_file"])
         if cache_contains(row, bbox, pad, source.shape):
             x, y, w, h = bbox
             return crop_box(source, (x-int(row["x0"]), y-int(row["y0"]), w, h), *pad)
+    if gpu_fallback:
+        from torchvision.io import ImageReadMode, decode_jpeg, read_file
+        from lpr_tools.train.gpu_box_batches import rgb_region_for_box
+        rgb = decode_jpeg(read_file(row["path"]), mode=ImageReadMode.RGB, device="cuda")
+        source, local = rgb_region_for_box(rgb, bbox, bbox_from_quad(row["quad"]), pad)
+        return crop_box(source, local, *pad)
     return crop_box(read_image(row["path"]), bbox, *pad)
 
 
 class BoxDataset(Dataset):
-    def __init__(self, index: Path, samples: dict, *, training: bool, seed: int = 42) -> None:
+    def __init__(self, index: Path, samples: dict, *, training: bool, seed: int = 42,
+                 gpu_fallback: bool = False) -> None:
         self.path = Path(index)
         self.samples, self.training, self.seed, self.epoch = samples, training, seed, 0
+        self.gpu_fallback = gpu_fallback
         offsets = []
         with self.path.open("rb") as stream:
             self.header = next(csv.reader([stream.readline().decode("utf-8-sig").strip()]))
@@ -173,13 +186,15 @@ class BoxDataset(Dataset):
         state["_file"] = state["_map"] = None
         return state
 
-    def __getitem__(self, index: int):
+    def specification(self, index: int):
         row = self.row(index)
         rng = random.Random(self.seed + self.epoch*1_000_003 + index)
         bbox = bbox_from_quad(row["quad"])
         if self.training and rng.random() < .65:
             bbox = jitter_bbox(bbox, sample_jitter(rng, row["subset"], self.samples))
-        image = row_crop(row, bbox)
+        return row, rng, bbox
+
+    def finish(self, image: np.ndarray, row: dict, index: int, rng: random.Random):
         if not image.size:
             raise ValueError(f"measured jitter produced empty crop: {row['path']}")
         if self.training:
@@ -191,6 +206,11 @@ class BoxDataset(Dataset):
             if rng.random() < .15:
                 image = cv2.GaussianBlur(image, (3, 3), rng.uniform(.2, 1.))
         return box_tensor(image), row["label"], index
+
+    def __getitem__(self, index: int):
+        row, rng, bbox = self.specification(index)
+        image = row_crop(row, bbox, gpu_fallback=self.gpu_fallback)
+        return self.finish(image, row, index, rng)
 
 
 def collate(rows):
@@ -255,9 +275,13 @@ def run(args) -> dict:
     device = torch.device(args.device)
     metadata = json.loads(args.sampler.read_text(encoding="utf-8"))
     samples = metadata.get("samples_by_subset", metadata.get("subsets", metadata))
-    dataset = BoxDataset(args.train, samples, training=True, seed=args.seed)
+    dataset = BoxDataset(args.train, samples, training=True, seed=args.seed,
+                         gpu_fallback=args.device == "cuda")
     tune = BoxDataset(args.tune, samples, training=False, seed=args.seed)
-    if args.decode_jpeg:
+    if args.packed_cache:
+        from lpr_tools.train.packed_box_batches import PackedBoxBatches
+        loader = PackedBoxBatches(dataset, args.batch_size, collate)
+    elif args.decode_jpeg:
         from lpr_tools.train.gpu_box_batches import GpuBoxBatches
         loader = GpuBoxBatches(dataset, args.batch_size, collate, read_threads=3)
     else:
@@ -267,6 +291,15 @@ def run(args) -> dict:
     tune_loader = DataLoader(tune, batch_size=args.batch_size, shuffle=False,
                              num_workers=0, collate_fn=collate)
     model = BoxNet(imagenet=args.imagenet).to(device)
+    init_source = None
+    if args.init_checkpoint:
+        init_source = {"path": str(args.init_checkpoint.resolve()), "sha256": file_sha256(args.init_checkpoint)}
+        saved = torch.load(args.init_checkpoint, map_location="cpu", weights_only=True)
+        from lpr.recognize.box_reader import ARCH
+        if saved.get("architecture") != ARCH or saved.get("input_size") != list(INPUT_SIZE):
+            raise ValueError("initial checkpoint architecture mismatch")
+        model.load_state_dict(saved["state_dict"], strict=True)
+        init_source["optimizer_reset"] = True
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=1e-5)
     loss_fn = nn.CTCLoss(blank=NUM_CLASSES, zero_infinity=False)
@@ -332,6 +365,8 @@ def run(args) -> dict:
                   "gpu_allocated_peak": torch.cuda.max_memory_allocated() if device.type == "cuda" else 0,
                   "gpu_reserved_peak": torch.cuda.max_memory_reserved() if device.type == "cuda" else 0,
                   "io_reduced_for_low_memory": getattr(loader, "reduced_for_memory", False),
+                  "original_gpu_fallbacks": getattr(loader, "original_fallbacks", 0),
+                  "init_source": init_source,
                   "wall_seconds": time.perf_counter()-started,
                   "train_sha256": file_sha256(args.train), "tune_sha256": file_sha256(args.tune)}
         (args.out / "history.json").write_text(json.dumps(report, default=str, indent=2), encoding="utf-8")
@@ -365,6 +400,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--imagenet", action="store_true")
     parser.add_argument("--decode-jpeg", action="store_true", help="batch torchvision CUDA JPEG decode of original images")
+    parser.add_argument("--packed-cache", action="store_true")
+    parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--cpu-python", type=Path, default=Path(".venv/Scripts/python.exe").resolve())
     parser.add_argument("--smoke", action="store_true", help="explicit non-release tiny CPU smoke")
     parser.add_argument("--prepare-cache", type=Path)
