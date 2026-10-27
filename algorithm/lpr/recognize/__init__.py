@@ -17,7 +17,7 @@ from typing import Any
 
 from ..charset import CHARSET_SHA
 from ..errors import ModelLoadError
-from .base import CharClassifier, CornerDetector, PlateReader
+from .base import BoxReader, CharClassifier, CornerDetector, PlateReader
 
 MANIFEST_NAME = "manifest.json"
 
@@ -124,3 +124,11 @@ def load_plate_reader(model_path: Path) -> PlateReader:
         from .crnn import CrnnReader
         return CrnnReader
     return _load_network("整牌识别网络", cls, model_path)
+
+
+def load_box_reader(model_path: Path) -> BoxReader:
+    """Load a detection-box reader with manifest and frozen-charset verification."""
+    def cls():
+        from .box_reader import BoxPlateReader
+        return BoxPlateReader
+    return _load_network("检测框识别网络", cls, model_path)
