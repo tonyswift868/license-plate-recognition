@@ -1,7 +1,7 @@
 """Prepared one-time G2 runner for the frozen test manifest.
 
 Prepare command (does not run inference):
-  python -m lpr_tools.eval.frozen_once --manifest <frozen.csv> --config <model.toml> --out <receipt.json>
+  python -m lpr_tools.eval.frozen_once --manifest <frozen.csv> --out <receipt.json>
 Formal execution requires appending --run-frozen-once. The marker is created
 exclusively before the first image is evaluated, so an interrupted run cannot be
 silently repeated against the frozen set.
@@ -74,7 +74,7 @@ def _create_once_marker(marker: Path, details: dict):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Prepare or run one-time frozen-test G2 evaluation")
     parser.add_argument("--manifest", required=True, help="versioned frozen manifest; configurable for future sets")
-    parser.add_argument("--config", required=True, help="model/runtime TOML config; configurable for future models")
+    parser.add_argument("--config", default=None, help="optional model/runtime TOML config; defaults to default.toml")
     parser.add_argument("--out", required=True, help="new JSON receipt path; existing output is never overwritten")
     parser.add_argument("--run-frozen-once", action="store_true",
                         help="authorize the formal one-time frozen-set run")
@@ -91,7 +91,8 @@ def main(argv=None):
                               "config": config_info["config_path"], "output": str(output.resolve()),
                               "once_marker": str(marker.resolve()),
                               "run_command": "python -m lpr_tools.eval.frozen_once --manifest "
-                                            f"{manifest} --config {args.config} --out {output} --run-frozen-once"},
+                                            f"{manifest} " + (f"--config {args.config} " if args.config else "")
+                                            + f"--out {output} --run-frozen-once"},
                              ensure_ascii=False, indent=2))
             return 0
         if output.exists():
