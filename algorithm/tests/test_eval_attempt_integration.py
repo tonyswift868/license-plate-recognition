@@ -14,7 +14,7 @@ from lpr_tools.eval import arbitration
 @pytest.mark.parametrize('case', ['mixed', 'special', 'none', 'seg_failed', 'tie'])
 def test_exhaustive_replay_matches_pipeline_across_thresholds(monkeypatch, threshold, case):
     image = np.zeros((120, 240, 3), np.uint8)
-    cfg = load_config(postprocess__min_confidence=threshold)
+    cfg = load_config("config/legacy_agree_v1.toml", postprocess__min_confidence=threshold)
     cand = PlateCandidate([(0, 0), (200, 0), (200, 60), (0, 60)],
                           (0, 0, 200, 60), 'white' if case == 'special' else 'unknown', .9, 'color')
     other = PlateCandidate(cand.corners, cand.bbox, 'blue', .8, 'edge')

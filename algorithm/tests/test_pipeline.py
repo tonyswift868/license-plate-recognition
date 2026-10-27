@@ -13,6 +13,14 @@ from lpr.types import (DecodeResult, PlateCandidate, PreprocessOut, RecogStatus,
 S = RecogStatus
 
 
+@pytest.fixture
+def recognizer():
+    """旧单路线编排断言显式使用旧配置；新默认由三路测试覆盖。"""
+    from lpr.config import load_config
+    from lpr.testing import UniformClassifier
+    return pl.PlateRecognizer(load_config("config/legacy_agree_v1.toml"), UniformClassifier())
+
+
 def _cand(i: int, color: str = "blue") -> PlateCandidate:
     return PlateCandidate(corners=[(i, 0), (i + 10, 0), (i + 10, 3), (i, 3)], bbox=(i, 0, 10, 3),
                           color=color, score=1.0 - i / 10, source="color")

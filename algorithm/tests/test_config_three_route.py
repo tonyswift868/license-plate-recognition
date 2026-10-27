@@ -5,7 +5,7 @@ from lpr.errors import ConfigError
 
 
 def test_three_route_override_retains_old_default_and_full_precision():
-    baseline = load_config()
+    baseline = load_config("config/legacy_agree_v1.toml")
     candidate = load_config("config/three_route_v2.toml")
     assert baseline.postprocess.arbitration == "agree"
     assert baseline.runtime.box_reader_model_path == ""
