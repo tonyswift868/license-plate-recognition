@@ -115,7 +115,7 @@ def test_public_exports():
 
 FROZEN_KEYS = {
     "runtime": {"torch_threads", "model_path", "classifier", "max_candidates",
-                "corner_model_path", "plate_reader_model_path"},
+                "corner_model_path", "plate_reader_model_path", "box_reader_model_path"},
     "preprocess": {"min_side", "work_width", "clahe_clip", "clahe_grid", "blur_ksize"},
     "locate": {"aspect_min", "aspect_max", "area_ratio_min", "area_ratio_max", "max_tilt_deg",
                "close_kernel_rel", "min_row_transitions", "nms_iou", "blue_hsv", "yellow_hsv", "green_hsv"},
@@ -123,7 +123,10 @@ FROZEN_KEYS = {
     "segment": {"binarize", "layout7_centers", "layout7_char_w", "layout8_centers", "layout8_char_w", "char_size"},
     "postprocess": {"min_confidence", "topk", "province_prior", "arbitration", "agree_min_confidence",
                     "solo_min_confidence_segment", "solo_min_confidence_reader", "disagree_prefer",
-                    "nonok_fallback"},
+                    "nonok_fallback", "three_route_agree_min_confidence",
+                    "three_route_box_solo_min_confidence", "three_route_legacy_sr_agreement",
+                    "three_route_segment_solo", "three_route_reader_solo",
+                    "three_route_province_support_min_routes", "fallback_predicted_tilt_min_deg"},
     "voting": {"min_frames", "agree_frames", "window_s"},
     "dedup": {"window_s", "dhash_max_hamming"},
 }
