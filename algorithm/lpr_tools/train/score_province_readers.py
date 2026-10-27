@@ -54,6 +54,11 @@ def _rectified(image, quad, width, cv2):
     return result
 
 
+def _first_char_patch(normalizer, image, quad, full_label: str):
+    """Preserve plate length/color context while preparing the province glyph."""
+    return normalizer(image, quad, full_label)
+
+
 def _metrics(rows):
     province_correct = sum(row["province_correct"] for row in rows)
     plate_correct = sum(row["plate_correct"] for row in rows if row["plate_correct"] is not None)
@@ -159,7 +164,7 @@ def score(kind: str, model_path: Path, data_dir: Path, output: Path | None = Non
         if not truth or truth[0] not in CHAR_TO_INDEX:
             raise ValueError(f"illegal province label: {truth!r}")
         if kind == "char":
-            patch = normalized_first_char(image, quad, truth[0])
+            patch = _first_char_patch(normalized_first_char, image, quad, truth)
             if not isinstance(patch, np.ndarray) or patch.dtype != np.uint8 or patch.shape != (32, 32):
                 raise ValueError("normalized_first_char must return uint8 32 x 32")
             probabilities = province_reader.predict_proba(patch[None, ...])[0]

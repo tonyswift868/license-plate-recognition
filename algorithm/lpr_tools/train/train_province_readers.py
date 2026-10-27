@@ -234,6 +234,8 @@ def run(args):
     args.out.mkdir(parents=True,exist_ok=True)
     audit=json.loads((args.data_dir/'province_audit.json').read_text(encoding='utf-8'))
     if not args.smoke:
+        if json.loads((args.data_dir/'independent_audit.json').read_text(encoding='utf-8')).get('passed') is not True:
+            raise ValueError('independent province isolation checks failed')
         if audit.get('schema')!='province-coverage-data-v1':raise ValueError('unsupported province audit')
         for name,identity in audit['outputs'].items():
             if file_sha256(args.data_dir/name)!=identity['sha256']:raise ValueError('audited metadata changed: '+name)
@@ -282,12 +284,14 @@ def run(args):
     for epoch in range(start_epoch,args.epochs):
         ds.epoch=epoch;model.train();frozen_batch_statistics(model)
         epoch_started=time.perf_counter();real_seen=np.zeros(len(ds),dtype=np.uint8)
+        synthetic_provinces=Counter();synthetic_province_weights=Counter()
         real_draws=synthetic_draws=real_physical=synthetic_physical=0;loss_total=0.;steps=0;epoch_prior_seconds=0.
         if args.resume and epoch==start_epoch and skip:
             state=saved['epoch_counts'];real_seen=np.asarray(state['real_seen'],dtype=np.uint8)
             real_draws=state['real_draws'];synthetic_draws=state['synthetic_draws']
             real_physical=state['real_physical'];synthetic_physical=state['synthetic_physical'];loss_total=state['loss_total']
             steps=state.get('steps',skip);epoch_prior_seconds=state.get('active_seconds',0.)
+            synthetic_provinces.update(state.get('synthetic_provinces',{}));synthetic_province_weights.update(state.get('synthetic_province_weights',{}))
         def payload(cursor,counts):
             return {'format':FORMAT,'kind':args.kind,'model_state':inference_state(model,args.kind),
                     'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
@@ -312,8 +316,10 @@ def run(args):
             loss=(per_example*gpu_weights).sum()/gpu_weights.sum()
             if not torch.isfinite(loss):raise RuntimeError('nonfinite training loss')
             loss.backward();nn.utils.clip_grad_norm_(model.parameters(),5.,error_if_nonfinite=True);optimizer.step()
-            for i,is_synth,weight in zip(indices,synthetic,weights.tolist()):
-                if is_synth:synthetic_physical+=1;synthetic_draws+=weight
+            for i,is_synth,weight,label in zip(indices,synthetic,weights.tolist(),texts):
+                if is_synth:
+                    synthetic_physical+=1;synthetic_draws+=weight
+                    synthetic_provinces[label[0]]+=1;synthetic_province_weights[label[0]]+=weight
                 else:real_physical+=1;real_draws+=weight;real_seen[i]+=1
             loss_total+=float(loss.detach());steps=step+1
             if step%100==0 or (args.out/'stop-request.json').exists():
@@ -323,7 +329,8 @@ def run(args):
                 if (rss>2_500_000_000 or (args.out/'stop-request.json').exists() or (device.type=='cuda' and free<2_000_000_000)) and not args.smoke:
                     counts={'real_seen':real_seen.tolist(),'real_draws':real_draws,'synthetic_draws':synthetic_draws,
                             'real_physical':real_physical,'synthetic_physical':synthetic_physical,'loss_total':loss_total,
-                            'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started}
+                            'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
+                            'synthetic_provinces':dict(synthetic_provinces),'synthetic_province_weights':dict(synthetic_province_weights)}
                     atomic_save(payload(steps,counts),args.out/'last.pt')
                     (args.out/'paused.json').write_text(json.dumps({'reason':'insufficient memory; safely checkpointed',
                         'epoch':epoch+1,'cursor':steps,'rss':rss,'free_ram':free,'required_free_bytes':3_500_000_000}))
@@ -344,7 +351,8 @@ def run(args):
         if device.type=='cuda':torch.cuda.empty_cache()
         counts={'real_seen':real_seen.tolist(),'real_draws':real_draws,'synthetic_draws':synthetic_draws,
                 'real_physical':real_physical,'synthetic_physical':synthetic_physical,'loss_total':loss_total,
-                'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started}
+                'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
+                            'synthetic_provinces':dict(synthetic_provinces),'synthetic_province_weights':dict(synthetic_province_weights)}
         atomic_save(payload(steps,counts),args.out/'last.pt')
         if args.smoke:score={'selection_score':0.,'province_accuracy':0.,'plate_accuracy':0.}
         else:
@@ -354,7 +362,8 @@ def run(args):
             if scored.returncode:raise RuntimeError('CPU selection failed: '+scored.stderr[-4000:])
             score=json.loads(scored.stdout)
         record={'epoch':epoch+1,'real_unique':len(ds),'real_physical':real_physical,
-                'synthetic_physical':synthetic_physical,'real_logical':real_draws,'synthetic_logical':synthetic_draws,
+                'synthetic_physical':synthetic_physical,'synthetic_provinces':dict(synthetic_provinces),
+                'synthetic_province_weights':dict(synthetic_province_weights),'real_logical':real_draws,'synthetic_logical':synthetic_draws,
                 'synthetic_logical_fraction':synthetic_draws/(real_draws+synthetic_draws),
                 'base_group_logical':loader.base_groups,'extra_province_logical':loader.extra_provinces,
                 'loss':loss_total/max(1,steps),'seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
