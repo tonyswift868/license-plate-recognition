@@ -1,10 +1,14 @@
-# 实现验收专用；默认配置仍为 agree。值冻结于第十三批规格7.2/7.3。
+# 第十四批实现验收配置留档（plate_det_v1@256 + crnn_v2 + box_reader_v2，第十三批规格 7.2/7.3）；10-28 补齐后续改过的键，使其不随新默认漂移。
 [runtime]
+detector_input_size = 0
 corner_model_path = "models/plate_det_v1.pt"
+plate_reader_model_path = "models/crnn_v2.pt"
 box_reader_model_path = "models/box_reader_v2.pt"
 
 [postprocess]
 arbitration = "three_route"
+solo_min_confidence_segment = 0.938401460647583
+solo_min_confidence_reader = 0.9818063974380493
 three_route_agree_min_confidence = 0.7329292297363281
 three_route_box_solo_min_confidence = 0.9414944052696228
 three_route_segment_solo = true

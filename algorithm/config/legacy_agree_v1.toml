@@ -1,11 +1,15 @@
-# 第十五批：旧默认留档；仅覆盖与新默认不同的值。
+# 第十五批：旧默认（agree 双路）留档；10-28 补齐第十六、十七批后改过的键，使其不随新默认漂移。
 
 [runtime]
+detector_input_size = 0
 corner_model_path = "models/corner_net_v1.pt"
+plate_reader_model_path = "models/crnn_v2.pt"
 box_reader_model_path = ""
 
 [postprocess]
 arbitration = "agree"
+solo_min_confidence_segment = 0.938401460647583
+solo_min_confidence_reader = 0.9818063974380493
 three_route_agree_min_confidence = 1.0
 three_route_box_solo_min_confidence = 1.0
 three_route_segment_solo = false

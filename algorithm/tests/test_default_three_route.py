@@ -86,8 +86,11 @@ def test_legacy_override_contains_exactly_the_changed_values(monkeypatch):
     legacy = load_config("config/legacy_agree_v1.toml")
     current = load_config()
     expected = {
-        "runtime": {"corner_model_path": "models/corner_net_v1.pt", "box_reader_model_path": ""},
+        "runtime": {"detector_input_size": 0, "corner_model_path": "models/corner_net_v1.pt",
+                    "plate_reader_model_path": "models/crnn_v2.pt", "box_reader_model_path": ""},
         "postprocess": {"arbitration": "agree", "nonok_fallback": "agreement_then_reader",
+                        "solo_min_confidence_segment": 0.938401460647583,
+                        "solo_min_confidence_reader": 0.9818063974380493,
                         "three_route_agree_min_confidence": 1.0,
                         "three_route_box_solo_min_confidence": 1.0,
                         "three_route_segment_solo": False, "three_route_reader_solo": False,
