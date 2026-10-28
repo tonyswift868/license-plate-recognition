@@ -17,6 +17,8 @@ OUT = WORKER / "algorithm" / "out" / "eleventh"
 DATA = OUT / "data"
 INDEX = PROJECT / "algorithm" / "data" / "index"
 RAW_CACHE = WORKER / "algorithm" / "out" / "eighth" / "data" / ".image-sha-cache.jsonl"
+CAMERA_AUGMENT_SCALES = (.4, .6, .8, 1.0, 1.3, 1.6)
+CAMERA_SCALE_FALLBACK_POLICY = "when a sampled scale cannot keep the GT bbox fully inside the 1280x720 canvas, retry lower configured scales in descending order; raise if none fit"
 
 EXCLUSIONS = {
     "frozen": INDEX / "testset_manifest_v1.csv",
@@ -424,9 +426,14 @@ def process_memory() -> dict[str, int]:
                     ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                     ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
     value = Counters(); value.cb = ctypes.sizeof(value)
-    ctypes.windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    handle = ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess())
-    if not ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(value), value.cb):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    handle = kernel32.GetCurrentProcess()
+    if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(value), value.cb):
         raise OSError("cannot measure process working set")
     return {"working_set": int(value.WorkingSetSize), "peak_working_set": int(value.PeakWorkingSetSize)}
 
@@ -436,13 +443,17 @@ def available_memory() -> int:
     if os.name != "nt":
         return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     import ctypes
+    from ctypes import wintypes
     class Status(ctypes.Structure):
-        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+        _fields_ = [("length", wintypes.DWORD), ("load", wintypes.DWORD),
                     *[(name, ctypes.c_ulonglong) for name in
                       ("total", "available", "total_page", "available_page",
                        "total_virtual", "available_virtual", "extended")]]
     status = Status(); status.length = ctypes.sizeof(status)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(Status)]
+    kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         raise OSError("cannot measure available memory")
     return int(status.available)
 
@@ -451,11 +462,17 @@ def limit_cpu_working_set(limit_bytes: int) -> bool:
     if os.name != "nt":
         return False
     import ctypes
+    from ctypes import wintypes
     # This only limits the current process, never another app or the machine.
-    ctypes.windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    result = ctypes.windll.kernel32.SetProcessWorkingSetSizeEx(
-        ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess()), ctypes.c_size_t(1024**2),
-        ctypes.c_size_t(limit_bytes), 4)  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.SetProcessWorkingSetSizeEx.argtypes = [wintypes.HANDLE, ctypes.c_size_t,
+                                                   ctypes.c_size_t, wintypes.DWORD]
+    kernel32.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
+    result = kernel32.SetProcessWorkingSetSizeEx(
+        kernel32.GetCurrentProcess(), ctypes.c_size_t(1024**2),
+        ctypes.c_size_t(limit_bytes), wintypes.DWORD(4))  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
     return bool(result)
 
 
@@ -490,7 +507,7 @@ class CompactPool:
 
 
 def read_training_sample(pool: CompactPool, index: int, epoch: int, size: int,
-                         *, augment: bool = True):
+                         *, augment: bool = True, camera_augment: bool = False):
     import cv2
     import numpy as np
     from lpr.corner_net import letterbox_image
@@ -504,24 +521,78 @@ def read_training_sample(pool: CompactPool, index: int, epoch: int, size: int,
     if image is None:
         raise OSError(f"training JPEG cannot decode: {path}")
     ih, iw = image.shape[:2]
-    canvas, transform = letterbox_image(image, (size, size))
     boxes = np.zeros((0, 4), np.float32); corners = np.zeros((0, 4, 2), np.float32)
+    source_box = source_points = None
     if positive:
         x, y, w, h = raw[1:5]
         if min(w, h, ow, oh) <= 0:
             raise ValueError(f"invalid source dimensions/box: {path}")
-        edges = np.asarray([[x, y], [x+w, y+h]], np.float32)
-        points = np.asarray(raw[5:13], np.float32).reshape(4, 2)
-        for values in (edges, points):
-            values[:, 0] *= iw/ow; values[:, 1] *= ih/oh
-            values[:, 0] = values[:, 0]*transform.scale_x + transform.pad_left
-            values[:, 1] = values[:, 1]*transform.scale_y + transform.pad_top
-            values[:] = np.clip(values, 0, size-1)
-        boxes = edges.reshape(1, 4)
+        source_box = np.asarray([x*iw/ow, y*ih/oh, w*iw/ow, h*ih/oh], np.float32)
+        source_points = np.asarray(raw[5:13], np.float32).reshape(4, 2)
+        source_points[:, 0] *= iw/ow; source_points[:, 1] *= ih/oh
+    rng = np.random.default_rng(42 + epoch*1_000_003 + index)
+    use_camera_canvas = bool(camera_augment and rng.random() < .8)
+    if use_camera_canvas:
+        from lpr_tools.eval_det import camera_canvas
+        if positive:
+            camera_box, camera_points = source_box, source_points
+        else:
+            # The dummy geometry lets the shared camera transform place a negative
+            # image consistently; it is never copied into detector targets.
+            camera_box = np.asarray([iw/2-.5, ih/2-.5, 1., 1.], np.float32)
+            camera_points = np.asarray([[iw/2-.5, ih/2-.5], [iw/2+.5, ih/2-.5],
+                                        [iw/2+.5, ih/2+.5], [iw/2-.5, ih/2+.5]], np.float32)
+        camera_scale = float(rng.choice(CAMERA_AUGMENT_SCALES))
+        try:
+            camera_image, mapped_box, mapped_points, _camera_meta = camera_canvas(
+                image, camera_box, camera_points, camera_scale)
+        except ValueError as exc:
+            if not str(exc).startswith("scaled GT bbox+quad"):
+                raise
+            # Oversized synthetic plates cannot fit while remaining complete;
+            # retry lower sampled scales and fail only if none can preserve GT.
+            valid_fallbacks = [value for value in reversed(CAMERA_AUGMENT_SCALES)
+                               if value < camera_scale]
+            last_error = None
+            for fallback in valid_fallbacks:
+                try:
+                    camera_image, mapped_box, mapped_points, _camera_meta = camera_canvas(
+                        image, camera_box, camera_points, fallback)
+                    camera_scale = fallback
+                    break
+                except ValueError as exc:
+                    if not str(exc).startswith("scaled GT bbox+quad"):
+                        raise
+                    last_error = exc
+            else:
+                if last_error is not None:
+                    raise last_error
+                raise
+        canvas, transform = letterbox_image(camera_image, (size, size))
+        if positive:
+            x, y, w, h = mapped_box
+            edges = np.asarray([[x, y], [x+w, y+h]], np.float32)
+            points = np.asarray(mapped_points, np.float32).reshape(4, 2)
+            for values in (edges, points):
+                values[:, 0] = values[:, 0]*transform.scale_x + transform.pad_left
+                values[:, 1] = values[:, 1]*transform.scale_y + transform.pad_top
+                values[:] = np.clip(values, 0, size-1)
+            boxes, corners = edges.reshape(1, 4), points[None]
+    else:
+        canvas, transform = letterbox_image(image, (size, size))
+        if positive:
+            edges = np.asarray([[source_box[0], source_box[1]],
+                                [source_box[0]+source_box[2], source_box[1]+source_box[3]]], np.float32)
+            points = source_points.copy()
+            for values in (edges, points):
+                values[:, 0] = values[:, 0]*transform.scale_x + transform.pad_left
+                values[:, 1] = values[:, 1]*transform.scale_y + transform.pad_top
+                values[:] = np.clip(values, 0, size-1)
+            boxes = edges.reshape(1, 4)
+            corners = points[None]
+    if positive:
         if min(boxes[0, 2:] - boxes[0, :2]) < 1:
             raise ValueError(f"source box collapses after clipping: {path}")
-        corners = points[None]
-    rng = np.random.default_rng(42 + epoch*1_000_003 + index)
     if augment:
         if rng.random() < .5:
             canvas = np.ascontiguousarray(canvas[:, ::-1])
@@ -669,6 +740,40 @@ def source_hashes() -> dict[str, str]:
             (Path(__file__).resolve(), WORKER/"algorithm/lpr/plate_det.py")}
 
 
+def validate_init_resume_options(init_from: Path | None, resume: Path | None) -> None:
+    if init_from is not None and resume is not None:
+        raise ValueError("--init-from and --resume are mutually exclusive")
+
+
+def minimum_complete_epochs(*, stage_parent: bool) -> int:
+    return 10 if stage_parent else 40
+
+
+def stage_learning_rates(*, stage_parent: bool) -> tuple[float, float]:
+    return (2e-5, 2e-4) if stage_parent else (1e-4, 1e-3)
+
+
+def build_stage_parent(path: Path, sha256: str, *, parent_epochs: int | None,
+                       parent_exposures: int | None, parent_train_pool_sha256: str | None,
+                       release_manifest_sha256: str | None) -> dict:
+    return {"model_path": str(path), "model_sha256": sha256,
+            "parent_training": {"verified_epoch_completed": parent_epochs,
+                                "exposures": parent_exposures,
+                                "train_pool_sha256": parent_train_pool_sha256,
+                                "release_manifest_sha256": release_manifest_sha256},
+            "stage_start_epoch": 0, "stage_start_training_wall_seconds": 0.,
+            "optimizer_state": "new", "rng_state": "new"}
+
+
+def validate_camera_source(payload, *, current_sha: str, allow_change: bool, reason: str | None = None):
+    old_sha = payload.get("camera_source_sha256")
+    if old_sha is None or old_sha == current_sha:
+        return None
+    if not allow_change or not reason or not reason.strip():
+        raise ValueError("camera augmentation source changed; explicit allow flag and reason required")
+    return {"old": old_sha, "new": current_sha, "reason": reason}
+
+
 def validate_resume_sources(payload, *, allow_change: bool, reason: str | None = None):
     current = source_hashes()
     previous = payload["source_hashes"]
@@ -701,6 +806,14 @@ def _checkpoint(model, optimizer, scaler, args, epoch, cursor, exposures, pool_s
     import torch
     from lpr.plate_det import ARCHITECTURE
     check_finite_history(args._finite_history)
+    training_config = {k: (str(v) if isinstance(v, Path) else v)
+                       for k, v in vars(args).items() if not k.startswith("_")}
+    training_config.update({"out_dir": str(args.out_dir), "data_dir": str(args.data_dir),
+                            "resume": str(args.resume) if args.resume else None,
+                            "init_from": str(args.init_from) if args.init_from else None,
+                            "stage_learning_rates": list(args._base_lrs),
+                            "camera_augment_scale_policy": CAMERA_SCALE_FALLBACK_POLICY
+                            if args.camera_augment else None})
     return {"architecture": ARCHITECTURE, "input_size": [args.image_size]*2,
             "score_threshold": .25, "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
@@ -710,26 +823,26 @@ def _checkpoint(model, optimizer, scaler, args, epoch, cursor, exposures, pool_s
             "epoch_subset_counts": dict(args._epoch_counts) if cursor else {},
             "epoch_background_unrecorded_upper_bound": args._background_unknown if cursor else 0,
             "resume_history": args._resume_history,
+            "stage_parent": args._stage_parent,
+            "camera_source_sha256": file_digest(Path(__file__).with_name("eval_det.py")),
             "train_pool_sha256": pool_sha, "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state() if args.device == "cuda" else None,
             "source_hashes": source_hashes(),
             "resource_limits": {"working_set_cap": args.ram_cap_mb*1_000_000,
-                                "cuda_reserved_guard": 4_000_000_000,
-                                "cuda_fraction": .42, "workers": 0, "io_threads": args.io_threads},
+                                "cuda_reserved_guard": args.cuda_reserved_cap_mb*1_000_000,
+                                "cuda_fraction": args.cuda_fraction, "workers": 0, "io_threads": args.io_threads},
             "imagenet": "torchvision ResNet18_Weights.IMAGENET1K_V1; stem and layer1..3",
-            "training_config": {k: v for k, v in vars(args).items() if not k.startswith("_")} | {"out_dir": str(args.out_dir), "data_dir": str(args.data_dir),
-                                               "resume": str(args.resume) if args.resume else None}}
+            "training_config": training_config}
 
 
 def run_training(args):
     """One authorized GPU phase, or a bounded CPU smoke; no automatic launch/wait loop."""
     if not args.smoke and (not args.start_training or args.device != "cuda"):
         raise ValueError("formal training needs explicit --start-training --device cuda authorization")
-    if not args.smoke and args.epochs < 40:
-        raise ValueError("formal training requires at least40 complete epochs")
+    validate_init_resume_options(args.init_from, args.resume)
     if args.workers != 0:
         raise ValueError("this memory-bounded trainer uses DataLoader workers0; use --io-threads1..3")
-    # Leave headroom for the venv launcher and shell within the combined3GB cap.
+    # Leave launcher/shell headroom inside the configured process working-set cap.
     hard_limit = 1_000_000_000 if args.smoke else args.ram_cap_mb*1_000_000
     if args.low_memory_start and (args.workers != 0 or args.io_threads > 2):
         raise ValueError("low-memory start requires workers0 and at most2 IO threads")
@@ -756,7 +869,7 @@ def run_training(args):
     if args.device == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable; use the shared .venv-gpu interpreter")
-        torch.cuda.set_per_process_memory_fraction(.42)
+        torch.cuda.set_per_process_memory_fraction(args.cuda_fraction)
         torch.backends.cudnn.benchmark = True
     os.environ["TORCH_HOME"] = str(OUT/"cache"/"torch")
     torch.hub.set_dir(str(OUT/"cache"/"torch"/"hub"))
@@ -773,13 +886,16 @@ def run_training(args):
     if last.exists() and args.resume is None:
         raise FileExistsError("last checkpoint exists; pass explicit --resume")
     memory_format = torch.channels_last if args.device == "cuda" else torch.contiguous_format
-    model = PlateDetModel(pretrained=args.resume is None and not args.random_smoke).to(
+    stage_parent = None
+    model = PlateDetModel(pretrained=args.resume is None and args.init_from is None and not args.random_smoke).to(
         device=args.device, memory_format=memory_format)
     for block in model.features[:args.freeze_backbone_blocks]:
         block.requires_grad_(False)
+    args._stage_parent = None
+    args._base_lrs = stage_learning_rates(stage_parent=args.init_from is not None)
     optimizer = torch.optim.AdamW([
-        {"params": model.features.parameters(), "lr": 1e-4},
-        {"params": [p for name, p in model.named_parameters() if not name.startswith("features.")], "lr": 1e-3}],
+        {"params": model.features.parameters(), "lr": args._base_lrs[0]},
+        {"params": [p for name, p in model.named_parameters() if not name.startswith("features.")], "lr": args._base_lrs[1]}],
         weight_decay=1e-4, fused=args.device == "cuda", foreach=False)
     scaler = torch.amp.GradScaler("cuda", enabled=args.device == "cuda")
     epoch_completed, cursor, exposures = 0, 0, 0
@@ -792,6 +908,9 @@ def run_training(args):
             raise ValueError("resume architecture/pool mismatch")
         changes = validate_resume_sources(payload, allow_change=args.allow_code_change_resume,
                                           reason=args.resume_change_reason)
+        camera_change = validate_camera_source(
+            payload, current_sha=file_digest(Path(__file__).with_name("eval_det.py")),
+            allow_change=args.allow_code_change_resume, reason=args.resume_change_reason)
         if payload["input_size"] != [args.image_size]*2 and not args.allow_resize_resume:
             raise ValueError("input resize resume requires --allow-resize-resume")
         model.load_state_dict(payload["state_dict"], strict=True)
@@ -801,6 +920,12 @@ def run_training(args):
             group.update(fused=args.device == "cuda", foreach=False)
         optimizer.load_state_dict(payload["optimizer"]); scaler.load_state_dict(payload["scaler"])
         epoch_completed, cursor, exposures = payload["epoch_completed"], payload["batch_cursor"], payload["exposures"]
+        args._stage_parent = payload.get("stage_parent")
+        saved_rates = payload.get("training_config", {}).get("stage_learning_rates")
+        args._base_lrs = tuple(saved_rates) if saved_rates else stage_learning_rates(
+            stage_parent=args._stage_parent is not None)
+        if not args.smoke and args.epochs < minimum_complete_epochs(stage_parent=args._stage_parent is not None):
+            raise ValueError(f"formal training requires at least{minimum_complete_epochs(stage_parent=args._stage_parent is not None)} complete epochs for this stage")
         if exposures != epoch_completed*len(pool)+cursor:
             raise ValueError("resume exposures do not match complete epochs plus cursor")
         args._resume_history = payload.get("resume_history", []) + [{
@@ -809,6 +934,8 @@ def run_training(args):
             "old_input_size": payload["input_size"], "new_input_size": [args.image_size]*2,
             "old_batch_size": payload["training_config"]["batch_size"], "new_batch_size": args.batch_size,
             "new_ram_cap_mb": args.ram_cap_mb, "new_io_threads": args.io_threads}]
+        if camera_change:
+            args._resume_history[-1]["camera_source_change"] = camera_change
         restored_counts = payload.get("epoch_subset_counts") if cursor else None
         if cursor:
             args._background_unknown = payload.get("epoch_background_unrecorded_upper_bound", 0)
@@ -819,6 +946,27 @@ def run_training(args):
         torch.set_rng_state(payload["torch_rng"].cpu())
         if args.device == "cuda" and payload.get("cuda_rng") is not None:
             torch.cuda.set_rng_state(payload["cuda_rng"].cpu())
+    elif args.init_from:
+        parent_path = args.init_from.resolve()
+        parent_sha = file_digest(parent_path)
+        parent_payload = torch.load(parent_path, map_location="cpu", weights_only=True)
+        if not isinstance(parent_payload, dict) or parent_payload.get("architecture") != ARCHITECTURE:
+            raise ValueError("--init-from must be a strict plate detector checkpoint")
+        model.load_state_dict(parent_payload["state_dict"], strict=True)
+        if not args.smoke and args.epochs < minimum_complete_epochs(stage_parent=True):
+            raise ValueError("formal init-from stage requires at least10 complete epochs")
+        release_path = OUT/"model_release.json"
+        release = json.loads(release_path.read_text(encoding="utf-8-sig")) if release_path.is_file() else {}
+        verified_parent = (release.get("epoch_completed") == 40
+                           and release.get("model_sha256") == parent_sha)
+        args._stage_parent = build_stage_parent(
+            parent_path, parent_sha,
+            parent_epochs=40 if verified_parent else None,
+            parent_exposures=release.get("exposures") if verified_parent else None,
+            parent_train_pool_sha256=release.get("train_pool_sha256") if verified_parent else None,
+            release_manifest_sha256=file_digest(release_path) if verified_parent else None)
+    elif not args.smoke and args.epochs < minimum_complete_epochs(stage_parent=False):
+        raise ValueError("formal training requires at least40 complete epochs")
     model.train(); started = time.monotonic(); steps_this_run = 0
     for block in model.features[:args.freeze_backbone_blocks]:
         block.eval()
@@ -842,7 +990,8 @@ def run_training(args):
             args._epoch_start, args._epoch_before = epoch_start, epoch_before
             def schedule(offset):
                 return [executor.submit(read_training_sample, pool, int(i), epoch, args.image_size,
-                                        augment=not args.smoke)
+                                        augment=not args.smoke,
+                                        camera_augment=args.camera_augment)
                         for i in order[offset:offset+args.batch_size]]
             pending = schedule(cursor)
             for offset in range(cursor, len(pool), args.batch_size):
@@ -873,7 +1022,7 @@ def run_training(args):
                 progress = (epoch+offset/len(pool))/max(1, args.epochs)
                 factor = .01+.99*(1+math.cos(math.pi*progress))/2
                 warm = min(1., (epoch+offset/len(pool)+.01))
-                for group, base_lr in zip(optimizer.param_groups, (1e-4, 1e-3)):
+                for group, base_lr in zip(optimizer.param_groups, args._base_lrs):
                     group["lr"] = base_lr*factor*warm
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=args.device, dtype=torch.float16, enabled=args.device == "cuda"):
@@ -920,7 +1069,7 @@ def run_training(args):
                               "cuda_peak_reserved": vram}
                     with (args.out_dir/"steps.jsonl").open("a", encoding="utf-8") as stream:
                         stream.write(json.dumps(record)+"\n")
-                    if memory["working_set"] > hard_limit or vram > 4_000_000_000:
+                    if memory["working_set"] > hard_limit or vram > args.cuda_reserved_cap_mb*1_000_000:
                         _save_atomic(_checkpoint(model, optimizer, scaler, args, epoch, next_cursor, exposures, pool_sha), last)
                         raise MemoryError("own RAM/VRAM budget reached; saved last, reduce batch/workers")
                     if not args.smoke and free < 2*1024**3:
@@ -955,12 +1104,14 @@ def run_training(args):
             _save_atomic(_checkpoint(model, optimizer, scaler, args, epoch_completed, 0, exposures, pool_sha), last)
             elapsed = epoch_before+time.monotonic()-epoch_start
             epoch_before = 0.
+            total_hours_at_rate = elapsed*args.epochs/3600
             record = {"epoch_completed": epoch_completed, "pool_n": len(pool),
                       "epoch_exposures": epoch_exposures, "global_exposures": exposures,
                       "subsets": dict(counts), "coverage_sha256": coverage,
                       "background_unrecorded_upper_bound": args._background_unknown,
                       "elapsed_seconds": elapsed, "remaining_hours_at_this_rate":
-                      elapsed*(args.epochs-epoch_completed)/3600, "full40_hours_at_this_rate": elapsed*40/3600,
+                      elapsed*(args.epochs-epoch_completed)/3600,
+                      "estimated_total_hours_at_this_rate": total_hours_at_rate,
                       "image_size": args.image_size, "batch_size": args.batch_size,
                       "training_wall_seconds": args._wall_before+time.monotonic()-started,
                       "memory": process_memory(), "cuda_peak_reserved": torch.cuda.max_memory_reserved()}
@@ -969,7 +1120,7 @@ def run_training(args):
             print(json.dumps(record), flush=True); completed_this_run.append(record)
             args._background_unknown = 0
             if (args.stop_after_epoch and epoch_completed >= args.stop_after_epoch) or (
-                    epoch_completed == 1 and record["full40_hours_at_this_rate"] > args.max_hours):
+                    epoch_completed == 1 and total_hours_at_rate > args.max_hours):
                 break
     _dump_profile(args)
     return {"epoch_completed": epoch_completed, "exposures": exposures,
@@ -990,10 +1141,15 @@ def main(argv=None):
     parser.add_argument("--workers", type=int, choices=(0,), default=0)
     parser.add_argument("--io-threads", type=int, choices=(1, 2, 3), default=3)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--init-from", type=Path, help="initialize a fresh fine-tuning stage from detector weights only")
+    parser.add_argument("--camera-augment", action="store_true",
+                        help="with 80%% probability transform samples onto a 1280x720 camera canvas")
     parser.add_argument("--allow-resize-resume", action="store_true")
     parser.add_argument("--allow-code-change-resume", action="store_true")
     parser.add_argument("--resume-change-reason")
     parser.add_argument("--ram-cap-mb", type=int, default=2800, help="decimal MB; total process headroom retained")
+    parser.add_argument("--cuda-fraction", type=float, default=.42)
+    parser.add_argument("--cuda-reserved-cap-mb", type=int, default=4000)
     parser.add_argument("--low-memory-start", action="store_true")
     parser.add_argument("--stop-after-steps", type=int, default=0)
     parser.add_argument("--profile", action="store_true", help="bounded CUDA-event numeric stage timings")
@@ -1016,6 +1172,12 @@ def main(argv=None):
         parser.error("invalid batch/epoch/input size")
     if not 1400 <= args.ram_cap_mb <= 2800 or args.stop_after_steps < 0:
         parser.error("RAM cap must be1400..2800MB; stop-after-steps must be nonnegative")
+    try:
+        validate_init_resume_options(args.init_from, args.resume)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not 0 < args.cuda_fraction <= 1 or args.cuda_reserved_cap_mb < 1:
+        parser.error("CUDA fraction must be in (0,1] and reserved cap must be positive")
     return run_training(args)
 
 
