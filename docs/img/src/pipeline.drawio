@@ -1,326 +1,276 @@
 <?xml version='1.0' encoding='utf-8'?>
-<mxfile host="app.diagrams.net" modified="2026-10-24T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+<mxfile host="app.diagrams.net" modified="2026-10-28T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
   <diagram id="pipeline-m2" name="图5 车牌识别六阶段流水线">
-    <mxGraphModel dx="1680" dy="2180" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1680" pageHeight="2180" math="0" shadow="0">
+    <mxGraphModel dx="1950" dy="3160" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1950" pageHeight="3160" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="图 5｜车牌识别六阶段流水线" style="text;html=1;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#17324D;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="40" y="20" width="1000" height="40" as="geometry" />
+        <mxCell id="title" value="图 5｜车牌识别六阶段流水线：当前默认 011 + T20_A" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=24;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="120" y="20" width="1670" height="65" />
         </mxCell>
-        <mxCell id="subtitle" value="主链按阶段阅读；右侧控制栏说明候选 / 版式回退；底部为调用方可选旁路" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#547086;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="42" y="60" width="1300" height="28" as="geometry" />
+        <mxCell id="input" value="输入：原始抓拍图（BGR uint8）及车道 ROI&#10;同车多帧：每帧先独立执行本流程" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="120" width="460" height="75" />
         </mxCell>
-        <mxCell id="input" value="输入：BGR uint8 图像&#10;recognize(image) 单帧；recognize_many 同车 1–5 帧（每帧各走本主链）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F3FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="40" y="110" width="220" height="92" as="geometry" />
+        <mxCell id="preprocess" value="① 预处理&#10;输入校验 → ROI / 工作图 → CLAHE 灰度与 HSV&#10;保留原图与工作图坐标映射" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="235" width="500" height="105" />
         </mxCell>
-        <mxCell id="s1" value="① 预处理&#10;输入：BGR 原图 + 车道 ROI&#10;校验 → ROI 裁剪 → 缩放至工作宽度 800&#10;CLAHE 灰度 + HSV&#10;输出：PreprocessOut（work / gray / hsv / 坐标映射）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="100" width="480" height="128" as="geometry" />
+        <mxCell id="detector" value="② 网络定位 plate_det_v1&#10;原图 → 中心 / bbox / 四角点预测&#10;按候选中心过滤 ROI" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="200" y="390" width="500" height="110" />
         </mxCell>
-        <mxCell id="s2" value="② 定位&#10;输入：PreprocessOut&#10;HSV 颜色 + Sobel-x 边缘 → 形态学 / 轮廓&#10;几何过滤、打分、NMS；坐标映回原图&#10;输出：按 score 降序 Top-3 PlateCandidate&#10;bbox / corners 坐标均为原图坐标" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="270" width="480" height="140" as="geometry" />
+        <mxCell id="classic" value="② 传统 locate&#10;工作图颜色 / Sobel 边缘 → 几何候选&#10;坐标映回原图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="800" y="390" width="500" height="110" />
         </mxCell>
-        <mxCell id="s3" value="③ 校正&#10;输入：原图 + 当前候选&#10;原图精修四角 → 透视变换&#10;输出：RectifiedPlate（校正图 / 颜色 / 版式）&#10;尺寸：7 位 252×80；8 位 276×80；不确定时 layout=0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="460" width="480" height="128" as="geometry" />
+        <mxCell id="merge" value="② 候选融合&#10;网络在前、传统补位，重叠去重，最多三个&#10;当前默认仍保留传统融合" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="550" width="500" height="100" />
         </mxCell>
-        <mxCell id="s4" value="④ 分割&#10;输入：RectifiedPlate + 当前版式&#10;极性统一 / 二值化 / 去铆钉与边框&#10;模板对齐 + 投影细化&#10;输出：SegmentResult（字符框、N×32×32、ok）&#10;字符框坐标为校正图坐标" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="640" width="480" height="140" as="geometry" />
+        <mxCell id="has_candidate" value="融合后有候选？" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;shape=rhombus;perimeter=rhombusPerimeter;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="690" width="280" height="100" />
         </mxCell>
-        <mxCell id="s5" value="⑤ 识别&#10;输入：N×32×32 字符图&#10;CharCNN（可切换模板匹配 / HOG+SVM）&#10;输出：N×65 概率矩阵" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="830" width="480" height="112" as="geometry" />
+        <mxCell id="no_plate" value="NO_PLATE&#10;定位无候选" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FDEEEE;strokeColor=#D97A7A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1120" y="700" width="430" height="80" />
         </mxCell>
-        <mxCell id="s6" value="⑥ 后处理&#10;输入：概率矩阵 + 版式 + 颜色&#10;位置约束解码 → 正则校验&#10;输出：DecodeResult（车牌号 / 置信度 / Top-3 备选 / 状态）&#10;confidence = 逐位原始 softmax 置信度最小值，不按约束重归一化" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#5B9BD5;fontColor=#17324D;fontSize=13;align=left;spacingLeft=12;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="990" width="480" height="140" as="geometry" />
+        <mxCell id="candidate" value="按融合顺序取当前候选&#10;不跨候选投票" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="830" width="500" height="85" />
         </mxCell>
-        <mxCell id="hascand" value="定位有候选？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="290" width="150" height="90" as="geometry" />
+        <mxCell id="rectify" value="③ 校正&#10;原图 + 当前候选 → 有序透视视图&#10;首视图及替代视图供 S / R" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="955" width="500" height="105" />
         </mxCell>
-        <mxCell id="candpick" value="候选控制&#10;从 Top-3 按 score 降序依次取当前候选&#10;本候选的版式尝试耗尽后再取下一候选" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E8;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;align=left;spacingLeft=9;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1240" y="240" width="310" height="112" as="geometry" />
+        <mxCell id="box" value="③ / ⑤ 原框读牌 B&#10;原 bbox → crop_box（pad 从权重读）&#10;box_reader_v2：每候选一次，缓存跨视图复用" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="1100" width="500" height="115" />
         </mxCell>
-        <mxCell id="layoutq" value="版式队列&#10;已知版式：先试判定版式&#10;未知：7 位、8 位均尝试&#10;黄 / unknown：补试另一版式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E8;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;align=left;spacingLeft=9;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="475" width="250" height="120" as="geometry" />
+        <mxCell id="view" value="按原顺序取当前校正视图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="1255" width="500" height="80" />
         </mxCell>
-        <mxCell id="segok" value="分割 ok？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="675" width="150" height="90" as="geometry" />
+        <mxCell id="segment" value="④ / ⑤ 分割 + CNN：S&#10;校正图 → 版式尝试 → 字符分割 → char_cnn_v2&#10;S 自身首 OK 只结束版式循环，不直接返回系统 OK" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="160" y="1380" width="500" height="135" />
         </mxCell>
-        <mxCell id="layoutnext" value="还有版式？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1300" y="685" width="145" height="85" as="geometry" />
+        <mxCell id="reader" value="⑤ 校正 CRNN：R&#10;同一校正图 → crnn_v2&#10;即使 S 分割失败也继续读取" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="840" y="1380" width="500" height="135" />
         </mxCell>
-        <mxCell id="okq" value="解码 status = OK？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="1030" width="165" height="90" as="geometry" />
+        <mxCell id="auto" value="⑥ 011 自动判定（同候选、同校正视图）&#10;合法同串 S/R → S/B → R/B&#10;再 S-solo → R-solo；首个自动事件即返回" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="1570" width="500" height="145" />
         </mxCell>
-        <mxCell id="best" value="更新 best&#10;按状态优先级 OK &gt; LOW_CONFIDENCE &gt; INVALID_FORMAT&#10;同状态再比置信度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E8;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;align=left;spacingLeft=9;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1260" y="1000" width="300" height="112" as="geometry" />
+        <mxCell id="ok" value="OK：自动通过，立即返回&#10;停止后续视图 / 候选推理&#10;仍须业务校验才能放行" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#E9F5EC;strokeColor=#60A879;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1150" y="1595" width="470" height="100" />
         </mxCell>
-        <mxCell id="layoutloop" value="回到版式队列&#10;尝试下一个版式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E8;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;align=left;spacingLeft=9;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1300" y="820" width="145" height="75" as="geometry" />
+        <mxCell id="more_views" value="该候选还有校正视图？" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;shape=rhombus;perimeter=rhombusPerimeter;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="1770" width="280" height="105" />
         </mxCell>
-        <mxCell id="candnext" value="还有下一候选？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1300" y="1250" width="160" height="90" as="geometry" />
+        <mxCell id="box_solo" value="⑥ B-solo&#10;仅该候选全部校正视图结束后检查&#10;不可提前到首视图之前" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="1930" width="500" height="105" />
         </mxCell>
-        <mxCell id="special" value="首候选校正后为白 / 黑色&#10;且全部尝试无 OK？" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E8;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;align=left;spacingLeft=9;arcSize=10;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="1400" width="220" height="95" as="geometry" />
+        <mxCell id="more_candidates" value="还有候选？" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;shape=rhombus;perimeter=rhombusPerimeter;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="2085" width="280" height="100" />
         </mxCell>
-        <mxCell id="bestq" value="有 best？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A23A;fontColor=#493B1B;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="720" y="1405" width="130" height="85" as="geometry" />
+        <mxCell id="special" value="未自动通过且候选0&#10;首视图为白 / 黑？" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;shape=rhombus;perimeter=rhombusPerimeter;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="610" y="2235" width="280" height="110" />
         </mxCell>
-        <mxCell id="segfailed" value="无 best&#10;返回 SEG_FAILED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDECEC;strokeColor=#D97A7A;fontColor=#702D2D;fontSize=13;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="440" y="1405" width="190" height="80" as="geometry" />
+        <mxCell id="unsupported" value="UNSUPPORTED&#10;特种牌转人工" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FDEEEE;strokeColor=#D97A7A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1150" y="2250" width="470" height="80" />
         </mxCell>
-        <mxCell id="errors" value="错误状态出口&#10;NO_PLATE：定位无候选&#10;BAD_INPUT：输入 / 预处理无效&#10;INTERNAL_ERROR：阶段异常&#10;SEG_FAILED：无有效分割；UNSUPPORTED：首候选特种牌无 OK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDECEC;strokeColor=#D97A7A;fontColor=#702D2D;fontSize=13;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="300" y="1540" width="440" height="120" as="geometry" />
+        <mxCell id="fallback" value="⑥ T20_A 人工回退&#10;仅用候选0预测四角角度：达门槛偏好 A，否则 M&#10;再按 [preferred,A,M,L] 取首个合法读法&#10;合法 → LOW_CONFIDENCE；无读法 → INVALID_FORMAT / SEG_FAILED" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="2390" width="500" height="150" />
         </mxCell>
-        <mxCell id="result" value="最终 RecognitionResult&#10;status / error_code / message；plate_no / plate_color / layout&#10;confidence / char_confidences / Top-3；bbox / corners（原图坐标）&#10;plate_image（校正图）；elapsed_ms / stage_ms / frames_used" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F6EE;strokeColor=#60A879;fontColor=#173D2A;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="800" y="1860" width="620" height="120" as="geometry" />
+        <mxCell id="result" value="单帧 RecognitionResult&#10;状态 / 文本 / 置信度 / 原图几何 / 图像证据&#10;to_dict() 不包含 ndarray 或新增仲裁诊断字段" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#E9F5EC;strokeColor=#60A879;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="2590" width="500" height="110" />
         </mxCell>
-        <mxCell id="vote" value="可选多帧聚合（调用方选择）&#10;recognize_many：收集同车各帧结果后逐位加权投票&#10;流式调用方也可用 PlateVoteSession；输出聚合 RecognitionResult" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2ECFF;strokeColor=#9878C5;fontColor=#3E2B5C;fontSize=13;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="800" y="1700" width="620" height="90" as="geometry" />
+        <mxCell id="voting" value="调用方可选：同车多帧投票&#10;recognize_many / PlateVoteSession&#10;不同车辆不可混入同一会话" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F2ECFA;strokeColor=#9878C5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="2750" width="500" height="110" />
         </mxCell>
-        <mxCell id="duplicate" value="可选 DuplicateFilter（调用方组合）&#10;返回 (is_duplicate, reason)；不改结果、不自动放行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2ECFF;strokeColor=#9878C5;fontColor=#3E2B5C;fontSize=13;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="800" y="2030" width="620" height="85" as="geometry" />
+        <mxCell id="dedup" value="调用方可选：DuplicateFilter&#10;重复抓拍提示不替代 M3/M5 事务幂等" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F2ECFA;strokeColor=#9878C5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="500" y="2910" width="500" height="90" />
         </mxCell>
-        <mxCell id="legend" value="蓝色：单帧主链；橙色：判断 / 回退；红色：错误；紫色虚线：调用方可选旁路。第一个 OK 提前返回。" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#547086;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="40" y="2140" width="1500" height="30" as="geometry" />
+        <mxCell id="errors" value="输入或解码无效 → BAD_INPUT&#10;运行期非预期异常 → INTERNAL_ERROR&#10;这些失败也封装为 RecognitionResult" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FDEEEE;strokeColor=#D97A7A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="2400" width="380" height="135" />
         </mxCell>
-        <mxCell id="frame_result" value="单帧 / 每帧 RecognitionResult&#10;成功、最佳非 OK 或错误状态均在此封装" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F6EE;strokeColor=#60A879;fontColor=#173D2A;fontSize=13;fontStyle=1;fontFamily=Microsoft YaHei;" vertex="1" parent="1">
-          <mxGeometry x="800" y="1540" width="620" height="90" as="geometry" />
+        <mxCell id="identity" value="身份约束&#10;S/R 固定 (candidate,rect)&#10;B 固定 candidate，原框读取一次&#10;不读 GT；不按识别真值挑校正视图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1370" y="840" width="450" height="170" />
         </mxCell>
-        <mxCell id="e01" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="input" target="s1">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="thresholds" value="完整阈值见正文 3.9.1&#10;agree 与单路门槛各自独立&#10;比较含等号、不截断浮点&#10;人工回退不可升级为自动 OK" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1370" y="1070" width="450" height="170" />
+        </mxCell>
+        <mxCell id="export" value="当前默认来源：algorithm/config/default.toml；仲裁合同：03-三路仲裁集成规格.md §7；节点对应正文 §3.3。&#10;旧流程仅用 config/legacy_agree_v1.toml 留档。用户导出本页为 docs/img/pipeline.png。" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="100" y="3040" width="1730" height="90" />
+        </mxCell>
+        <mxCell id="e01" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="input" target="preprocess">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e02" value="原图 + ROI" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="preprocess" target="detector">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="280" y="156" />
-              <mxPoint x="280" y="164" />
+              <mxPoint x="750" y="365" />
+              <mxPoint x="450" y="365" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e02" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s1" target="s2">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e03" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s2" target="hascand">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e03" value="工作图" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="preprocess" target="classic">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="900" y="340" />
-              <mxPoint x="900" y="335" />
+              <mxPoint x="750" y="365" />
+              <mxPoint x="1050" y="365" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e04" value="有候选" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=0;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="hascand" target="candpick">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e04" value="网络优先" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="detector" target="merge">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1095" y="220" />
-              <mxPoint x="1200" y="220" />
-              <mxPoint x="1200" y="296" />
+              <mxPoint x="450" y="525" />
+              <mxPoint x="650" y="525" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e05" value="无：NO_PLATE" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="hascand" target="errors">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e05" value="传统补位" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="classic" target="merge">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1095" y="440" />
-              <mxPoint x="820" y="440" />
-              <mxPoint x="820" y="1380" />
-              <mxPoint x="280" y="1380" />
-              <mxPoint x="280" y="1600" />
+              <mxPoint x="1050" y="525" />
+              <mxPoint x="850" y="525" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e06" value="取当前候选" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="candpick" target="s3">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e06" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="merge" target="has_candidate">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e07" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="has_candidate" target="no_plate">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e08" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="has_candidate" target="candidate">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e09" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="candidate" target="rectify">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="rectify" target="box">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e11" value="缓存 B" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="box" target="view">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e12" value="当前视图" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="view" target="segment">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1395" y="425" />
-              <mxPoint x="540" y="425" />
+              <mxPoint x="750" y="1360" />
+              <mxPoint x="410" y="1360" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e07" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s3" target="layoutq">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e13" value="同一视图" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="view" target="reader">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="900" y="524" />
-              <mxPoint x="900" y="535" />
+              <mxPoint x="750" y="1360" />
+              <mxPoint x="1090" y="1360" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e08" value="当前版式" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="layoutq" target="s4">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e14" value="S 或失败" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="segment" target="auto">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1145" y="615" />
-              <mxPoint x="540" y="615" />
+              <mxPoint x="410" y="1545" />
+              <mxPoint x="650" y="1545" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e09" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s4" target="segok">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e15" value="R + 缓存 B" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="reader" target="auto">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="900" y="710" />
-              <mxPoint x="900" y="720" />
+              <mxPoint x="1090" y="1545" />
+              <mxPoint x="850" y="1545" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e10" value="是" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="segok" target="s5">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e16" value="满足" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#60A879;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="auto" target="ok">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e17" value="未满足" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="auto" target="more_views">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e18" value="是：下一视图" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="more_views" target="view">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1095" y="805" />
-              <mxPoint x="540" y="805" />
+              <mxPoint x="1780" y="1822" />
+              <mxPoint x="1780" y="1295" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e11" value="否：继续尝试" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="segok" target="layoutnext">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e19" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="more_views" target="box_solo">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e20" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#60A879;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="box_solo" target="ok">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1220" y="720" />
-              <mxPoint x="1220" y="727.5" />
+              <mxPoint x="1700" y="1982" />
+              <mxPoint x="1700" y="1645" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e12" value="是" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="layoutnext" target="layoutloop">
-          <mxGeometry relative="1" as="geometry">
-            </mxGeometry>
+        <mxCell id="e21" value="未通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="box_solo" target="more_candidates">
+          <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="e13" value="下一版式" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="layoutloop" target="layoutq">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e22" value="是：下一候选" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="more_candidates" target="candidate">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1580" y="857.5" />
-              <mxPoint x="1580" y="450" />
-              <mxPoint x="1145" y="450" />
+              <mxPoint x="80" y="2135" />
+              <mxPoint x="80" y="872" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e14" value="否：版式耗尽" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="layoutnext" target="candnext">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e23" value="否：自动搜索耗尽" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="more_candidates" target="special">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e24" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="special" target="unsupported">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e25" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="special" target="fallback">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e26" value="人工读法或失败状态" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="fallback" target="result">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e27" value="单帧返回" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#60A879;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="ok" target="result">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1620" y="727.5" />
-              <mxPoint x="1620" y="1295" />
+              <mxPoint x="1870" y="1645" />
+              <mxPoint x="1870" y="2645" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e15" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s5" target="s6">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e16" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="s6" target="okq">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e28" value="转人工" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="unsupported" target="result">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="900" y="1060" />
-              <mxPoint x="900" y="1075" />
+              <mxPoint x="1660" y="2290" />
+              <mxPoint x="1660" y="2715" />
+              <mxPoint x="1050" y="2715" />
+              <mxPoint x="1050" y="2645" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e17" value="是：立即返回" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#60A879;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="okq" target="frame_result">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e29" value="失败封装" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="no_plate" target="result">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1102.5" y="1180" />
-              <mxPoint x="880" y="1180" />
-              <mxPoint x="880" y="1520" />
-              <mxPoint x="1110" y="1520" />
+              <mxPoint x="1840" y="740" />
+              <mxPoint x="1840" y="2565" />
+              <mxPoint x="1100" y="2565" />
+              <mxPoint x="1100" y="2645" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e18" value="否" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="okq" target="best">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e30" value="失败封装" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="errors" target="result">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1220" y="1075" />
-              <mxPoint x="1220" y="1056" />
+              <mxPoint x="250" y="2645" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e19" value="继续回退" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0.5;entryY=1;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="best" target="layoutnext">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="e31" value="同车多帧" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="result" target="voting">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e32" value="聚合结果，按需去重" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="voting" target="dedup">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e33" value="输入 / 阶段异常" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="input" target="errors">
+          <mxGeometry as="geometry" relative="1">
             <Array as="points">
-              <mxPoint x="1600" y="1056" />
-              <mxPoint x="1600" y="785" />
-              <mxPoint x="1372.5" y="785" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e20" value="是：下一候选" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="candnext" target="candpick">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1380" y="1370" />
-              <mxPoint x="1640" y="1370" />
-              <mxPoint x="1640" y="210" />
-              <mxPoint x="1395" y="210" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e21" value="否：全部耗尽" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D6A23A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="candnext" target="special">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1130" y="1295" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e22" value="是：UNSUPPORTED" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=1;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="special" target="errors">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1130" y="1510" />
-              <mxPoint x="760" y="1510" />
-              <mxPoint x="760" y="1680" />
-              <mxPoint x="520" y="1680" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e23" value="否" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="special" target="bestq">
-          <mxGeometry relative="1" as="geometry">
-            </mxGeometry>
-        </mxCell>
-        <mxCell id="e24" value="有：最佳非 OK" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#60A879;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.3870967741935484;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="bestq" target="frame_result">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="785" y="1530" />
-              <mxPoint x="1040" y="1530" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e25" value="无" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="bestq" target="segfailed">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="675" y="1447.5" />
-              <mxPoint x="675" y="1445" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e26" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="segfailed" target="errors">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="535" y="1510" />
-              <mxPoint x="520" y="1510" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e28" value="封装错误" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="errors" target="frame_result">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="770" y="1600" />
-              <mxPoint x="770" y="1585" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e29" value="多帧：投票" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="frame_result" target="vote">
-          <mxGeometry relative="1" as="geometry">
-            </mxGeometry>
-        </mxCell>
-        <mxCell id="e30" value="单帧：直接输出" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="frame_result" target="result">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1500" y="1585" />
-              <mxPoint x="1500" y="1920" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e32" value="聚合结果" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="vote" target="result">
-          <mxGeometry relative="1" as="geometry">
-            </mxGeometry>
-        </mxCell>
-        <mxCell id="e33" value="可选检查" style="edgeStyle=none;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#9878C5;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;dashed=1;" edge="1" parent="1" source="result" target="duplicate">
-          <mxGeometry relative="1" as="geometry">
-            </mxGeometry>
-        </mxCell>
-        <mxCell id="e_errors" value="" edge="1" parent="1" source="input" target="errors" style="edgeStyle=none;endArrow=block;endFill=1;dashed=1;strokeColor=#D97A7A;fontFamily=Microsoft YaHei;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0;entryY=0.2;exitPerimeter=0;entryPerimeter=0;">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="150" y="240" />
-              <mxPoint x="40" y="240" />
-              <mxPoint x="40" y="1564" />
+              <mxPoint x="30" y="157" />
+              <mxPoint x="30" y="2467" />
             </Array>
           </mxGeometry>
         </mxCell>
