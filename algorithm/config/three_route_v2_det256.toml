@@ -1,0 +1,12 @@
+# 第十七批切换前默认留档；仅列出与新默认不同的值。
+
+[runtime]
+detector_input_size = 0
+plate_reader_model_path = "models/crnn_v2.pt"
+box_reader_model_path = "models/box_reader_v2.pt"
+
+[postprocess]
+solo_min_confidence_segment = 0.938401460647583
+solo_min_confidence_reader = 0.9818063974380493
+three_route_agree_min_confidence = 0.7329292297363281
+three_route_box_solo_min_confidence = 0.9414944052696228

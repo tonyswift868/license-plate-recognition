@@ -8,6 +8,8 @@ Example (replace factory names with the delivered official adapters)::
     --detector-model algorithm/models/plate_det_v1.pt --detector-loader module:factory \
     --box-pad-x 0.08 --box-pad-y 0.12 --out-dir algorithm/out/new-three-rerun
 
+Use --mode trace to stop after fresh routes, geometry, and content split,
+without scoring thresholds or choosing automatic/fallback policies.
 Use the box model's registered pad. --mode auto runs only the automatic tool;
 --mode fallback/all also fits the preregistered fallback on baseline-000 fit
 rows and applies that frozen rule to the selected automatic policy. Every
@@ -143,8 +145,8 @@ def run_workflow(output_dir, *, mode="all", fresh=False, trace=None, base_report
                  index=r"D:\keshe2\algorithm\data\index\ccpd_index.csv",
                  val_manifest=r"D:\keshe2\algorithm\data\index\val1000_v1.csv",
                  devhard_manifest=r"D:\keshe2\algorithm\data\index\devhard_v1.csv"):
-    if mode not in {"auto", "fallback", "all"}:
-        raise ValueError("mode must be auto, fallback, or all")
+    if mode not in {"trace", "auto", "fallback", "all"}:
+        raise ValueError("mode must be trace, auto, fallback, or all")
     directory = Path(output_dir).resolve()
     if directory.exists() and any(directory.iterdir()):
         raise FileExistsError(f"refusing to reuse nonempty output directory: {directory}")
@@ -170,6 +172,12 @@ def run_workflow(output_dir, *, mode="all", fresh=False, trace=None, base_report
         split_path = _split(trace, feature_path, directory / "split.json")
     else:
         split_path = _content_split(trace, directory / "split.json")
+    if mode == "trace":
+        result = {"mode": mode, "fresh": fresh, "trace": str(trace),
+                  "base_report": str(base_report), "features": str(feature_path),
+                  "split_json": str(split_path), "threshold_scoring_run": False}
+        (directory / "workflow.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
     auto_path = directory / "auto-review.json"
     fit_base_report = base_report
     if split_path:
@@ -201,7 +209,7 @@ def run_workflow(output_dir, *, mode="all", fresh=False, trace=None, base_report
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("auto", "fallback", "all"), default="all")
+    parser.add_argument("--mode", choices=("trace", "auto", "fallback", "all"), default="all")
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--trace")
     parser.add_argument("--base-report")

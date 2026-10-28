@@ -8,14 +8,77 @@ from lpr.config import ALGORITHM_DIR, load_config
 def test_default_matches_frozen_three_route_configuration(monkeypatch):
     monkeypatch.delenv("LPR_CONFIG", raising=False)
     current = load_config()
-    assert current.model_dump() == load_config("config/three_route_v2.toml").model_dump()
+    expected = load_config("config/three_route_v2.toml").model_dump()
+    expected["runtime"].update({
+        "detector_input_size": 384,
+        "plate_reader_model_path": "models/crnn_v4.pt",
+        "box_reader_model_path": "models/box_reader_v3.pt",
+    })
+    expected["postprocess"].update({
+        "three_route_agree_min_confidence": 0.7233636975288391,
+        "three_route_box_solo_min_confidence": 0.9802792072296143,
+        "solo_min_confidence_segment": 0.9719608426094055,
+        "solo_min_confidence_reader": 0.991486668586731,
+    })
+    assert current.model_dump() == expected
     assert current.runtime.corner_model_path == "models/plate_det_v1.pt"
-    assert current.runtime.box_reader_model_path == "models/box_reader_v2.pt"
+    assert current.runtime.detector_input_size == 384
+    assert current.runtime.plate_reader_model_path == "models/crnn_v4.pt"
+    assert current.runtime.box_reader_model_path == "models/box_reader_v3.pt"
     assert current.postprocess.arbitration == "three_route"
-    assert current.postprocess.three_route_agree_min_confidence == 0.7329292297363281
-    assert current.postprocess.three_route_box_solo_min_confidence == 0.9414944052696228
+    assert current.postprocess.three_route_agree_min_confidence == 0.7233636975288391
+    assert current.postprocess.three_route_box_solo_min_confidence == 0.9802792072296143
+    assert current.postprocess.solo_min_confidence_segment == 0.9719608426094055
+    assert current.postprocess.solo_min_confidence_reader == 0.991486668586731
     assert current.postprocess.nonok_fallback == "predicted_tilt_then_corrected"
     assert current.postprocess.fallback_predicted_tilt_min_deg == 20.0
+
+
+def test_default_differs_from_archived_det256_by_exactly_seven_values(monkeypatch):
+    monkeypatch.delenv("LPR_CONFIG", raising=False)
+    current = load_config()
+    archived_path = ALGORITHM_DIR / "config/three_route_v2_det256.toml"
+    archived = load_config("config/three_route_v2_det256.toml")
+    expected_archive = {
+        "runtime": {
+            "detector_input_size": 0,
+            "plate_reader_model_path": "models/crnn_v2.pt",
+            "box_reader_model_path": "models/box_reader_v2.pt",
+        },
+        "postprocess": {
+            "solo_min_confidence_segment": 0.938401460647583,
+            "solo_min_confidence_reader": 0.9818063974380493,
+            "three_route_agree_min_confidence": 0.7329292297363281,
+            "three_route_box_solo_min_confidence": 0.9414944052696228,
+        },
+    }
+    with archived_path.open("rb") as stream:
+        assert tomllib.load(stream) == expected_archive
+
+    current_values = current.model_dump()
+    archived_values = archived.model_dump()
+    differences = {
+        section: {
+            key: current_values[section][key]
+            for key in current_values[section]
+            if current_values[section][key] != archived_values[section][key]
+        }
+        for section in ("runtime", "postprocess")
+    }
+    differences = {section: values for section, values in differences.items() if values}
+    assert differences == {
+        "runtime": {
+            "detector_input_size": 384,
+            "plate_reader_model_path": "models/crnn_v4.pt",
+            "box_reader_model_path": "models/box_reader_v3.pt",
+        },
+        "postprocess": {
+            "solo_min_confidence_segment": 0.9719608426094055,
+            "solo_min_confidence_reader": 0.991486668586731,
+            "three_route_agree_min_confidence": 0.7233636975288391,
+            "three_route_box_solo_min_confidence": 0.9802792072296143,
+        },
+    }
 
 
 def test_legacy_override_contains_exactly_the_changed_values(monkeypatch):

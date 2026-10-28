@@ -234,7 +234,8 @@ def test_plate_reader_rescues_seg_failed(cfg, stages):
     plan, _ = stages
     plan["cands"] = [_cand(0)]
     plan["seg_ok"] = {(0, 7): False}
-    reader = _FakeReader("陕A12345", [0.99] * 7)
+    # 新默认 R-solo 门槛为 0.991486668586731；保持原测试的 OK 救援路径。
+    reader = _FakeReader("陕A12345", [0.995] * 7)
     r = _recognizer_with(cfg, plate_reader=reader).recognize(IMG, debug=True)
     assert r.status is S.OK and r.plate_no == "陕A12345" and reader.calls == 1
     assert r.vehicle_type_hint == "small" and "reader" in r.stage_ms
