@@ -118,6 +118,8 @@ def test_history_proof_accepts_real_batch12_metadata_and_checkpoint_contract(tmp
     index = data / "combined_train.csv"
     audit = data / "province_audit.json"
     sampler = root / "algorithm" / "out" / "data" / "batch11" / "sampler.json"
+    if not all(p.exists() for p in (index, audit, sampler, tune)):
+        pytest.skip("第十二批本地训练数据只在 01 工位（out/ 不入库）")
     init = root / "algorithm" / "models" / "box_reader_v2.pt"
     augmentation_source = root / "algorithm" / "lpr_tools" / "train" / "province_synth.py"
     font = Path(r"C:\Windows\Fonts\simhei.ttf")
