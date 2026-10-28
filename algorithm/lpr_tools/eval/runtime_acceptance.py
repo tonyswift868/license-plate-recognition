@@ -40,7 +40,7 @@ def run(config, manifests, expected_path, output, *, tolerance=1e-7):
     norm = lambda p: str(p).replace("\\", "/").casefold()
     if [norm(p) for p, _ in samples] != [norm(r["path"]) for r in expected]:
         raise ValueError("manifest order/paths differ from frozen expectations")
-    recognizer = PlateRecognizer.from_config(config)
+    recognizer = PlateRecognizer.from_config() if config is None else PlateRecognizer.from_config(config)
     output.mkdir(parents=True, exist_ok=True)
     mismatches, statuses = [], Counter()
     with gzip.open(output/"actual.jsonl.gz", "wt", encoding="utf-8") as stream:
