@@ -129,7 +129,7 @@ def test_history_proof_accepts_real_batch12_metadata_and_checkpoint_contract(tmp
 
     provenance = {"init": str(init.resolve()), "init_sha256": sha(init),
                   "index_sha256": sha(index), "audit_sha256": sha(audit),
-                  "sampler_sha256": sha(sampler),
+                  "sampler": str(sampler.resolve()), "sampler_sha256": sha(sampler),
                   "augmentation_source_sha256": sha(augmentation_source),
                   "font_sha256": sha(font)}
     history = [{"epoch": epoch, "real_unique": 210564, "real_physical": 210564,
