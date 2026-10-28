@@ -14,7 +14,7 @@
         <mxCell id="preprocess" value="① 预处理&#10;输入校验 → ROI / 工作图 → CLAHE 灰度与 HSV&#10;保留原图与工作图坐标映射" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="500" y="235" width="500" height="105" />
         </mxCell>
-        <mxCell id="detector" value="② 网络定位 plate_det_v1&#10;原图 → 中心 / bbox / 四角点预测&#10;按候选中心过滤 ROI" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="detector" value="② 网络定位 plate_det_v1 · 输入 384×384&#10;原图 → 中心 / bbox / 四角点预测&#10;按候选中心过滤 ROI" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="200" y="390" width="500" height="110" />
         </mxCell>
         <mxCell id="classic" value="② 传统 locate&#10;工作图颜色 / Sobel 边缘 → 几何候选&#10;坐标映回原图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
@@ -35,7 +35,7 @@
         <mxCell id="rectify" value="③ 校正&#10;原图 + 当前候选 → 有序透视视图&#10;首视图及替代视图供 S / R" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="500" y="955" width="500" height="105" />
         </mxCell>
-        <mxCell id="box" value="③ / ⑤ 原框读牌 B&#10;原 bbox → crop_box（pad 从权重读）&#10;box_reader_v2：每候选一次，缓存跨视图复用" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="box" value="③ / ⑤ 原框读牌 B&#10;原 bbox → crop_box（pad 从权重读）&#10;box_reader_v3：每候选一次，缓存跨视图复用" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="500" y="1100" width="500" height="115" />
         </mxCell>
         <mxCell id="view" value="按原顺序取当前校正视图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
@@ -44,7 +44,7 @@
         <mxCell id="segment" value="④ / ⑤ 分割 + CNN：S&#10;校正图 → 版式尝试 → 字符分割 → char_cnn_v2&#10;S 自身首 OK 只结束版式循环，不直接返回系统 OK" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="160" y="1380" width="500" height="135" />
         </mxCell>
-        <mxCell id="reader" value="⑤ 校正 CRNN：R&#10;同一校正图 → crnn_v2&#10;即使 S 分割失败也继续读取" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="reader" value="⑤ 校正 CRNN：R&#10;同一校正图 → crnn_v4&#10;即使 S 分割失败也继续读取" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="840" y="1380" width="500" height="135" />
         </mxCell>
         <mxCell id="auto" value="⑥ 011 自动判定（同候选、同校正视图）&#10;合法同串 S/R → S/B → R/B&#10;再 S-solo → R-solo；首个自动事件即返回" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FFF4D9;strokeColor=#D6A23A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
@@ -68,7 +68,7 @@
         <mxCell id="unsupported" value="UNSUPPORTED&#10;特种牌转人工" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#FDEEEE;strokeColor=#D97A7A;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1150" y="2250" width="470" height="80" />
         </mxCell>
-        <mxCell id="fallback" value="⑥ T20_A 人工回退&#10;仅用候选0预测四角角度：达门槛偏好 A，否则 M&#10;再按 [preferred,A,M,L] 取首个合法读法&#10;合法 → LOW_CONFIDENCE；无读法 → INVALID_FORMAT / SEG_FAILED" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="fallback" value="⑥ T20_A 人工回退&#10;仅用候选0预测四角角度：达门槛偏好 A，否则 M&#10;再按 [preferred,A,M,L] 取首个合法读法&#10;合法 → LOW_CONFIDENCE&#10;无读法 → INVALID_FORMAT / SEG_FAILED" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#EAF4FF;strokeColor=#5B9BD5;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="500" y="2390" width="500" height="150" />
         </mxCell>
         <mxCell id="result" value="单帧 RecognitionResult&#10;状态 / 文本 / 置信度 / 原图几何 / 图像证据&#10;to_dict() 不包含 ndarray 或新增仲裁诊断字段" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#E9F5EC;strokeColor=#60A879;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
@@ -86,10 +86,10 @@
         <mxCell id="identity" value="身份约束&#10;S/R 固定 (candidate,rect)&#10;B 固定 candidate，原框读取一次&#10;不读 GT；不按识别真值挑校正视图" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1370" y="840" width="450" height="170" />
         </mxCell>
-        <mxCell id="thresholds" value="完整阈值见正文 3.9.1&#10;agree 与单路门槛各自独立&#10;比较含等号、不截断浮点&#10;人工回退不可升级为自动 OK" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="thresholds" value="四阈值见正文 §3.9.1&#10;来源：03 第十七批 / default.toml&#10;agree、S、R、B 门槛各自独立&#10;比较含等号，不截断浮点&#10;人工回退不可升级为自动 OK" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1370" y="1070" width="450" height="170" />
         </mxCell>
-        <mxCell id="export" value="当前默认来源：algorithm/config/default.toml；仲裁合同：03-三路仲裁集成规格.md §7；节点对应正文 §3.3。&#10;旧流程仅用 config/legacy_agree_v1.toml 留档。用户导出本页为 docs/img/pipeline.png。" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
+        <mxCell id="export" value="当前默认：algorithm/config/default.toml；四阈值：正文 §3.9.1 / 03 第十七批；节点对应正文 §3.3。&#10;PNG 由 docs/img/src/render_drawio.py 读取本图源生成：docs/img/pipeline.png。" style="whiteSpace=wrap;html=0;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#17324D;fillColor=#F6F8FA;strokeColor=#ADB5BD;align=center;verticalAlign=middle;spacing=12;rounded=1;arcSize=10;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="100" y="3040" width="1730" height="90" />
         </mxCell>
         <mxCell id="e01" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=block;endFill=1;strokeColor=#527A9B;fontFamily=Microsoft YaHei;fontSize=14;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitPerimeter=0;entryPerimeter=0;" edge="1" parent="1" source="input" target="preprocess">
