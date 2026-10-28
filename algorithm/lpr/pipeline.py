@@ -17,7 +17,7 @@ from loguru import logger
 
 from ._version import __version__
 from .config import LprConfig, load_config
-from .errors import DEFAULT_MESSAGES, ERROR_CODES, BadInputError, failure_result
+from .errors import DEFAULT_MESSAGES, ERROR_CODES, BadInputError, ConfigError, failure_result
 from .io_utils import decode_image
 from .locate import locate
 from .plate_rules import match_layout, vehicle_type_hint
@@ -237,6 +237,14 @@ class PlateRecognizer:
         rt = cfg.runtime
         classifier = load_classifier(rt.classifier, cfg.resolve_path(rt.model_path))
         corner = load_corner_detector(cfg.resolve_path(rt.corner_model_path)) if rt.corner_model_path else None
+        if rt.detector_input_size:
+            from .plate_det import PlateDetector
+            if not isinstance(corner, PlateDetector):
+                raise ConfigError("detector_input_size requires a plate_det model")
+            # Reuse the manifest-verified weights and checkpoint threshold.
+            corner = PlateDetector(corner.model, version=corner.version,
+                                   image_size=rt.detector_input_size,
+                                   score_threshold=corner.score_threshold)
         reader = load_plate_reader(cfg.resolve_path(rt.plate_reader_model_path)) if rt.plate_reader_model_path else None
         box_reader = load_box_reader(cfg.resolve_path(rt.box_reader_model_path)) if rt.box_reader_model_path else None
         return cls(cfg, classifier, corner_detector=corner, plate_reader=reader, box_reader=box_reader)
