@@ -176,7 +176,7 @@ STAGE_SIGNATURES = {
     "lpr.recognize.cnn.CnnClassifier.from_file": ["path", "version"],
     "lpr.recognize.template.TemplateClassifier.from_file": ["path", "version"],
     "lpr.recognize.svm.SvmClassifier.from_file": ["path", "version"],
-    "lpr.corner_net.CornerNet.from_file": ["path", "version"],
+    "lpr.corner_net.CornerNet.from_file": ["path", "version", "score_threshold_override"],  # 02 第十二批：可选、默认不改行为
     "lpr.corner_net.CornerNet.detect": ["self", "image", "max_candidates"],
     "lpr.recognize.crnn.CrnnReader.from_file": ["path", "version"],
     "lpr.recognize.crnn.CrnnReader.read": ["self", "plate_image"],
