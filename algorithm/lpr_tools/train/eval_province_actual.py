@@ -49,7 +49,8 @@ def main(argv=None):
     expected_config={'model_path':models[2],'plate_reader_model_path':models[1],'corner_model_path':'plate_det_v1.pt'}
     for field,expected in expected_config.items():
       configured=cfg.resolve_path(getattr(cfg.runtime,field))
-      if configured is None or configured.name!=expected:raise ValueError(f'{a.side} config {field} does not resolve to {expected}: {configured}')
+      expected_path=(root/expected).resolve()
+      if configured is None or configured.resolve()!=expected_path:raise ValueError(f'{a.side} config {field} does not resolve to {expected_path}: {configured}')
     artifacts={name:_model_manifest_identity(root/name) for name in (*models,'plate_det_v1.pt')}
     config_sha256=hashlib.sha256(a.config.read_bytes()).hexdigest()
     effective=effective_config_info(cfg,a.config)
