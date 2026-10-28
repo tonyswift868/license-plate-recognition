@@ -1,5 +1,9 @@
 """Small pure-Python tests for the single-route actual-eval selectors."""
-from lpr_tools.train.eval_province_actual import aggregate, select
+from types import SimpleNamespace
+
+import pytest
+
+from lpr_tools.train.eval_province_actual import aggregate, nonwan_membership, select
 
 
 def test_select_uses_highest_legal_confidence_and_stable_first_tie():
@@ -31,3 +35,17 @@ def test_aggregate_keeps_no_read_in_denominator_and_groups_fixed_261():
     assert metrics["devhard/ccpd_db"]["n"] == 2
     assert metrics["green"]["n"] == 1
     assert metrics["all"]["wrong_as_anwei"] == 1
+
+
+def test_nonwan_union_counts_real_members_across_both_splits():
+    def sample(path, plate):
+        return SimpleNamespace(row=SimpleNamespace(path=path, plate_no=plate))
+
+    val = [sample("v1", "粤A12345"), sample("v2", "皖A12345")]
+    devhard = [sample("d1", "陕A12345"), sample("d2", "皖B12345")]
+    union, counts = nonwan_membership(val, devhard, lambda path: path.lower())
+    assert union == {"v1", "d1"}
+    assert counts == {"val": 1, "devhard": 1}
+    with pytest.raises(ValueError, match='overlap'):
+        nonwan_membership([sample("same", "粤A12345")],
+                          [sample("same", "粤B12345")], lambda path: path)

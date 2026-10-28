@@ -27,6 +27,17 @@ def aggregate(rows):
         out[n]={'n':count,'province_correct':pc,'province_accuracy':pc/count if count else None,'plate_correct':fc,'plate_accuracy':fc/count if count else None,'wrong_as_anwei':sum(bool(r['prediction']) and r['prediction'][0]=='皖' and not r['truth'].startswith('皖') for r in rs)}
     return out
 
+def nonwan_membership(val_samples, devhard_samples, path_key_fn):
+    """Return index-authoritative non-Wan paths split by the fixed manifests."""
+    val={path_key_fn(s.row.path) for s in val_samples if s.row.plate_no and s.row.plate_no[0]!='皖'}
+    devhard={path_key_fn(s.row.path) for s in devhard_samples if s.row.plate_no and s.row.plate_no[0]!='皖'}
+    if val & devhard:
+        raise ValueError('fixed val and devhard non-Wan memberships overlap')
+    union=val|devhard
+    if len(union)!=len(val)+len(devhard):
+        raise ValueError('fixed non-Wan union is incomplete')
+    return union,{'val':len(val),'devhard':len(devhard)}
+
 def main(argv=None):
     p=argparse.ArgumentParser();p.add_argument('--side',choices=['baseline','candidate'],required=True);p.add_argument('--config',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args(argv)
     if a.out.exists():raise FileExistsError(f'refusing to overwrite fixed evaluation: {a.out}')
@@ -60,10 +71,9 @@ def main(argv=None):
       if len(samples)!=expected:raise ValueError(f'{split} fixed row count mismatch')
       sample_sets.append((split,samples,identity))
     if sum(len(x[1]) for x in sample_sets)!=3100:raise ValueError('fixed evaluation must contain exactly 3100 rows')
-    all_nonwan={path_key(x.row.path) for _,ss,_ in sample_sets for x in ss if x.row.plate_no and x.row.plate_no[0]!='皖'}
-    val_nonwan={path_key(x.row.path) for x in sample_sets[0][1] if x.row.plate_no and x.row.plate_no[0]!='皖'}
-    nonwan261={path_key(x.row.path) for x in sample_sets[1][1] if x.row.plate_no and x.row.plate_no[0]!='皖'}
-    if len(all_nonwan)!=261 or len(val_nonwan)!=0 or nonwan261!=all_nonwan:raise ValueError(f'fixed nonwan membership mismatch: all={len(all_nonwan)}, val={len(val_nonwan)}, devhard={len(nonwan261)}')
+    nonwan261,nonwan_by_split=nonwan_membership(sample_sets[0][1],sample_sets[1][1],path_key)
+    all_nonwan={path_key(s.row.path) for _,ss,_ in sample_sets for s in ss if s.row.plate_no and s.row.plate_no[0]!='皖'}
+    if len(nonwan261)!=261 or nonwan261!=all_nonwan:raise ValueError(f'fixed nonwan union mismatch: union={len(nonwan261)}, all={len(all_nonwan)}')
     all_keys={path_key(s.row.path) for _,samples,_ in sample_sets for s in samples}
     brightness=_read_brightness(r'D:\keshe2\algorithm\data\index\ccpd_index.csv',all_keys)
     for kind,obj,method,batch_fn in [('box',box,'read',lambda args,kw:1),('crnn',reader,'read',lambda args,kw:1),('char',cnn,'predict_proba',lambda args,kw:len(args[0]))]:
@@ -134,7 +144,7 @@ def main(argv=None):
     if len(rows)!=3100 or sum(r['split']=='val' for r in rows)!=1000 or sum(r['split']=='devhard' for r in rows)!=2100:raise ValueError('actual evaluation denominator must be val=1000 + devhard=2100')
     if sum(r['province_261'] for r in rows)!=261:raise ValueError('province_261 denominator mismatch')
     timing_summary={k:{**summarize(v,buckets=(1,7,8)), 'reader_threads':2,'scope':'original read/predict_proba invocation only; excludes decode/preparation; includes cold calls'} for k,v in timings.items()}
-    result={'schema':'batch12-single-reader-fixed-eval-v1','side':a.side,'rows':len(rows),'models':dict(zip(('box','crnn','char'),models)),'artifacts':artifacts,'config':{'path':str(a.config.resolve()),'sha256':config_sha256,'effective_sha256':effective['effective_config_sha256']},'metrics':{k:aggregate([{**r,'prediction':r[k]['plate'] if r.get(k) else None} for r in rows]) for k in ('box','crnn','char')},'timings_ms':timing_summary,'manifest_identities':{split:identity for split,_,identity in sample_sets},'nonwan_261_n':len(nonwan261),'all_nonwan_n':len(all_nonwan),'selection':'per-route highest-confidence legal candidate/rect, stable first tie; CNN layout tries use pipeline status-first _rank; no route combination','input_errors':sum(bool(r['input_error']) for r in rows),'input_preparation':'one decode_image call per original path; decode, locating and rectification excluded from reader timing; no G1 claim','progress_file':str(progress_path.resolve()),'records':rows}
+    result={'schema':'batch12-single-reader-fixed-eval-v1','side':a.side,'rows':len(rows),'models':dict(zip(('box','crnn','char'),models)),'artifacts':artifacts,'config':{'path':str(a.config.resolve()),'sha256':config_sha256,'effective_sha256':effective['effective_config_sha256']},'metrics':{k:aggregate([{**r,'prediction':r[k]['plate'] if r.get(k) else None} for r in rows]) for k in ('box','crnn','char')},'timings_ms':timing_summary,'manifest_identities':{split:identity for split,_,identity in sample_sets},'nonwan_261_n':len(nonwan261),'all_nonwan_n':len(nonwan261),'nonwan_by_split':nonwan_by_split,'selection':'per-route highest-confidence legal candidate/rect, stable first tie; CNN layout tries use pipeline status-first _rank; no route combination','input_errors':sum(bool(r['input_error']) for r in rows),'input_preparation':'one decode_image call per original path; decode, locating and rectification excluded from reader timing; no G1 claim','progress_file':str(progress_path.resolve()),'records':rows}
     a.out.parent.mkdir(parents=True,exist_ok=True)
     with gzip.open(a.out,'wt',encoding='utf8') as f:json.dump(result,f,ensure_ascii=False)
     for kind,records in timings.items():
