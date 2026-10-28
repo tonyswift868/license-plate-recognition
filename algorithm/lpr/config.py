@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator
 
 from .charset import PROVINCES
 from .errors import ConfigError
@@ -30,6 +30,15 @@ class _Section(BaseModel):
 
 class RuntimeConfig(_Section):
     torch_threads: int
+    detector_input_size: StrictInt
+
+    @field_validator("detector_input_size")
+    @classmethod
+    def valid_detector_input_size(cls, value: int) -> int:
+        if value != 0 and (not 128 <= value <= 1024 or value % 32):
+            raise ValueError("detector_input_size must be 0 or a multiple of 32 in [128, 1024]")
+        return value
+
     model_path: str
     classifier: Literal["cnn", "template", "svm"]
     max_candidates: int
