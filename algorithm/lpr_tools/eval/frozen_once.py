@@ -18,7 +18,6 @@ from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
 from lpr.types import RecogStatus
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
 

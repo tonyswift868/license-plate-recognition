@@ -77,7 +77,6 @@ def main(argv=None):
     )
     from lpr.segment import segment
     from lpr.types import RecogStatus
-
     from lpr_tools.data.image_health import decode_image
     from lpr_tools.eval.box_direct import _actual_candidates, _read_brightness
     from lpr_tools.eval.common import effective_config_info

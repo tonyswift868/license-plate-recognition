@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 from lpr.charset import CHAR_TO_INDEX
 from lpr.config import ALGORITHM_DIR
 from lpr.plate_rules import match_layout
-
 from lpr_tools.train.box_data import bbox_from_quad
 
 if TYPE_CHECKING:
@@ -353,7 +352,6 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
                  temperature: float) -> dict[str, Any]:
     import torch
     from lpr.recognize.crnn import _greedy_decode
-
     from lpr_tools.train.calibrate_crnn_v2 import _ctc_loss, _ece_summary
 
     before_nll = after_nll = 0.0
@@ -401,7 +399,6 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
     import torch
     from lpr.recognize import read_manifest, write_manifest_entry
     from lpr.recognize.box_reader import checkpoint, model_from_checkpoint
-
     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
 
     if model_path.exists():

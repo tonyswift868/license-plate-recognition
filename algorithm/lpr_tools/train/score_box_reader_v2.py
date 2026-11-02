@@ -16,10 +16,9 @@ import cv2  # noqa: E402 - temporary directory must be configured before depende
 import torch  # noqa: E402 - temporary directory must be configured before dependency imports
 from lpr.recognize.box_reader import BoxPlateReader  # noqa: E402 - temporary directory must be configured before dependency imports
 from lpr.recognize.crnn import _greedy_decode  # noqa: E402 - temporary directory must be configured before dependency imports
-from torch.utils.data import DataLoader  # noqa: E402 - temporary directory must be configured before dependency imports
-
 from lpr_tools.train.train_box_reader import process_ram_bytes  # noqa: E402 - temporary directory must be configured before dependency imports
 from lpr_tools.train.train_box_reader_v2 import BoxDatasetV2, collate_v2  # noqa: E402 - temporary directory must be configured before dependency imports
+from torch.utils.data import DataLoader  # noqa: E402 - temporary directory must be configured before dependency imports
 
 
 def score(model_path, tune_path):

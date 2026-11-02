@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from lpr.config import ALGORITHM_DIR
-
 from lpr_tools.train.box_data import bbox_from_quad, sample_jitter
 from lpr_tools.train.box_data import jitter_bbox as apply_box_jitter
 from lpr_tools.train.box_data import read_jitter_samples as measured_box_deltas

@@ -12,7 +12,6 @@ from datetime import datetime
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
-
 from lpr_tools.data.manifest import read_manifest, write_manifest
 
 from .common import effective_config_info, model_identity

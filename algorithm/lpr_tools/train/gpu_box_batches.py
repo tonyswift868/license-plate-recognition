@@ -10,9 +10,8 @@ import numpy as np
 import torch
 from lpr.boxcrop import crop_box
 from lpr.recognize.box_reader import BOX_PAD, box_tensor
-from torchvision.io import ImageReadMode, decode_jpeg, read_file
-
 from lpr_tools.train.box_data import bbox_from_quad, jitter_bbox, sample_jitter
+from torchvision.io import ImageReadMode, decode_jpeg, read_file
 
 
 def rgb_region_for_box(rgb: torch.Tensor, bbox: tuple, gt_bbox: tuple,

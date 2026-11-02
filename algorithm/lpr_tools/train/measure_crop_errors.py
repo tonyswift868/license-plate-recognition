@@ -26,7 +26,6 @@ from lpr.locate import locate
 from lpr.pipeline import _in_roi, _merge_candidates, _rectifications
 from lpr.preprocess import preprocess
 from lpr.recognize import load_corner_detector
-
 from lpr_tools.data.image_health import decode_image
 
 ROOT = Path(__file__).resolve().parents[2]

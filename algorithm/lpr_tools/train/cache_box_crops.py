@@ -21,7 +21,6 @@ import cv2
 import numpy as np
 from lpr.boxcrop import crop_box
 from lpr.config import ALGORITHM_DIR
-
 from lpr_tools.train.box_data import bbox_from_quad, iter_rows, sha256_file
 
 CACHE_FIELDS = ("path", "label", "subset", "brightness", "sha256", "quad", "cache_file",

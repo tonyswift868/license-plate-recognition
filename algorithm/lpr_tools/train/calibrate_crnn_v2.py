@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.crnn import CrnnNet, _greedy_decode, plate_tensor
-
 from lpr_tools.train.eval_crnn_v2 import CONFIDENCE_EDGES, _confidence_bin, _resolve_crop
 
 BOUNDS = (0.05, 10.0)

@@ -26,7 +26,6 @@ from lpr.locate import locate
 from lpr.pipeline import _in_roi, _merge_candidates
 from lpr.preprocess import preprocess
 from lpr.recognize import load_corner_detector, load_plate_reader
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path
 

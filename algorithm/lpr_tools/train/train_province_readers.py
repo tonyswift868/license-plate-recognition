@@ -38,8 +38,6 @@ from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint, model_from
 from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 from lpr.recognize.cnn_model import CharCNN  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 from lpr.recognize.crnn import CrnnNet, plate_tensor  # noqa: E402 - temporary directory and thread limits must precede dependency imports
-from torch import nn  # noqa: E402 - temporary directory and thread limits must precede dependency imports
-
 from lpr_tools.train.box_data import bbox_from_quad, parse_quad  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 from lpr_tools.train.box_data_v2 import build_balanced_multiplicity  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 from lpr_tools.train.province_char_input import normalized_first_char  # noqa: E402 - temporary directory and thread limits must precede dependency imports
@@ -53,6 +51,7 @@ from lpr_tools.train.train_box_reader import (  # noqa: E402 - temporary directo
     row_crop,
 )
 from lpr_tools.train.train_box_reader_v2 import affine_target  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from torch import nn  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 
 FORMAT='province-reader-training-v1'
 render_lock=threading.Lock()

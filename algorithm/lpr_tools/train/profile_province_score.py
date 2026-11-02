@@ -20,7 +20,6 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 def profile(model_path: Path, data_dir: Path, output: Path):
     from lpr import recognize
-
     from lpr_tools.train.province_inference_timing import instrument_method, summarize
     from lpr_tools.train.score_province_readers import score
 

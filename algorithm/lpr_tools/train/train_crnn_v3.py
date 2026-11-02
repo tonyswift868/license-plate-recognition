@@ -15,12 +15,11 @@ import torch
 from lpr.charset import CHAR_TO_INDEX
 from lpr.recognize import file_sha256, write_manifest_entry
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-
 from lpr_tools.data.ccpd import parse_ccpd_name
 from lpr_tools.train import train_crnn_v2 as v2
 from lpr_tools.train.train_crnn import _collate, _worker_init
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 SUBSETS = v2.SUBSETS
 MIXTURE = {**{s: .62 / 7 for s in SUBSETS}, 'base7': .12, 'real8': .18, 'font': .08}

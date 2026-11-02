@@ -17,7 +17,6 @@ from pathlib import Path
 
 from lpr.charset import PROVINCES
 from lpr.config import ALGORITHM_DIR
-
 from lpr_tools.data.build_plates import FIELDS
 
 

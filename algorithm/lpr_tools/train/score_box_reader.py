@@ -8,9 +8,8 @@ from pathlib import Path
 import cv2
 import torch
 from lpr.recognize.box_reader import BoxPlateReader
-from torch.utils.data import DataLoader
-
 from lpr_tools.train.train_box_reader import BoxDataset, collate, evaluate, process_ram_bytes
+from torch.utils.data import DataLoader
 
 
 def main():

@@ -86,7 +86,6 @@ def score(kind: str, model_path: Path, data_dir: Path, output: Path | None = Non
     from lpr.recognize.box_reader import BoxPlateReader, model_from_checkpoint
     from lpr.recognize.cnn_model import CharCNN
     from lpr.recognize.crnn import CrnnNet, CrnnReader
-
     from lpr_tools.train.province_char_input import normalized_first_char
     from lpr_tools.train.province_synth import replace_province
 

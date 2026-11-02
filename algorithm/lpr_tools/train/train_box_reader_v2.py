@@ -23,8 +23,6 @@ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import file_sha256
 from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint
 from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2, BoxNetV2
-from torch import nn
-
 from lpr_tools.train.box_data import parse_quad
 from lpr_tools.train.box_data_v2 import GROUPS, build_balanced_multiplicity
 from lpr_tools.train.train_box_reader import (
@@ -34,6 +32,7 @@ from lpr_tools.train.train_box_reader import (
     process_ram_bytes,
     row_crop,
 )
+from torch import nn
 
 
 def affine_target(quad, bbox, crop_shape, pad=BOX_PAD) -> torch.Tensor:

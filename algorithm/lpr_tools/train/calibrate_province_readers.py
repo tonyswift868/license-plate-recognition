@@ -140,7 +140,6 @@ def _collect_logits(kind: str, model, rows, tune_path: Path, box_pad, input_size
     from lpr.boxcrop import crop_box
     from lpr.recognize.box_reader import box_tensor
     from lpr.recognize.crnn import plate_tensor
-
     from lpr_tools.train.box_data import bbox_from_quad
 
     logits_list = []
@@ -176,7 +175,6 @@ def _fit_and_report(kind: str, state: dict[str, Any], rows_fit, rows_report,
     import torch
     from lpr.recognize.box_reader import model_from_checkpoint
     from lpr.recognize.crnn import CrnnNet
-
     from lpr_tools.train.calibrate_box_reader import _report_fold
     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
 
@@ -205,7 +203,6 @@ def calibrate(kind: str, model_path: Path, tune_path: Path, *,
               data_dir: Path = _ROOT / "algorithm" / "out" / "data" / "batch12") -> dict[str, Any]:
     import torch
     from lpr.recognize import read_manifest, verify_model, write_manifest_entry
-
     from lpr_tools.train.calibrate_box_reader import read_calibration_rows
 
     if kind not in {"box", "crnn", "char"}:

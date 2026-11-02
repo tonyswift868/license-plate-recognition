@@ -18,7 +18,6 @@ from lpr.config import load_config
 from lpr.io_utils import imread
 from lpr.segment import _fallback_binary_from_gray, fallback_binary_plate, segment
 from lpr.types import PlateCandidate, RectifiedPlate
-
 from lpr_tools.data.ccpd import read_index
 
 

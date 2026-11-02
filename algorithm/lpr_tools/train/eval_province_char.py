@@ -240,7 +240,6 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
     from lpr.recognize import load_classifier
     from lpr.recognize.cnn import CnnClassifier
     from lpr.recognize.cnn_model import CharCNN
-
     from lpr_tools.train.province_char_input import normalized_first_char
     from lpr_tools.train.province_inference_timing import instrument_method, summarize
     from lpr_tools.train.province_synth import replace_province

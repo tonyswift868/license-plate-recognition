@@ -9,7 +9,6 @@ import tempfile
 from pathlib import Path
 
 from lpr.plate_rules import match_layout
-
 from lpr_tools.data.ccpd import read_index
 from lpr_tools.data.manifest import ManifestRow, parse_quad, read_manifest, write_manifest
 

@@ -141,7 +141,6 @@ def evaluate(args):
     from loguru import logger
     from lpr.io_utils import imread
     from lpr.pipeline import PlateRecognizer
-
     from lpr_tools.eval_det import camera_canvas
 
     from .common import effective_config_info

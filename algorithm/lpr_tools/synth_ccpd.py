@@ -22,10 +22,9 @@ import numpy as np
 from lpr.charset import LETTERS, PROVINCES
 from lpr.config import ALGORITHM_DIR
 from lpr.io_utils import imwrite
-from PIL import Image, ImageDraw, ImageFont
-
 from lpr_tools.data.ccpd import ADS, ALPHABETS, PROVINCES_CCPD
 from lpr_tools.synth_scenes import CENTERS7, CENTERS8, draw_plate
+from PIL import Image, ImageDraw, ImageFont
 
 IMAGE_SIZE = (720, 1160)  # width, height: portrait CCPD frame
 SUBSETS_2019 = ("ccpd_base", "ccpd_db", "ccpd_tilt", "ccpd_blur", "ccpd_np")

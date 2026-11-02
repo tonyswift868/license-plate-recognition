@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
-
 from lpr_tools.train import box_data
 
 ROOT = Path(__file__).resolve().parents[3]

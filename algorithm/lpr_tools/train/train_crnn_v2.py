@@ -17,10 +17,9 @@ import torch
 from lpr.charset import CHAR_TO_INDEX, CHARSET
 from lpr.recognize import file_sha256, write_manifest_entry
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
+from lpr_tools.train.train_crnn import _collate, _worker_init
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-
-from lpr_tools.train.train_crnn import _collate, _worker_init
 
 SUBSETS = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
 MIXTURE = {**{key: .10 for key in SUBSETS}, "base7": .12, "real8": .10, "font": .08}

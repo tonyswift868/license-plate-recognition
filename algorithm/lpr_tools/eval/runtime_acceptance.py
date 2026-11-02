@@ -30,7 +30,6 @@ def run(config, manifests, expected_path, output, *, tolerance=1e-7):
     from loguru import logger
     from lpr.io_utils import imread
     from lpr.pipeline import PlateRecognizer
-
     from lpr_tools.data.manifest import image_path, read_manifest
 
     from .common import effective_config_info

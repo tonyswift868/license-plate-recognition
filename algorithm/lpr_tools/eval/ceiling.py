@@ -22,7 +22,6 @@ from lpr.preprocess import preprocess
 from lpr.rectify import RectifiedPlate
 from lpr.segment import segment
 from lpr.types import PlateCandidate
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path
 

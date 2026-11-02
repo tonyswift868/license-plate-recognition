@@ -27,7 +27,6 @@ from lpr.corner_net import (
     refine_coordinates,
 )
 from lpr.io_utils import imread
-
 from lpr_tools import train_corner as source
 
 ROOT = Path(__file__).resolve().parents[1]

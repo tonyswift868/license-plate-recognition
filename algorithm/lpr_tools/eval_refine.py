@@ -29,7 +29,6 @@ from lpr.pipeline import _decode_text, _in_roi, _merge_candidates, _rectificatio
 from lpr.preprocess import preprocess
 from lpr.recognize.crnn import CrnnReader
 from lpr.types import PlateCandidate
-
 from lpr_tools.data.manifest import FIELDS, image_path, read_manifest
 from lpr_tools.eval.common import effective_config_info
 from lpr_tools.eval.index_samples import IndexSample, path_key, read_samples

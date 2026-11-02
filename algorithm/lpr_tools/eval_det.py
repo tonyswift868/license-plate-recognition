@@ -203,7 +203,6 @@ def evaluate_scale_suite(manifest_path: Path, index_path: Path, detector_path: P
     import numpy as np
     import torch
     from lpr.config import load_config
-
     from lpr_tools.eval.index_samples import path_key
     from lpr_tools.eval_refine import _load_samples
 
@@ -446,7 +445,6 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
     from lpr.locate import locate
     from lpr.pipeline import _decode_text, _in_roi, _merge_candidates
     from lpr.preprocess import preprocess
-
     from lpr_tools.eval.index_samples import path_key
     from lpr_tools.eval_refine import _load_samples
 

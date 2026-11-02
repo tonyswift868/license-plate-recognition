@@ -16,7 +16,6 @@ from pathlib import Path
 
 from lpr import PlateRecognizer
 from lpr.config import ALGORITHM_DIR, load_config
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
 from lpr_tools.eval.arbitration import replay_attempts

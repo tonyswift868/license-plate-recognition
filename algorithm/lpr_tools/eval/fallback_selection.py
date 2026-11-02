@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR, load_config
-
 from lpr_tools.eval import agree_threshold
 from lpr_tools.eval.common import effective_config_info
 from lpr_tools.eval.index_samples import (

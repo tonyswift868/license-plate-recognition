@@ -25,7 +25,6 @@ from lpr.locate import box_iou, locate
 from lpr.plate_rules import match_layout
 from lpr.preprocess import preprocess
 from lpr.rectify import rectify_candidates
-
 from lpr_tools.data.ccpd import read_index
 from lpr_tools.data.manifest import image_path, read_manifest
 

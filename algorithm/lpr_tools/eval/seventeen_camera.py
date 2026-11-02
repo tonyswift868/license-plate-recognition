@@ -20,7 +20,6 @@ def run(input_path: Path, out_dir: Path) -> dict:
     from lpr.config import DEFAULT_CONFIG_PATH
     from lpr.io_utils import imread
     from lpr.pipeline import PlateRecognizer
-
     from lpr_tools.eval_det import camera_canvas
 
     from .common import effective_config_info

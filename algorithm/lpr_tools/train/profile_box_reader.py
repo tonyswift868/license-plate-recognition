@@ -11,7 +11,6 @@ import numpy as np
 import torch
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize.box_reader import INPUT_SIZE, BoxNet, BoxPlateReader
-
 from lpr_tools.train.train_box_reader import free_ram_bytes, process_ram_bytes
 
 

@@ -785,7 +785,6 @@ def _as_route_attempt(decision):
 def _read_box_result(reader, crop, color, min_confidence, is_crnn, torch):
     from lpr.pipeline import _decode_text
     from lpr.recognize.crnn import CrnnReader
-
     from lpr_tools.eval.box_direct import _read_crnn_native
 
     if crop is None or getattr(crop, "size", 0) == 0:
@@ -820,7 +819,6 @@ def _live_record(image, sample, cfg, classifier, detector, reader, box_reader,
     from lpr.pipeline import _rank
     from lpr.segment import segment
     from lpr.types import RecogStatus as Status
-
     from lpr_tools.eval.box_direct import _actual_candidates
 
     row = sample.row
@@ -972,7 +970,6 @@ def run_live(*, config, index, val_manifest, devhard_manifest, pad_x, pad_y,
     import torch
     from lpr.config import load_config
     from lpr.recognize import load_classifier, load_corner_detector, load_plate_reader
-
     from lpr_tools.data.image_health import decode_image
     from lpr_tools.data.manifest import image_path
     from lpr_tools.eval.box_direct import RSS_LIMIT_BYTES, _read_brightness, _rss_bytes

@@ -12,7 +12,6 @@ from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
 from lpr.plate_rules import match_layout
-
 from lpr_tools.data.ccpd import INDEX_FIELDS, read_index
 from lpr_tools.data.manifest import COLORS, ManifestRow, image_path, parse_quad, read_manifest
 

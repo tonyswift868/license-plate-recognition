@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 from lpr.io_utils import list_images
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
 

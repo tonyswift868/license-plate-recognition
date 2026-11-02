@@ -26,10 +26,9 @@ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import file_sha256
 from lpr.recognize.box_reader import BOX_PAD, INPUT_SIZE, BoxNet, box_tensor, checkpoint
 from lpr.recognize.crnn import _greedy_decode
+from lpr_tools.train.box_data import bbox_from_quad, iter_rows, jitter_bbox, sample_jitter
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-
-from lpr_tools.train.box_data import bbox_from_quad, iter_rows, jitter_bbox, sample_jitter
 
 
 def free_ram_bytes() -> int:
@@ -142,9 +141,8 @@ def row_crop(row: dict, bbox: tuple, pad: tuple = BOX_PAD, *,
             x, y, w, h = bbox
             return crop_box(source, (x-int(row["x0"]), y-int(row["y0"]), w, h), *pad)
     if gpu_fallback:
-        from torchvision.io import ImageReadMode, decode_jpeg, read_file
-
         from lpr_tools.train.gpu_box_batches import rgb_region_for_box
+        from torchvision.io import ImageReadMode, decode_jpeg, read_file
         rgb = decode_jpeg(read_file(row["path"]), mode=ImageReadMode.RGB, device="cuda")
         source, local = rgb_region_for_box(rgb, bbox, bbox_from_quad(row["quad"]), pad)
         return crop_box(source, local, *pad)

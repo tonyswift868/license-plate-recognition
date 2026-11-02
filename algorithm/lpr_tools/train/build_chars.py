@@ -25,7 +25,6 @@ from lpr.pipeline import _layouts_to_try, _rectifications
 from lpr.preprocess import preprocess
 from lpr.segment import segment as segment_plate
 from lpr.types import PlateCandidate, RectifiedPlate
-
 from lpr_tools.data.ccpd import INDEX_FIELDS as CCPD_INDEX_FIELDS
 from lpr_tools.data.manifest import image_path as manifest_image_path
 from lpr_tools.data.manifest import read_manifest

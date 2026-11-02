@@ -24,7 +24,6 @@ from lpr.postprocess import decode
 from lpr.segment import segment
 from lpr.types import PlateCandidate, RecognitionResult, RectifiedPlate
 from lpr.types import RecogStatus as S
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
 

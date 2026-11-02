@@ -23,7 +23,6 @@ from lpr.locate import locate
 from lpr.preprocess import preprocess
 from lpr.segment import segment
 from lpr.types import RecogStatus as S
-
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
 from lpr_tools.eval.agree_bits import DecisionBits

@@ -142,7 +142,6 @@ def enrich_trace(*, trace_path, config_path, output_path, detector_model=None,
     import torch
     from lpr.config import load_config
     from lpr.recognize import load_corner_detector
-
     from lpr_tools.eval.box_direct import _actual_candidates
 
     source = Path(trace_path).resolve()

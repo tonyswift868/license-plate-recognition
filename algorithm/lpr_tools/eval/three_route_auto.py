@@ -15,7 +15,6 @@ from collections import defaultdict
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
-
 from lpr_tools.eval.route_split import path_key, split_assignments
 from lpr_tools.eval.three_route import ROUTE_PAIRS, _fallback, _valid, validate_records
 
