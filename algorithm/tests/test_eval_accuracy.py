@@ -28,6 +28,10 @@ def isolate_eval_defaults(tmp_path, monkeypatch):
     golden = algo / "tests" / "data" / "golden" / "golden_manifest.csv"
     golden.parent.mkdir(parents=True)
     golden.write_text("path,plate_no,plate_color,category,source,quad,note\n", encoding="utf-8")
+    # --split val refuses to run without the frozen-test exclusion list; an empty one keeps tests portable.
+    exclusion = algo / "data" / "index" / "testset_manifest_v1.csv"
+    exclusion.parent.mkdir(parents=True)
+    exclusion.write_text("path,plate_no,plate_color,category,source,quad,note\n", encoding="utf-8")
     monkeypatch.setattr(ev, "ALGORITHM_DIR", algo)
     make_recognizer = ev.make_recognizer
 

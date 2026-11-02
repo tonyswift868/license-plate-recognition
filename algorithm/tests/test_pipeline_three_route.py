@@ -6,7 +6,10 @@ import lpr.pipeline as pl
 import numpy as np
 from lpr.types import RecogStatus
 
+from . import test_pipeline as _tp
 from .test_pipeline import IMG, _cand, _dec, _recognizer_with
+
+stages = _tp.stages  # shared pytest fixture; an import here looks unused to ruff (F401/F811)
 
 S = RecogStatus
 
