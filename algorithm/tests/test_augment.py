@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from lpr_tools.train.augment import augment_char
 
 

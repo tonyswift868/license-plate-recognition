@@ -1,15 +1,15 @@
 from types import SimpleNamespace
 
+import lpr_tools.eval.eval_accuracy as eval_accuracy
 import numpy as np
-
 from lpr import pipeline
 from lpr.config import load_config
 from lpr.errors import failure_result
 from lpr.pipeline import _Attempt
-from lpr.types import DecodeResult, PlateCandidate, RectifiedPlate, RecogStatus as S, SegmentResult
+from lpr.types import DecodeResult, PlateCandidate, RectifiedPlate, SegmentResult
+from lpr.types import RecogStatus as S
 from lpr_tools.data.manifest import ManifestRow, write_manifest
 from lpr_tools.eval.common import AttributedPlateRecognizer
-import lpr_tools.eval.eval_accuracy as eval_accuracy
 
 
 def test_reader_invoked_but_not_selected_when_classic_candidate_wins(monkeypatch):
@@ -31,7 +31,9 @@ def test_reader_invoked_but_not_selected_when_classic_candidate_wins(monkeypatch
     class Reader:
         version = "reader-test"
         def __init__(self): self.calls = 0
-        def read(self, *_): self.calls += 1; return "", []
+        def read(self, *_):
+            self.calls += 1
+            return "", []
     def rects(_i, c, _cfg):
         return [RectifiedPlate(np.zeros((2, 2, 3), np.uint8), 7, "blue", np.eye(3), c)]
     monkeypatch.setattr(pipeline, "_rectifications", rects)

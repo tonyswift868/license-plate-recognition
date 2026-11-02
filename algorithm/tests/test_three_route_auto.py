@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from lpr_tools.eval.three_route import replay_auto
 from lpr_tools.eval.three_route_auto import (
     LEGACY_SOLO_READER,
@@ -156,6 +155,7 @@ def test_unknown_policy_id_is_rejected():
 
 def test_full_trace_threshold_report_is_rejected_before_auto_selection(tmp_path):
     import json
+
     from lpr_tools.eval.three_route_auto import _load_base_report
     p = tmp_path / "full-report.json"
     p.write_text(json.dumps({"status":"complete", "search":{"complete":True,

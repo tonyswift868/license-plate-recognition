@@ -2,11 +2,9 @@ import cv2
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
 from lpr.charset import CHARSET
-from lpr.recognize import crnn
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, CrnnReader, _greedy_decode, plate_tensor
+from torch import nn
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +57,7 @@ def test_positive_temperature_preserves_argmax_text_and_reduces_confidence():
 
     assert raw_text == warm_text == CHARSET[2] + CHARSET[33] + CHARSET[34]
     assert len(raw_conf) == len(warm_conf) == 3
-    assert all(after < before for before, after in zip(raw_conf, warm_conf))
+    assert all(after < before for before, after in zip(raw_conf, warm_conf, strict=False))
 
 
 def test_pure_tensor_state_with_temperature_loads_and_keeps_strict_model_keys(tmp_path, base_state):

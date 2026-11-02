@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import csv
 import json
 from collections import defaultdict
-from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -10,23 +11,28 @@ import torch
 from lpr.recognize import file_sha256
 from lpr_tools.train import train_crnn_v2 as v2
 from lpr_tools.train import train_crnn_v3 as v3
-from .test_train_crnn_v2 import _make_audited_data, _assert_tree_equal
+
+from .test_train_crnn_v2 import _assert_tree_equal, _make_audited_data
 
 
 def test_sampling_retains_green_share_and_increases_hard_candidates():
     rows=[]
     for group in v3.MIXTURE:
         rows.append(v2.Sample('a','皖A12345',group,False))
-        if group!='font': rows.append(v2.Sample('b','皖A12345',group,True))
+        if group!='font':
+            rows.append(v2.Sample('b','皖A12345',group,True))
     weights=v3.sampling_weights(rows)
-    total=defaultdict(float); gt=defaultdict(float)
-    for row,w in zip(rows,weights.tolist()):
+    total=defaultdict(float)
+    gt=defaultdict(float)
+    for row,w in zip(rows,weights.tolist(), strict=False):
         total[row.group]+=w
-        if row.gt: gt[row.group]+=w
+        if row.gt:
+            gt[row.group]+=w
     assert sum(total.values())==pytest.approx(1)
     for group in v3.MIXTURE:
         assert total[group]==pytest.approx(v3.MIXTURE[group])
-        if group!='font': assert gt[group]/total[group]==pytest.approx(.30 if group in v3.SUBSETS else .65)
+        if group!='font':
+            assert gt[group]/total[group]==pytest.approx(.30 if group in v3.SUBSETS else .65)
     assert sum(total[s]-gt[s] for s in v3.SUBSETS)==pytest.approx(.434)
     assert total['real8']==pytest.approx(.18)
 
@@ -43,7 +49,8 @@ def test_correlated_reprojection_retains_real_background_and_rejects_folded_quad
     assert np.array_equal(expanded[0,0],[10,20,30])
     assert np.array_equal(expanded[40,126],[210,220,230])
     folded=np.float32([[0,0],[-1,1],[1,-1],[0,0]])
-    with pytest.raises(ValueError): v3.empirical_crop(image,quad,folded,252)
+    with pytest.raises(ValueError):
+        v3.empirical_crop(image,quad,folded,252)
 
 
 def test_photometric_reuse_can_disable_old_mild_geometry(monkeypatch):
@@ -82,15 +89,22 @@ def prepare(root):
     cv2.imencode('.jpg',image)[1].tofile(original)
     path=index/'train.csv'
     with path.open(encoding='utf-8',newline='') as f:
-        reader=csv.DictReader(f); fields=list(reader.fieldnames); rows=list(reader)
-    for row in rows: row['orig_path']=str(original) if row['subset'] else ''
+        reader=csv.DictReader(f)
+        fields=list(reader.fieldnames)
+        rows=list(reader)
+    for row in rows:
+        row['orig_path']=str(original) if row['subset'] else ''
     with path.open('w',encoding='utf-8',newline='') as f:
-        w=csv.DictWriter(f,fieldnames=fields+['orig_path']);w.writeheader();w.writerows(rows)
+        w=csv.DictWriter(f,fieldnames=fields+['orig_path'])
+        w.writeheader()
+        w.writerows(rows)
     # Exercise both real candidate scoring and the safe eight-character guard.
     for part in ('tune','val'):
         target=index/(part+'.csv')
         with target.open(encoding='utf-8',newline='') as f:
-            reader=csv.DictReader(f); columns=list(reader.fieldnames); values=list(reader)
+            reader=csv.DictReader(f)
+            columns=list(reader.fieldnames)
+            values=list(reader)
         extra=dict(values[0])
         if part=='tune':
             extra['source']='pipeline_candidate:0:0'
@@ -100,26 +114,33 @@ def prepare(root):
             extra.update(plate_no='皖AD12345',layout='8',crop_path=str(crop))
         values.append(extra)
         with target.open('w',encoding='utf-8',newline='') as f:
-            writer=csv.DictWriter(f,fieldnames=columns);writer.writeheader();writer.writerows(values)
+            writer=csv.DictWriter(f,fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(values)
     audit=json.loads((index/'audit.json').read_text(encoding='utf-8'))
     audit['output_sha256']={key:file_sha256(index/(key+'.csv')) for key in ('train','tune','val')}
     (index/'audit.json').write_text(json.dumps(audit),encoding='utf-8')
     data=dict(schema='crop-error-v1',frame='GT canonical unit square',corner_order=['LT','RT','RB','LB'],fit_partition='train only',
         indices_sha256={'safe_train_csv':file_sha256(path),'batch8_data_audit_json':file_sha256(index/'audit.json')},
         subsets={s:[np.zeros((4,2)).tolist()] for s in v3.SUBSETS})
-    empirical=root/'empirical.json'; empirical.write_text(json.dumps(data),encoding='utf-8')
+    empirical=root/'empirical.json'
+    empirical.write_text(json.dumps(data),encoding='utf-8')
     return index,fonts,init,empirical
 
 
 def test_sampler_rejects_wrong_partition_or_data_hash(tmp_path):
     index,fonts,init,p=prepare(tmp_path)
     v3.load_empirical(p,index)
-    data=json.loads(p.read_text());data['fit_partition']='devhard'
+    data=json.loads(p.read_text())
+    data['fit_partition']='devhard'
     p.write_text(json.dumps(data))
-    with pytest.raises(ValueError): v3.load_empirical(p,index)
-    data['fit_partition']='train only';data['indices_sha256']['safe_train_csv']='0'*64
+    with pytest.raises(ValueError):
+        v3.load_empirical(p,index)
+    data['fit_partition']='train only'
+    data['indices_sha256']['safe_train_csv']='0'*64
     p.write_text(json.dumps(data))
-    with pytest.raises(ValueError): v3.load_empirical(p,index)
+    with pytest.raises(ValueError):
+        v3.load_empirical(p,index)
 
 
 def test_resume_replays_model_optimizer_rng_and_baseline_selection(tmp_path):
@@ -142,18 +163,21 @@ def test_resume_replays_model_optimizer_rng_and_baseline_selection(tmp_path):
 def test_audit_rejects_partition_overlap(tmp_path):
     index,fonts,init,p=prepare(tmp_path)
     v3.validate_audit(index)
-    path=index/'audit.json';data=json.loads(path.read_text())
+    path=index/'audit.json'
+    data=json.loads(path.read_text())
     data['content_checks']['partition_pairwise_sha256_overlap']['train_tune']=1
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError,match='leakage'): v3.validate_audit(index)
+    with pytest.raises(ValueError,match='leakage'):
+        v3.validate_audit(index)
 
 
 def test_selection_ranks_trained_rounds_without_acceptance_filter_or_initializer():
     def record(epoch,minimum,macro,accepted):
         values=[minimum]+[(macro*7-minimum)/6]*6
-        tune={s+'_GT':{'accuracy':v} for s,v in zip(v3.SUBSETS,values)}
+        tune={s+'_GT':{'accuracy':v} for s,v in zip(v3.SUBSETS,values, strict=False)}
         return dict(epoch=epoch,tune=tune,val={'all':{'accuracy':.93}},eligible=accepted)
     first=record(1,.72,.857,False)
     second=record(2,.713,.859,True)
     assert v3.select_best_trained([first,second]) is first
-    with pytest.raises(ValueError):v3.select_best_trained([])
+    with pytest.raises(ValueError):
+        v3.select_best_trained([])

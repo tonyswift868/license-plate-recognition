@@ -15,12 +15,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-
-from lpr.charset import CHARSET, CHAR_TO_INDEX, PROVINCES
+from lpr.charset import CHAR_TO_INDEX, CHARSET
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet
+from torch import nn
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 
 def _read_rows(root: Path, split: str, excluded_origins: set[str] | None = None) -> list[dict[str, str]]:
@@ -96,7 +95,7 @@ def _augment(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 
 
 def _collate(batch):
-    images, targets, lengths, sources = zip(*batch)
+    images, targets, lengths, sources = zip(*batch, strict=False)
     return torch.stack(images), torch.cat(targets), torch.tensor(lengths), sources
 
 
@@ -109,7 +108,7 @@ def _worker_init(worker_id: int) -> None:
 
 
 def _record_draw_counts(counts: dict[str, int], sources, lengths) -> None:
-    for source, length in zip(sources, lengths.tolist()):
+    for source, length in zip(sources, lengths.tolist(), strict=False):
         group = "ground_truth" if source == "ground_truth" else (
             "pipeline_candidate" if source.startswith("pipeline_candidate") else source)
         key = f"{group}/layout{int(length)}"
@@ -138,7 +137,7 @@ def _sampling_summary(rows: list[dict[str, str]], *, real_green_boost: float = 1
     weights = weights_tensor.tolist()
     total = sum(weights)
     group_totals: dict[str, float] = {}
-    for row, weight in zip(rows, weights):
+    for row, weight in zip(rows, weights, strict=False):
         for group in ("source", "layout", "province"):
             key = str(row[group]) if group != "province" else row["plate_no"][0]
             group_totals[f"{group}:{key}"] = float(group_totals.get(f"{group}:{key}", 0.0) + weight / total)
@@ -180,8 +179,9 @@ def _eval(model, rows, batch_size=256):
             logits = model(images)
             indices = logits.argmax(-1).transpose(0, 1).tolist()
             offset = 0
-            for pred_ids, length, source in zip(indices, lengths.tolist(), sources):
-                text_ids = targets[offset:offset + length].tolist(); offset += length
+            for pred_ids, length, source in zip(indices, lengths.tolist(), sources, strict=False):
+                text_ids = targets[offset:offset + length].tolist()
+                offset += length
                 truth = "".join(CHARSET[i] for i in text_ids)
                 pred = []
                 previous = BLANK
@@ -190,14 +190,18 @@ def _eval(model, rows, batch_size=256):
                         pred.append(CHARSET[label])
                     previous = label
                 prediction = "".join(pred)
-                metrics["all"][1] += 1; metrics["all"][0] += prediction == truth
-                matches = sum(a == b for a, b in zip(prediction, truth))
-                metrics["characters"][0] += matches; metrics["characters"][1] += max(len(prediction), len(truth))
+                metrics["all"][1] += 1
+                metrics["all"][0] += prediction == truth
+                matches = sum(a == b for a, b in zip(prediction, truth, strict=False))
+                metrics["characters"][0] += matches
+                metrics["characters"][1] += max(len(prediction), len(truth))
                 key = "ground_truth" if source == "ground_truth" else ("pipeline_candidate" if source.startswith("pipeline_candidate") else None)
                 if key:
-                    metrics[key][1] += 1; metrics[key][0] += prediction == truth
+                    metrics[key][1] += 1
+                    metrics[key][0] += prediction == truth
 
-                metrics["province"][1] += 1; metrics["province"][0] += bool(prediction) and prediction[0] == truth[0]
+                metrics["province"][1] += 1
+                metrics["province"][0] += bool(prediction) and prediction[0] == truth[0]
     model.train()
     return {k: {"correct": int(v[0]), "total": int(v[1]), "accuracy": (v[0] / v[1] if v[1] else None)} for k, v in metrics.items()}
 
@@ -210,8 +214,11 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
             or (stop_after is not None and stop_after < 1)
             or not np.isfinite(real_green_boost) or real_green_boost < 1):
         raise ValueError("invalid training limits")
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    torch.set_num_threads(4); cv2.setNumThreads(1)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_num_threads(4)
+    cv2.setNumThreads(1)
     excluded = set()
     if exclude_origins:
         with Path(exclude_origins).open(encoding="utf-8-sig") as handle:
@@ -270,7 +277,10 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
     if init_state is not None:
         model.load_state_dict(init_state, strict=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    start = 0; history = []; elapsed = 0.0; best = -1.0
+    start = 0
+    history = []
+    elapsed = 0.0
+    best = -1.0
     if resume:
         ckpt = torch.load(resume, map_location="cpu", weights_only=True)
         old_metadata = _normalize_checkpoint_metadata(ckpt["metadata"])
@@ -306,7 +316,8 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
             metadata["initialization"] = old_metadata["initialization"]
             if old_metadata != metadata:
                 raise ValueError("resume training provenance/config differs")
-        model.load_state_dict(ckpt["model"]); optimizer.load_state_dict(ckpt["optimizer"])
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
         start, history, elapsed, best = ckpt["epoch"], ckpt["history"], ckpt["train_seconds"], ckpt["best"]
         torch.set_rng_state(ckpt["torch_rng"])
     criterion = nn.CTCLoss(blank=BLANK, zero_infinity=True)
@@ -320,7 +331,10 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
                                 collate_fn=_collate, worker_init_fn=_worker_init if num_workers else None,
                                 generator=torch.Generator().manual_seed(seed + epoch + 100_000),
                                 persistent_workers=False)
-            model.train(); began = time.perf_counter(); total = 0.0; batches = 0
+            model.train()
+            began = time.perf_counter()
+            total = 0.0
+            batches = 0
             actual_draw_counts: dict[str, int] = {}
             for images, targets, lengths, sources in loader:
                 _record_draw_counts(actual_draw_counts, sources, lengths)
@@ -331,8 +345,11 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
                 loss = criterion(log_probs, targets, input_lengths, lengths)
                 if not torch.isfinite(loss):
                     raise RuntimeError("non-finite CTC loss")
-                loss.backward(); nn.utils.clip_grad_norm_(model.parameters(), 5.0); optimizer.step()
-                total += float(loss.item()); batches += 1
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                optimizer.step()
+                total += float(loss.item())
+                batches += 1
                 if batches % 50 == 0:
                     print(f"epoch={epoch+1} batch={batches} loss={total/batches:.4f}", flush=True)
             if sum(actual_draw_counts.values()) != samples_per_epoch:
@@ -346,7 +363,9 @@ def train(data: list[Path], out: Path, *, version="crnn_v1", epochs=30, batch_si
             entry = {"epoch": epoch + 1, "loss": total / max(batches, 1), "metrics": metrics,
                      "actual_draw_counts": actual_draw_counts,
                      "epoch_seconds": time.perf_counter() - began, "train_seconds": elapsed}
-            history.append(entry); log.write(json.dumps(entry, ensure_ascii=False) + "\n"); log.flush()
+            history.append(entry)
+            log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            log.flush()
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch + 1,
                         "history": history, "train_seconds": elapsed, "best": best, "metadata": metadata,
                         "torch_rng": torch.get_rng_state()}, checkpoint_path)

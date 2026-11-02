@@ -10,25 +10,25 @@ import math
 import os
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.charnorm import normalize_char, unify_polarity
 from lpr.charset import CHAR_TO_INDEX, CHARSET
 from lpr.config import DEFAULT_CONFIG_PATH, load_config
 from lpr.io_utils import decode_image, imread, imwrite
-from lpr.locate import box_iou
-from lpr.preprocess import preprocess
-from lpr.locate import locate
+from lpr.locate import box_iou, locate
 from lpr.pipeline import _layouts_to_try, _rectifications
+from lpr.preprocess import preprocess
 from lpr.segment import segment as segment_plate
 from lpr.types import PlateCandidate, RectifiedPlate
+
 from lpr_tools.data.ccpd import INDEX_FIELDS as CCPD_INDEX_FIELDS
-from lpr_tools.data.manifest import image_path as manifest_image_path, read_manifest
+from lpr_tools.data.manifest import image_path as manifest_image_path
+from lpr_tools.data.manifest import read_manifest
 
 INDEX_FIELDS = ("path", "source_path", "split", "label", "char", "plate_no", "position",
                 "source_variant", "candidate_index", "rectification_index", "candidate_iou")
@@ -531,7 +531,7 @@ def build_chars(index: str | Path, raw: str | Path, out: str | Path, *,
         for start in range(0, len(candidates), PREFLIGHT_BATCH_SIZE):
             batch = candidates[start:start + PREFLIGHT_BATCH_SIZE]
             results = list(pool.map(lambda item: _preflight_one(item, config), batch))
-            for item, (digest, quad, error) in zip(batch, results):
+            for item, (digest, quad, error) in zip(batch, results, strict=False):
                 row_no, row, source = item
                 split = row["split"]
                 if digest is not None:

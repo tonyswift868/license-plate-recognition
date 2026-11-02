@@ -1,7 +1,12 @@
 import csv
+import shutil
 from pathlib import Path
 
-from lpr_tools.train.train_crnn import _read_rows
+import cv2
+import numpy as np
+import pytest
+import torch
+from lpr_tools.train.train_crnn import _read_rows, train
 
 
 def test_excluded_origin_removes_train_views_only(tmp_path: Path):
@@ -37,14 +42,7 @@ def test_invalid_label_fails_closed(tmp_path: Path):
         assert "invalid plate label" in str(exc)
     else:
         raise AssertionError("invalid labels must stop training")
-import csv
-from pathlib import Path
 
-import cv2
-import numpy as np
-import torch
-
-from lpr_tools.train.train_crnn import train
 
 
 def _write_plate(root: Path, split: str, name: str, source: str = "ground_truth"):
@@ -128,14 +126,7 @@ def test_explicit_worker_change_resume_matches_zero_worker_run(tmp_path: Path):
     assert ckpt["metadata"]["execution_lineage"][-1]["checkpoint_sha256"]
     assert ckpt["metadata"]["execution_lineage"][-1]["source_best_sha256"]
     assert migrated.with_suffix(".training.json").read_text(encoding="utf-8").splitlines()[0]
-import csv
-import shutil
-from pathlib import Path
 
-import pytest
-import torch
-
-from lpr_tools.train.train_crnn import train
 
 
 def _make_tiny_data(root: Path):
@@ -209,9 +200,10 @@ def test_real_green_boost_is_real_8_char_only():
 
 def test_from_scratch_weight_continuation_records_local_lineage_and_fresh_run(tmp_path: Path):
     import hashlib
+
     import torch
-    from lpr.recognize.crnn import CrnnNet
     from lpr.recognize import read_manifest
+    from lpr.recognize.crnn import CrnnNet
     from lpr_tools.train.train_crnn import train
 
     data = tmp_path / "plates"
@@ -244,6 +236,7 @@ def test_from_scratch_weight_continuation_records_local_lineage_and_fresh_run(tm
 
 def test_local_init_weight_training_resumes_identically(tmp_path: Path):
     import hashlib
+
     import torch
     from lpr.recognize.crnn import CrnnNet
     from lpr_tools.train.train_crnn import train

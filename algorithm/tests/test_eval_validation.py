@@ -3,22 +3,21 @@ import csv
 import json
 from collections import Counter
 from dataclasses import replace
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
+import lpr_tools.eval.eval_accuracy as ev
+import lpr_tools.eval.index_samples as index_samples_module
+import lpr_tools.eval.locate_recall as lr
 import numpy as np
 import pytest
-
 from lpr.io_utils import imwrite
 from lpr.testing import FakeRecognizer
 from lpr_tools.data.ccpd import INDEX_FIELDS
 from lpr_tools.data.manifest import read_manifest, write_manifest
-from lpr_tools.eval.index_samples import path_key, read_samples, sample_dev_hard, sample_validation
 from lpr_tools.eval.eval_accuracy import evaluate, main
-import lpr_tools.eval.eval_accuracy as ev
-import lpr_tools.eval.locate_recall as lr
-import lpr_tools.eval.index_samples as index_samples_module
+from lpr_tools.eval.index_samples import path_key, read_samples, sample_dev_hard, sample_validation
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +86,8 @@ def index_fixture(root):
 def save_index(path, rows):
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=INDEX_FIELDS)
-        writer.writeheader(); writer.writerows(rows)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def test_balanced_val_sampling_stable_and_without_leakage(tmp_path):
@@ -105,9 +105,11 @@ def test_balanced_val_sampling_stable_and_without_leakage(tmp_path):
     assert metadata["selected_n"] == 8 and metadata["available_n"] == 12
     assert len(sample_validation(index, n=999)[0]) == 12
     assert sample_validation(index, n=8, seed=41)[0] != samples
-    with pytest.raises(ValueError, match="positive"):sample_validation(index, n=0)
+    with pytest.raises(ValueError, match="positive"):
+        sample_validation(index, n=0)
     save_index(index, [r for r in raw if r["split"] != "val"])
-    with pytest.raises(ValueError, match="no supported val"):sample_validation(index)
+    with pytest.raises(ValueError, match="no supported val"):
+        sample_validation(index)
 
 
 def test_val_exclusion_and_dev_hard_are_stratified(tmp_path):
@@ -249,11 +251,14 @@ def test_duplicate_path_split_alias_and_skipped_labels(tmp_path):
     assert len(read_samples(index)) == len(rows)
     alias = dict(rows[0], path="images/../"+rows[0]["path"], split="train")
     save_index(index, rows+[alias])
-    with pytest.raises(ValueError, match="conflicting index path"):sample_validation(index)
+    with pytest.raises(ValueError, match="conflicting index path"):
+        sample_validation(index)
     save_index(index, [dict(rows[0], bbox="1 2 -3 4")])
-    with pytest.raises(ValueError, match="bbox"):read_samples(index)
+    with pytest.raises(ValueError, match="bbox"):
+        read_samples(index)
     save_index(index, [dict(rows[0], plate_color="ultraviolet")])
-    with pytest.raises(ValueError, match="plate color"):read_samples(index)
+    with pytest.raises(ValueError, match="plate color"):
+        read_samples(index)
 
 
 def test_top3_iou_boundary_and_original_coordinates(cfg, monkeypatch):
@@ -353,7 +358,8 @@ def test_val_cli_fails_closed_when_exclusion_is_missing(tmp_path, capsys):
 def test_missing_gt_and_cli_input_errors(tmp_path, capsys):
     index, _ = index_fixture(tmp_path)
     selected, _ = sample_validation(index,n=4)
-    orphan = tmp_path/"orphan.png"; imwrite(orphan,np.zeros((240,400,3),np.uint8))
+    orphan = tmp_path/"orphan.png"
+    imwrite(orphan,np.zeros((240,400,3),np.uint8))
     manifest = tmp_path/"orphan.csv"
     plated = next(s.row for s in selected if s.row.category != "np")
     write_manifest(manifest,[replace(plated,path=str(orphan))])
@@ -367,5 +373,6 @@ def test_missing_gt_and_cli_input_errors(tmp_path, capsys):
                  ["--split","val","--index",str(index),"--n","0","--exclude-manifest",str(exclude)],
                  ["--split","val","--index",str(index),"--exclude-manifest",str(exclude),
                   "--scoreboard",str(tmp_path/"algorithm"/"reports"/"scoreboard.md")]):
-        with pytest.raises(SystemExit) as exc:main(argv)
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
         assert exc.value.code == 2

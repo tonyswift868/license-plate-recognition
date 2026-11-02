@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
-import cv2
 import torch
-
 from lpr.corner_net import REFINE_INPUT_SIZE
 from lpr_tools import train_refine as train
 

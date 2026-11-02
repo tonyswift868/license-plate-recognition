@@ -1,12 +1,20 @@
 import json
 import subprocess
-import pytest
 
 import lpr_tools.eval.daily as daily_module
-from lpr_tools.eval.daily import (_compare, _error_analysis, _format_comparison,
-                                 _partition_hard_rows, _attribution, _effective_config,
-                                 _identity_changes, _verify_marker_config, daily)
+import pytest
 from lpr_tools.data.manifest import ManifestRow, read_manifest, write_manifest
+from lpr_tools.eval.daily import (
+    _attribution,
+    _compare,
+    _effective_config,
+    _error_analysis,
+    _format_comparison,
+    _identity_changes,
+    _partition_hard_rows,
+    _verify_marker_config,
+    daily,
+)
 
 
 def test_error_analysis_counts_positions_and_confusions(tmp_path):
@@ -244,7 +252,8 @@ def test_daily_full_orchestration_writes_complete_reviewable_outputs(tmp_path, m
         if "manifest-val" in command:
             out = Path(command[command.index("--out") + 1])
             out.mkdir(parents=True, exist_ok=True)
-            data = report(); data["manifest_rows"] = data["scored_rows"] = data["decoded_rows"] = 300
+            data = report()
+            data["manifest_rows"] = data["scored_rows"] = data["decoded_rows"] = 300
             (out / "report.json").write_text(json.dumps(data), encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "", "")
         if any("test_golden.py" in item for item in command):

@@ -8,28 +8,32 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
-from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import random
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import file_sha256
 from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint
 from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2, BoxNetV2
+from torch import nn
+
 from lpr_tools.train.box_data import parse_quad
 from lpr_tools.train.box_data_v2 import GROUPS, build_balanced_multiplicity
-from lpr_tools.train.train_box_reader import (BoxDataset, cache_contains, free_ram_bytes,
-                                             process_ram_bytes, row_crop)
+from lpr_tools.train.train_box_reader import (
+    BoxDataset,
+    cache_contains,
+    free_ram_bytes,
+    process_ram_bytes,
+    row_crop,
+)
 
 
 def affine_target(quad, bbox, crop_shape, pad=BOX_PAD) -> torch.Tensor:
@@ -58,7 +62,8 @@ class BoxDatasetV2(BoxDataset):
     def finish(self, image, row, index, rng, *, bbox=None):
         if not image.size:
             raise ValueError(f"empty v2 training crop: {row['path']}")
-        if bbox is None: _, _, bbox = self.specification(index)
+        if bbox is None:
+            _, _, bbox = self.specification(index)
         theta = affine_target(row["quad"], bbox, image.shape)
         if self.training:
             if rng.random() < .4:
@@ -71,7 +76,7 @@ class BoxDatasetV2(BoxDataset):
 
 
 def collate_v2(items):
-    images, labels, indices, thetas, groups = zip(*items)
+    images, labels, indices, thetas, groups = zip(*items, strict=False)
     targets = torch.tensor([CHAR_TO_INDEX[c] for label in labels for c in label], dtype=torch.long)
     lengths = torch.tensor([len(label) for label in labels], dtype=torch.long)
     return (torch.stack(images), targets, lengths, list(labels), list(indices),
@@ -107,7 +112,9 @@ class BalancedPackedBatches:
                     yield part,min(end,part+quantum)
         with Path(ds.row(0)["cache_pack"]).open("rb") as stream, ThreadPoolExecutor(max_workers=1) as executor:
             total_size = stream.seek(0, 2)
-            pending=iter(jobs()); job=next(pending,None); future=None
+            pending=iter(jobs())
+            job=next(pending,None)
+            future=None
             while job is not None:
                 prepared=future.result() if future is not None else self._prepare(stream,total_size,*job)
                 next_job=next(pending,None)
@@ -189,8 +196,11 @@ def validate_inputs(args):
 
 
 def run(args):
-    torch.set_num_threads(2); cv2.setNumThreads(1)
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    torch.set_num_threads(2)
+    cv2.setNumThreads(1)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     profiling = args.profile_batches > 0
     if args.epochs < 60 and not (args.smoke or profiling):
         raise ValueError("v2 release training requires at least 60 complete epochs")
@@ -238,12 +248,23 @@ def run(args):
         weight_decay=1e-4, fused=device.type=="cuda")
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs,eta_min=1e-5)
     ctc = nn.CTCLoss(blank=NUM_CLASSES,zero_infinity=False,reduction="none")
-    history=[]; best=-1.; best_epoch=0; ram_peak=0; started=time.perf_counter()
+    history=[]
+    best=-1.
+    best_epoch=0
+    ram_peak=0
+    started=time.perf_counter()
     input_hashes={"train_sha256":file_sha256(args.train),"tune_sha256":file_sha256(args.tune),
                   "sampler_sha256":file_sha256(args.sampler),"audit_sha256":file_sha256(args.audit) if args.audit else None}
     for epoch in range(args.epochs):
-        ds.epoch=epoch; model.train(); visits=np.zeros(len(ds),dtype=np.uint16)
-        group_counts={g:0 for g in GROUPS}; seen=0; physical_seen=0; loss_sum=0.; geom_sum=0.; epoch_started=time.perf_counter()
+        ds.epoch=epoch
+        model.train()
+        visits=np.zeros(len(ds),dtype=np.uint16)
+        group_counts={g:0 for g in GROUPS}
+        seen=0
+        physical_seen=0
+        loss_sum=0.
+        geom_sum=0.
+        epoch_started=time.perf_counter()
         for step,(images,targets,lengths,labels,indices,theta,groups,repeats) in enumerate(loader,1):
             optimizer.zero_grad(set_to_none=True)
             weights=repeats.to(device)
@@ -280,14 +301,19 @@ def run(args):
             optimizer.step()
             draw_counts=repeats.to(dtype=torch.int64).tolist()
             np.add.at(visits,indices,draw_counts)
-            for group,count in zip(groups,draw_counts): group_counts[group]+=count
+            for group,count in zip(groups,draw_counts, strict=False):
+                group_counts[group]+=count
             draws=sum(draw_counts)
-            seen+=draws; physical_seen+=len(images); loss_sum+=float(recognition.detach())*draws
+            seen+=draws
+            physical_seen+=len(images)
+            loss_sum+=float(recognition.detach())*draws
             geom_sum+=float(geometry.detach())*draws
             if step==1 or step%100==0:
-                ram=process_ram_bytes(); ram_peak=max(ram_peak,ram)
+                ram=process_ram_bytes()
+                ram_peak=max(ram_peak,ram)
                 limit=900_000_000 if args.smoke and device.type=="cpu" else 2_550_000_000
-                if ram>limit: raise RuntimeError(f"training process RAM over internal reserve: {ram}")
+                if ram>limit:
+                    raise RuntimeError(f"training process RAM over internal reserve: {ram}")
                 print(json.dumps({"epoch":epoch+1,"step":step,"seen":seen,
                     "unique_seen":int(np.count_nonzero(visits)),"loss":float(recognition.detach()),
                     "geometry_loss":float(geometry.detach()),"rss":ram,"seconds":time.perf_counter()-started}),flush=True)
@@ -299,7 +325,8 @@ def run(args):
                     "gpu_peak_reserved_bytes":torch.cuda.max_memory_reserved() if device.type=="cuda" else 0,
                     "group_exposures":group_counts,"epoch_unique_pool":len(ds),"full_exposures_per_epoch":plan.total_exposures}
                 (args.out/'profile.json').write_text(json.dumps(report,indent=2))
-                print(json.dumps(report),flush=True); return report
+                print(json.dumps(report),flush=True)
+                return report
         expected=np.asarray(loader.plan.multiplicity,dtype=np.uint16)
         if not np.array_equal(visits,expected) or group_counts!=dict(loader.plan.group_exposures):
             raise RuntimeError("balanced epoch coverage/counts violated")
@@ -308,11 +335,17 @@ def run(args):
             del images,targets,lengths,theta,repeats,logits,pred_theta,per_example,loss,recognition,geometry
             # Release the 86MB mmap's resident pages before the own-venv CPU
             # scorer starts; next epoch reopens it from the immutable index.
-            if ds._map is not None: ds._map.close(); ds._map=None
-            if ds._file is not None: ds._file.close(); ds._file=None
+            if ds._map is not None:
+                ds._map.close()
+                ds._map=None
+            if ds._file is not None:
+                ds._file.close()
+                ds._file=None
             gc.collect()
-            if device.type=='cuda': torch.cuda.empty_cache()
-            payload=checkpoint(model); torch.save(payload,args.out/'last.pt')
+            if device.type=='cuda':
+                torch.cuda.empty_cache()
+            payload=checkpoint(model)
+            torch.save(payload,args.out/'last.pt')
             scored=subprocess.run([str(args.cpu_python),'-m','lpr_tools.train.score_box_reader_v2',
                 '--model',str(args.out/'last.pt'),'--tune',str(args.tune)],check=True,capture_output=True,text=True,encoding='utf-8')
             score=json.loads(scored.stdout)
@@ -323,8 +356,10 @@ def run(args):
                 "tune":score,"lr":optimizer.param_groups[1]['lr'],"seconds":time.perf_counter()-epoch_started}
         history.append(record)
         if score['accuracy']>best:
-            best=score['accuracy']; best_epoch=epoch+1
-            if not args.smoke: torch.save(payload,args.out/'best.pt')
+            best=score['accuracy']
+            best_epoch=epoch+1
+            if not args.smoke:
+                torch.save(payload,args.out/'best.pt')
         schedule.step()
         report={"recipe":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
             "history":history,"epochs_completed":len(history),"best_epoch":best_epoch,"best_accuracy":best,
@@ -372,7 +407,8 @@ def main():
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--profile-batches',type=int,default=0)
     parser.add_argument('--cpu-python',type=Path,default=Path('.venv/Scripts/python.exe').resolve())
-    args=parser.parse_args(); print(json.dumps(run(args),default=str),flush=True)
+    args=parser.parse_args()
+    print(json.dumps(run(args),default=str),flush=True)
 
 
 if __name__=='__main__':

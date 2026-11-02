@@ -1,15 +1,14 @@
 """Train tiny font baselines and exercise their manifest-backed runtime contract."""
 
-from concurrent.futures import ThreadPoolExecutor
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
-
 from lpr.io_utils import imwrite
 from lpr.recognize import load_classifier, read_manifest
-from lpr.recognize.template import TemplateClassifier
 from lpr.recognize.svm import hog_features
+from lpr.recognize.template import TemplateClassifier
 from lpr_tools.train.build_templates import build
 from lpr_tools.train.data import load_split
 from lpr_tools.train.synth_chars import generate_dataset
@@ -17,7 +16,7 @@ from lpr_tools.train.train_svm import train, validation_accuracy
 
 
 @pytest.fixture(scope="module")
-def chars_data(tmp_path_factory):
+def chars_data(default_font, tmp_path_factory):
     data = tmp_path_factory.mktemp("baseline") / "chars"
     generate_dataset(data, per_class=8)
     return data

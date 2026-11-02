@@ -13,13 +13,15 @@ import hashlib
 import json
 import os
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR
 from lpr.types import RecogStatus
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
+
 from .common import config_for_args, effective_config_info, make_recognizer, mode_name
 
 GROUPS = ("clear", "night", "tilt", "dirty")
@@ -32,7 +34,7 @@ def summarize(rows, results):
         raise ValueError("rows and results must align")
     report = {}
     for group in (*GROUPS, "overall"):
-        selected = [(row, result) for row, result in zip(rows, results)
+        selected = [(row, result) for row, result in zip(rows, results, strict=False)
                     if row.category in GROUPS and (group == "overall" or row.category == group)]
         accepted = [(row, result) for row, result in selected if _status(result) == RecogStatus.OK.value]
         correct = sum(_plate(result) == row.plate_no for row, result in selected)
@@ -97,7 +99,7 @@ def main(argv=None):
             return 0
         if output.exists():
             raise ValueError(f"refusing to overwrite output: {output}")
-        _create_once_marker(marker, {"state": "in_progress", "created_utc": datetime.now(timezone.utc).isoformat(),
+        _create_once_marker(marker, {"state": "in_progress", "created_utc": datetime.now(UTC).isoformat(),
                                      "manifest": str(manifest.resolve()), "config": config_info["config_path"]})
         recognizer = make_recognizer(args, cfg=cfg)
         results, failures = [], []
@@ -114,7 +116,7 @@ def main(argv=None):
         if failures:
             raise ValueError(f"frozen manifest has undecodable images: {len(failures)}; one-time marker remains consumed")
         summary = summarize(rows, results)
-        report = {"created_utc": datetime.now(timezone.utc).isoformat(),
+        report = {"created_utc": datetime.now(UTC).isoformat(),
                   "manifest": str(manifest.resolve()), "row_count": len(rows),
                   "config": effective_config_info(cfg, args.config), "mode": mode_name(args),
                   "model_version": recognizer.version,

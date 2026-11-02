@@ -5,7 +5,6 @@ import json
 import random
 
 import pytest
-
 from lpr_tools.train.box_data import (
     bbox_from_quad,
     box_delta,

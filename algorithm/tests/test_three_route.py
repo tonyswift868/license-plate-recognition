@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from types import ModuleType
 
-import pytest
 import lpr_tools.eval.three_route as three_route
+import pytest
 from lpr_tools.eval.three_route import (
     _boundary_values,
     _fallback,
@@ -14,11 +14,11 @@ from lpr_tools.eval.three_route import (
     _model_manifest_identity,
     _normalize_verification_meta,
     _read_box_result,
-    exact_search,
     evaluate,
+    exact_search,
     join_routes,
-    replay_auto,
     reference_decision,
+    replay_auto,
     select_box_pad,
     validate_records,
 )

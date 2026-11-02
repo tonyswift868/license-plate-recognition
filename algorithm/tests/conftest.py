@@ -7,7 +7,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-
 from lpr.config import LprConfig, load_config
 from lpr.pipeline import PlateRecognizer
 from lpr.testing import UniformClassifier
@@ -49,3 +48,13 @@ def draw_synthetic_plate(text: str = "A12345", color: str = "blue",
 @pytest.fixture
 def synthetic_plate_image() -> np.ndarray:
     return draw_synthetic_plate()
+
+
+@pytest.fixture(scope="session")
+def default_font() -> Path:
+    """Skip only tests which need the local Chinese font."""
+    from lpr_tools.train.synth_chars import DEFAULT_FONT
+
+    if not DEFAULT_FONT.is_file():
+        pytest.skip(f"missing local font: {DEFAULT_FONT}")
+    return DEFAULT_FONT

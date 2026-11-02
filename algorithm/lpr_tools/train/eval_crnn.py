@@ -11,10 +11,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-
 from lpr.plate_rules import match_layout
 from lpr.recognize import file_sha256, load_plate_reader
-
 
 
 def evaluate(data: Path, model: Path, out: Path) -> dict:
@@ -54,7 +52,7 @@ def evaluate(data: Path, model: Path, out: Path) -> dict:
                 values["total"] += 1
                 values["correct"] += text == truth
                 values["province_correct"] += bool(text) and text[0] == truth[0]
-                values["char_correct"] += sum(a == b for a, b in zip(text, truth))
+                values["char_correct"] += sum(a == b for a, b in zip(text, truth, strict=False))
                 values["char_total"] += max(len(text), len(truth))
                 values["auto_pass"] += auto
                 values["auto_correct"] += auto and text == truth

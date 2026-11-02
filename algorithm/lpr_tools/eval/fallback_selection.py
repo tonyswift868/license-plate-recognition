@@ -7,15 +7,19 @@ import json
 import math
 from pathlib import Path
 
-from lpr.config import load_config
-from lpr_tools.data.manifest import image_path, read_manifest
+from lpr.config import ALGORITHM_DIR, load_config
+
 from lpr_tools.eval import agree_threshold
 from lpr_tools.eval.common import effective_config_info
-from lpr_tools.eval.index_samples import (FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST,
-                                          fixed_manifest_samples, path_key)
+from lpr_tools.eval.index_samples import (
+    FIXED_HARD_MANIFEST,
+    FIXED_VAL_MANIFEST,
+    fixed_manifest_samples,
+    path_key,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
-INDEX_DEFAULT = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+INDEX_DEFAULT = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 RULES = ("baseline", "first_candidate_reader", "max_reader", "agreement_then_reader")
 RULE_TEXT = {
     "baseline": "现有 agree_threshold.replay_record 完整回放。",
@@ -194,7 +198,7 @@ def _validate(trace: Path, identity_path: Path, index_path: Path):
         expected.extend(samples)
     if len(expected) != len(records):
         raise ValueError("manifest/trace row count mismatch")
-    for i, (record, sample) in enumerate(zip(records, expected)):
+    for i, (record, sample) in enumerate(zip(records, expected, strict=False)):
         if record.get("input_error"):
             raise ValueError(f"trace contains failed input at row {i}: {record.get('input_error')}")
         if (path_key(record.get("path", "")) != path_key(sample.row.path)
@@ -230,7 +234,7 @@ def run(trace: Path, params_path: Path, index_path: Path, out: Path):
     index_fields = _load_index_fields(index_path, needed)
     out.mkdir(parents=True)
     detail = []
-    for record, sample in zip(records, samples):
+    for record, sample in zip(records, samples, strict=False):
         meta = index_fields[path_key(sample.row.path)]
         results = compare_record(record, params)
         detail.append({"path": record["path"], "truth": record["truth"], "split": "val" if record["split"] == "val" else "hard",
@@ -258,7 +262,8 @@ def run(trace: Path, params_path: Path, index_path: Path, out: Path):
             if group not in reports[rule]:
                 continue
             v = reports[rule][group]
-            pct = lambda x: "—" if x is None else f"{100*x:.2f}"
+            def pct(x):
+                return "—" if x is None else f"{100*x:.2f}"
             lines.append(f"| {rule} | {group} | {v['n']} | {v['whole_plate_correct']} | {v['auto_pass_correct']} | {pct(v['auto_pass_rate'])} | {pct(v['auto_pass_precision'])} | {v['rescued_non_ok']} | {v['regressed_non_ok']} | {v['cannot_pure_fallback_rescue']} |")
     lines += ["", "Per-subset scores and full input identity are in `report.json`.", ""]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")

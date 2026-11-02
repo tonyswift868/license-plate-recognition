@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import pytest
-
-from lpr_tools.eval.e1_threshold import (candidate_thresholds, recommend, scan, validate_provenance,
-                                        _stable_threshold)
+from lpr_tools.eval.e1_threshold import (
+    _stable_threshold,
+    candidate_thresholds,
+    recommend,
+    scan,
+    validate_provenance,
+)
 
 
 def attempt(index, plate, confidence, valid=True):

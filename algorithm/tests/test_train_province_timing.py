@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-
 from lpr_tools.train.province_inference_timing import instrument_method, summarize
 
 

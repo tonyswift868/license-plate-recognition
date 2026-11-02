@@ -5,10 +5,16 @@ import json
 import cv2
 from lpr.charset import PROVINCES
 from lpr.plate_rules import match_layout
-from lpr_tools.train.synth_plates import DEFAULT_FONT, FIELDS, _plate_number, _render, generate_dataset
+from lpr_tools.train.synth_plates import (
+    DEFAULT_FONT,
+    FIELDS,
+    _plate_number,
+    _render,
+    generate_dataset,
+)
 
 
-def test_rare_province_generation_is_train_only_and_reproducible(tmp_path):
+def test_rare_province_generation_is_train_only_and_reproducible(default_font, tmp_path):
     source = tmp_path / "real.csv"
     with source.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=FIELDS)
@@ -42,7 +48,7 @@ def test_rare_province_generation_is_train_only_and_reproducible(tmp_path):
                match_layout(row["plate_no"]) in {"L8S", "L8L"} for row in rows)
 
 
-def test_generated_layouts_obey_plate_rules_and_render_real_sized_glyphs():
+def test_generated_layouts_obey_plate_rules_and_render_real_sized_glyphs(default_font):
     rng = __import__("numpy").random.default_rng(9)
     for layout in (7, 8):
         for _ in range(100):
@@ -53,7 +59,7 @@ def test_generated_layouts_obey_plate_rules_and_render_real_sized_glyphs():
             assert image.shape == (80, 252 if layout == 7 else 276, 3)
 
 
-def test_generation_rejects_bad_schema_and_nonempty_destination(tmp_path):
+def test_generation_rejects_bad_schema_and_nonempty_destination(default_font, tmp_path):
     bad = tmp_path / "bad.csv"
     bad.write_text("file,plate_no\na.jpg,皖A12345\n", encoding="utf-8")
     import pytest

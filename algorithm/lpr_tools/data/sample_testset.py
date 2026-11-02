@@ -8,8 +8,8 @@ from collections import Counter
 from pathlib import Path
 
 from lpr_tools.data.ccpd import read_index
-from lpr_tools.data.manifest import ManifestRow, validate_manifest, write_manifest
 from lpr_tools.data.image_health import decode_image
+from lpr_tools.data.manifest import ManifestRow, validate_manifest, write_manifest
 
 SEED = 42
 # Delivered ccpd_db (10,132 rows): Q10=17, Q25=22, median=28.
@@ -26,7 +26,7 @@ def _quad(value: str) -> tuple[tuple[float, float], ...] | None:
     nums = [float(v) for v in value.split()]
     if len(nums) != 8:
         raise ValueError("index quad must contain eight coordinates")
-    return tuple(zip(nums[::2], nums[1::2]))
+    return tuple(zip(nums[::2], nums[1::2], strict=False))
 
 
 def _index_image_path(raw_path: str, index_path: Path) -> str:

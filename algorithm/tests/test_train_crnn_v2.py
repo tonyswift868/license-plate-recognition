@@ -11,12 +11,9 @@ import cv2
 import numpy as np
 import pytest
 import torch
-
-from lpr.charset import CHAR_TO_INDEX
 from lpr.recognize import file_sha256
 from lpr.recognize.crnn import CrnnNet
 from lpr_tools.train import train_crnn_v2 as trainer
-
 
 SUBSETS = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
 FIELDS = ("plate_no", "partition", "layout", "subset", "source", "crop_path", "brightness")
@@ -118,7 +115,7 @@ def _assert_tree_equal(left, right):
             _assert_tree_equal(left[key], right[key])
     elif isinstance(left, (list, tuple)):
         assert type(left) is type(right) and len(left) == len(right)
-        for a, b in zip(left, right):
+        for a, b in zip(left, right, strict=False):
             _assert_tree_equal(a, b)
     else:
         assert left == right
@@ -141,7 +138,7 @@ def test_sampling_weights_preserve_group_shares_and_gt_pipeline_ratio():
     weights = trainer.sampling_weights(rows)
     totals = defaultdict(float)
     gt_totals = defaultdict(float)
-    for row, weight in zip(rows, weights.tolist()):
+    for row, weight in zip(rows, weights.tolist(), strict=False):
         totals[row.group] += weight
         if row.gt:
             gt_totals[row.group] += weight

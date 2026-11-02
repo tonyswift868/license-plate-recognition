@@ -1,10 +1,11 @@
 import itertools
+
+import lpr.postprocess as pp
 import numpy as np
 import pytest
-from lpr.charset import CHARSET, CHAR_TO_INDEX as IDX
+from lpr.charset import CHAR_TO_INDEX as IDX
 from lpr.postprocess import decode
 from lpr.types import RecogStatus as S
-import lpr.postprocess as pp
 
 
 def probabilities(plate, p=0.95):
@@ -52,7 +53,7 @@ def test_beam_matches_exhaustive(cfg):
         p[pos] = 0
         p[pos, IDX["1"]], p[pos, IDX["2"]] = weight, 1-weight
     r = decode(p, 7, "blue", cfg.postprocess)
-    expected = sorted((("陕A" + "".join(t) + "45", .95**4 * np.prod([w if c == "1" else 1-w for c, w in zip(t, (.6, .7, .8))]))
+    expected = sorted((("陕A" + "".join(t) + "45", .95**4 * np.prod([w if c == "1" else 1-w for c, w in zip(t, (.6, .7, .8), strict=False)]))
                        for t in itertools.product("12", repeat=3)), key=lambda x: (-x[1], x[0]))[:3]
     assert [x[0] for x in r.candidates] == [x[0] for x in expected]
     assert [x[1] for x in r.candidates] == sorted([x[1] for x in r.candidates], reverse=True)
@@ -84,7 +85,9 @@ def test_uniform_ties_and_prior_candidates(cfg):
     result=decode(p,7,"blue",cfg.postprocess)
     assert result.candidates[0][0]==result.plate_no
     p=probabilities("皖A12345")
-    p[0]=0;p[0,IDX["皖"]]=.6;p[0,IDX["陕"]]=.4
+    p[0]=0
+    p[0,IDX["皖"]]=.6
+    p[0,IDX["陕"]]=.4
     config=cfg.postprocess.model_copy(update={"province_prior":{"陕":2}})
     result=decode(p,7,"blue",config)
     assert result.candidates[0][0]==result.plate_no

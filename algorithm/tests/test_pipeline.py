@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import lpr.pipeline as pl
 import numpy as np
 import pytest
-
-import lpr.pipeline as pl
 from lpr.errors import BadInputError
-from lpr.types import (DecodeResult, PlateCandidate, PreprocessOut, RecogStatus, RectifiedPlate,
-                       SegmentResult)
+from lpr.types import (
+    DecodeResult,
+    PlateCandidate,
+    PreprocessOut,
+    RecogStatus,
+    RectifiedPlate,
+    SegmentResult,
+)
 
 S = RecogStatus
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import csv
 
 import pytest
-
 from lpr.errors import ModelLoadError
 from lpr.io_utils import imread
 from lpr.pipeline import PlateRecognizer

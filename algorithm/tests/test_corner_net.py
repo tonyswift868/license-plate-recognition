@@ -5,13 +5,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
+from lpr.corner_net import (
+    ARCHITECTURE,
+    INPUT_SIZE,
+    ROI_INPUT_SIZE,
+    CornerModel,
+    CornerNet,
+    LetterboxTransform,
+    RoiConfidenceModel,
+    RoiCornerRefiner,
+    _decode_candidates,
+    letterbox_image,
+    pack_corner_roi_checkpoint,
+)
 from lpr.errors import ModelLoadError
-from lpr.corner_net import (ARCHITECTURE, INPUT_SIZE, CornerModel, CornerNet,
-                            LetterboxTransform, _decode_candidates,
-                            letterbox_image, RoiConfidenceModel, RoiCornerRefiner, ROI_INPUT_SIZE,
-                            pack_corner_roi_checkpoint)
+from torch import nn
 
 
 class _PeakModel(nn.Module):
@@ -125,7 +133,7 @@ def test_decode_candidate_uses_original_coordinates_and_order():
 
 def test_detect_runs_in_inference_mode_and_respects_confidence():
     image = np.zeros((720, 1160, 3), dtype=np.uint8)
-    transform = LetterboxTransform(.4, .4, 24, 16, 1160, 720, 512, 320)
+    _transform = LetterboxTransform(.4, .4, 24, 16, 1160, 720, 512, 320)
     corners = np.zeros((8, 80, 128), np.float32)
     raw = np.asarray([[100, 150], [420, 150], [420, 240], [100, 240]], np.float32)
     raw[:, 0] = (raw[:, 0]*.4+24)/512

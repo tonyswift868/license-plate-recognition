@@ -4,12 +4,11 @@ import shutil
 from pathlib import Path
 
 import cv2
+import lpr_tools.data.build_plates as builder
 import numpy as np
 import pytest
-
-from lpr.io_utils import imwrite
-import lpr_tools.data.build_plates as builder
 from lpr.config import load_config
+from lpr.io_utils import imwrite
 from lpr_tools.data.ccpd import INDEX_FIELDS
 from lpr_tools.data.manifest import ManifestRow, write_manifest
 
@@ -128,6 +127,7 @@ def test_malformed_frozen_manifest_is_rejected_before_any_crop_write(tmp_path):
 
 def test_pipeline_version_filters_iou_and_matches_true_layout_size(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     import lpr_tools.data.build_plates as module
     from lpr.config import load_config
     from lpr.io_utils import imread

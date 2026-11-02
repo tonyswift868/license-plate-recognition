@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 
 import pytest
-
 from lpr_tools.train.calibrate_box_reader import (
     _report_fold,
     read_calibration_rows,
@@ -116,7 +115,7 @@ def test_history_accepts_packed_cache_only_when_audit_binds_original_pool(tmp_pa
     with cache.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        for index in range(3):
+        for _index in range(3):
             writer.writerow({key: "0" for key in fields})
     tar = cache.parent / "crops.tar"
     tar.write_bytes(b"ustar-test")
@@ -175,7 +174,6 @@ def test_history_accepts_packed_cache_only_when_audit_binds_original_pool(tmp_pa
 
 def test_positive_temperature_keeps_report_string_predictions():
     import torch
-
     from lpr.charset import NUM_CLASSES
 
     generator = torch.Generator().manual_seed(17)

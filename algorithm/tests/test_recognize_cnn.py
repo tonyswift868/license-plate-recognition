@@ -7,7 +7,6 @@ from time import perf_counter
 import numpy as np
 import pytest
 import torch
-
 from lpr.recognize import load_classifier, write_manifest_entry
 from lpr.recognize.cnn import CnnClassifier
 from lpr.recognize.cnn_model import CharCNN
@@ -73,7 +72,7 @@ def test_invalid_input(classifier, chars):
         classifier.predict_proba(chars)
 
 
-def test_training_logs_state_dict_and_manifest(tmp_path, classifier):
+def test_training_logs_state_dict_and_manifest(default_font, tmp_path, classifier):
     import csv
     import json
 

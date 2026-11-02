@@ -3,8 +3,10 @@ import json
 
 import numpy as np
 import pytest
-
 from lpr.io_utils import imread
+from lpr.locate import box_iou, locate
+from lpr.preprocess import preprocess
+from lpr.types import PreprocessOut
 from lpr_tools.synth_scenes import generate, make_scene
 
 
@@ -19,7 +21,8 @@ def test_synth_repeatability_and_coverage():
         assert (q >= 0).all() and (q[:, 0] < 1280).all() and (q[:, 1] < 720).all()
         a, b = q[1]-q[0], q[2]-q[1]
         assert a[0]*b[1] - a[1]*b[0] > 0
-        colors.add(row['color']); layouts.add(row['layout'])
+        colors.add(row['color'])
+        layouts.add(row['layout'])
         assert len(row['plate_text']) == row['layout']
         angles.append(np.degrees(np.arctan2(*(q[1]-q[0])[::-1])))
         widths.append(np.linalg.norm(q[1]-q[0]))
@@ -38,9 +41,6 @@ def test_synth_csv_chinese_path(tmp_path):
     with pytest.raises(ValueError):
         generate(out, -1)
 
-from lpr.locate import box_iou, locate
-from lpr.preprocess import preprocess
-from lpr.types import PreprocessOut
 
 
 def truth_bbox(row):

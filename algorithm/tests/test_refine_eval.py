@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-
 from lpr.types import PlateCandidate
 from lpr_tools.eval_refine import _corner_error, _ordered_reader_read, _summarize
 

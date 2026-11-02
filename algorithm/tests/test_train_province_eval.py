@@ -1,17 +1,21 @@
 """Small contract tests for batch-12 trace parsing and route summaries."""
 from __future__ import annotations
 
+import csv
 import gzip
 import json
-import csv
 from pathlib import Path
-import pytest
 
+import lpr_tools.train.eval_province_readers as province_eval
+import pytest
 from lpr_tools.train.eval_province_readers import (
-    _aggregate, _selected, _timing_summary, standalone_trace, summarize_testset_composition,
+    _aggregate,
+    _selected,
+    _timing_summary,
+    standalone_trace,
+    summarize_testset_composition,
     workflow_trace,
 )
-import lpr_tools.train.eval_province_readers as province_eval
 from lpr_tools.train.score_province_readers import _first_char_patch
 
 
@@ -172,8 +176,8 @@ def test_trace_box_timing_reads_every_candidate_and_checks_trace_match(tmp_path,
 
     monkeypatch.setattr(boxcrop, "crop_box", crop_box)
     monkeypatch.setattr(recognize, "load_box_reader", lambda _path: reader)
-    import torch
     import cv2
+    import torch
     monkeypatch.setattr(torch, "set_num_threads", lambda _count: None)
     monkeypatch.setattr(cv2, "setNumThreads", lambda _count: None)
 

@@ -3,10 +3,16 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 import torch
-
 from lpr.charset import NUM_CLASSES
 from lpr.recognize import load_box_reader, write_manifest_entry
-from lpr.recognize.box_reader import BOX_PAD, INPUT_SIZE, BoxNet, BoxPlateReader, box_tensor, checkpoint
+from lpr.recognize.box_reader import (
+    BOX_PAD,
+    INPUT_SIZE,
+    BoxNet,
+    BoxPlateReader,
+    box_tensor,
+    checkpoint,
+)
 from lpr_tools.train.train_box_reader import cache_contains
 
 

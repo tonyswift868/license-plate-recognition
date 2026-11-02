@@ -1,24 +1,24 @@
 """A-7 multi-source, resumable CNN and calibrated SVM checks."""
 
-import json
 import csv
 import hashlib
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import time
 
 import numpy as np
 import pytest
 import torch
-
 from lpr.recognize.svm import SvmClassifier
-from lpr_tools.train.synth_chars import generate_dataset
-from lpr_tools.train.train_cnn import _load_sources, train as train_cnn
-from lpr_tools.train.train_svm import train as train_svm
 from lpr_tools.train import data as train_data
+from lpr_tools.train.synth_chars import generate_dataset
+from lpr_tools.train.train_cnn import _load_sources
+from lpr_tools.train.train_cnn import train as train_cnn
+from lpr_tools.train.train_svm import train as train_svm
 
 
-def test_mixed_data_directory_sampling_and_partial_classes(tmp_path):
+def test_mixed_data_directory_sampling_and_partial_classes(default_font, tmp_path):
     full = tmp_path / "full"
     partial = tmp_path / "partial"
     generate_dataset(full, per_class=2, seed=1)
@@ -37,7 +37,7 @@ def test_mixed_data_directory_sampling_and_partial_classes(tmp_path):
     assert weights[:first_source_count].sum() / weights.sum() == pytest.approx(0.75)
 
 
-def test_class_sampling_boost_preserves_source_mix(tmp_path):
+def test_class_sampling_boost_preserves_source_mix(default_font, tmp_path):
     from lpr.charset import index_of
 
     primary, supplement = tmp_path / "primary", tmp_path / "supplement"
@@ -56,7 +56,7 @@ def test_class_sampling_boost_preserves_source_mix(tmp_path):
     assert weights[digit_zero] / weights[digit_one] == pytest.approx(2.0)
 
 
-def test_resume_rejects_changed_class_sampling_boost(tmp_path):
+def test_resume_rejects_changed_class_sampling_boost(default_font, tmp_path):
     from lpr.charset import index_of
 
     data = tmp_path / "synth"
@@ -71,7 +71,7 @@ def test_resume_rejects_changed_class_sampling_boost(tmp_path):
                   class_boosts={index_of("0"): 3.0})
 
 
-def test_resume_accepts_pre_boost_checkpoint_without_boosts(tmp_path):
+def test_resume_accepts_pre_boost_checkpoint_without_boosts(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=42)
     checkpoint = tmp_path / "model.checkpoint.pt"
@@ -88,7 +88,7 @@ def test_resume_accepts_pre_boost_checkpoint_without_boosts(tmp_path):
     assert [row["epoch"] for row in history] == [2]
 
 
-def test_init_weights_warm_starts_with_fresh_optimizer_and_records_provenance(
+def test_init_weights_warm_starts_with_fresh_optimizer_and_records_provenance(default_font,
         tmp_path, monkeypatch):
     from lpr.recognize.cnn_model import CharCNN
     from lpr_tools.train import train_cnn as module
@@ -127,7 +127,7 @@ def test_init_weights_warm_starts_with_fresh_optimizer_and_records_provenance(
     named_parameters = list(CharCNN().named_parameters())
     assert captured["weights_only"] is True
     assert captured["optimizer_initial_state_size"] == 0
-    for (name, _), actual in zip(named_parameters, captured["parameters"]):
+    for (name, _), actual in zip(named_parameters, captured["parameters"], strict=False):
         torch.testing.assert_close(actual, initial[name], rtol=0, atol=0)
     assert hashlib.sha256(init_path.read_bytes()).hexdigest() == source_hash
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -143,7 +143,7 @@ def test_init_weights_warm_starts_with_fresh_optimizer_and_records_provenance(
     assert sidecar["init_weights"] == expected_origin
 
 
-def test_init_weights_rejects_incompatible_state_dict_keys(tmp_path):
+def test_init_weights_rejects_incompatible_state_dict_keys(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=402)
     invalid = tmp_path / "invalid.pt"
@@ -163,7 +163,7 @@ def test_init_weights_rejects_non_tensor_or_non_finite_source(tmp_path, state):
         _state_dict_source(invalid)
 
 
-def test_init_weights_rejects_resume_combination_and_output_collision(tmp_path):
+def test_init_weights_rejects_resume_combination_and_output_collision(default_font, tmp_path):
     from lpr.recognize.cnn_model import CharCNN
 
     data = tmp_path / "synth"
@@ -192,7 +192,7 @@ def test_init_weights_cli_rejects_resume_combination(monkeypatch):
     assert exc.value.code == 2
 
 
-def test_samples_per_epoch_controls_sampler_and_loss_normalization(tmp_path, monkeypatch):
+def test_samples_per_epoch_controls_sampler_and_loss_normalization(default_font, tmp_path, monkeypatch):
     from lpr_tools.train import train_cnn as module
 
     data = tmp_path / "synth"
@@ -227,7 +227,7 @@ def test_samples_per_epoch_controls_sampler_and_loss_normalization(tmp_path, mon
     assert sidecar["actual_draws_per_epoch"] == 17
 
 
-def test_resume_rejects_changed_samples_per_epoch(tmp_path):
+def test_resume_rejects_changed_samples_per_epoch(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=405)
     out = tmp_path / "sampled.pt"
@@ -350,7 +350,7 @@ def test_parallel_reader_keeps_order_across_bounded_batches(tmp_path, monkeypatc
     assert [int(image[0, 0]) for image in images] == [index % 256 for index in range(len(paths))]
 
 
-def test_resume_matches_uninterrupted_and_keeps_inference_state_dict(tmp_path):
+def test_resume_matches_uninterrupted_and_keeps_inference_state_dict(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=4, seed=42)
     full_path = tmp_path / "full.pt"
@@ -374,9 +374,10 @@ def test_resume_matches_uninterrupted_and_keeps_inference_state_dict(tmp_path):
     assert metadata["train_seconds"] > 0
 
 
-def test_resume_rejects_incompatible_data(tmp_path):
+def test_resume_rejects_incompatible_data(default_font, tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
-    generate_dataset(a, per_class=2, seed=1); generate_dataset(b, per_class=2, seed=2)
+    generate_dataset(a, per_class=2, seed=1)
+    generate_dataset(b, per_class=2, seed=2)
     checkpoint = tmp_path / "model.checkpoint.pt"
     out = tmp_path / "model.pt"
     train_cnn(a, out, version="v", epochs=1, batch_size=130, checkpoint_path=checkpoint)
@@ -385,7 +386,7 @@ def test_resume_rejects_incompatible_data(tmp_path):
                   checkpoint_path=checkpoint, resume=checkpoint)
 
 
-def test_train_only_supplement_is_valid_and_checkpoint_is_safe(tmp_path):
+def test_train_only_supplement_is_valid_and_checkpoint_is_safe(default_font, tmp_path):
     primary, supplement = tmp_path / "primary", tmp_path / "supplement"
     generate_dataset(primary, per_class=2, seed=11)
     generate_dataset(supplement, per_class=2, seed=12)
@@ -406,7 +407,7 @@ def test_train_only_supplement_is_valid_and_checkpoint_is_safe(tmp_path):
 
 
 @pytest.mark.parametrize("lr,weight_decay", [(float("nan"), 1e-4), (1e-3, float("inf"))])
-def test_rejects_nonfinite_hyperparameters(tmp_path, lr, weight_decay):
+def test_rejects_nonfinite_hyperparameters(default_font, tmp_path, lr, weight_decay):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=3)
     with pytest.raises(ValueError, match="positive"):
@@ -414,7 +415,7 @@ def test_rejects_nonfinite_hyperparameters(tmp_path, lr, weight_decay):
                   lr=lr, weight_decay=weight_decay)
 
 
-def test_rejects_checkpoint_output_path_collision(tmp_path):
+def test_rejects_checkpoint_output_path_collision(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=4)
     out = tmp_path / "same.pt"
@@ -422,7 +423,7 @@ def test_rejects_checkpoint_output_path_collision(tmp_path):
         train_cnn(data, out, version="bad", epochs=1, checkpoint_path=out)
 
 
-def test_validation_group_metrics_and_best_publish_artifact(tmp_path):
+def test_validation_group_metrics_and_best_publish_artifact(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=2, seed=51)
     out = tmp_path / "publish.pt"
@@ -439,13 +440,12 @@ def test_validation_group_metrics_and_best_publish_artifact(tmp_path):
     assert manifest["val_char_acc"] == sidecar["val_char_acc"] == history[-1]["val_char_acc"]
 
 
-def test_calibrated_svm_roundtrip_and_excludes_uncalibratable_class(tmp_path):
+def test_calibrated_svm_roundtrip_and_excludes_uncalibratable_class(default_font, tmp_path):
     data = tmp_path / "synth"
     generate_dataset(data, per_class=4, seed=42)
     out = tmp_path / "calibrated.joblib"
     accuracy = train_svm(data, out, version="cal", calibrated=True, max_per_class=2)
     assert 0 <= accuracy <= 1
-    from lpr.recognize.svm import SvmClassifier
     loaded = SvmClassifier.from_file(out, version="cal")
     assert loaded.predict_proba(np.zeros((2, 32, 32), dtype=np.uint8)).shape == (2, 65)
     train_one = data / "train" / "0"

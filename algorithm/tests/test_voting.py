@@ -1,11 +1,12 @@
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from lpr.errors import failure_result
 from lpr.testing import FakeRecognizer
 from lpr.types import RecogStatus as S
-from lpr.voting import vote, PlateVoteSession
+from lpr.voting import PlateVoteSession, vote
 
 
 def frame(plate="陕A12345", confidence=.97):
@@ -51,7 +52,8 @@ def test_stream_agreement_timeout_reset(cfg):
     assert s.feed(frame("陕A12346"),3.01).frames_used == 3
     s.feed(a,4)
     assert s.flush().frames_used == 1 and s.flush() is None
-    s.feed(a,5); s.reset()
+    s.feed(a,5)
+    s.reset()
     assert s.flush() is None
 
 
@@ -72,8 +74,12 @@ def test_threaded_stream():
 
 def test_parameters_and_time():
     for kwargs in ({"agree_frames":0},{"window_s":0},{"min_frames":0},{"min_confidence":2}):
-        with pytest.raises(ValueError): PlateVoteSession(**kwargs)
+        with pytest.raises(ValueError):
+            PlateVoteSession(**kwargs)
     for kwargs in ({"min_frames":0},{"min_confidence":2}):
-        with pytest.raises(ValueError): vote([],**kwargs)
-    s=PlateVoteSession();s.feed(frame(),1)
-    with pytest.raises(ValueError):s.feed(frame(),0)
+        with pytest.raises(ValueError):
+            vote([],**kwargs)
+    s=PlateVoteSession()
+    s.feed(frame(),1)
+    with pytest.raises(ValueError):
+        s.feed(frame(),0)

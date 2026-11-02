@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
@@ -81,14 +80,15 @@ def score(kind: str, model_path: Path, data_dir: Path, output: Path | None = Non
     import cv2
     import numpy as np
     import torch
-    from lpr.charset import CHARSET, CHAR_TO_INDEX, PROVINCES
     from lpr.boxcrop import crop_box
+    from lpr.charset import CHAR_TO_INDEX, CHARSET, PROVINCES
     from lpr.recognize import load_box_reader, load_classifier, load_plate_reader
-    from lpr.recognize.crnn import CrnnNet, CrnnReader
-    from lpr.recognize.cnn_model import CharCNN
     from lpr.recognize.box_reader import BoxPlateReader, model_from_checkpoint
-    from lpr_tools.train.province_synth import replace_province
+    from lpr.recognize.cnn_model import CharCNN
+    from lpr.recognize.crnn import CrnnNet, CrnnReader
+
     from lpr_tools.train.province_char_input import normalized_first_char
+    from lpr_tools.train.province_synth import replace_province
 
     if kind not in {"box", "crnn", "char"}:
         raise ValueError("kind must be box, crnn, or char")

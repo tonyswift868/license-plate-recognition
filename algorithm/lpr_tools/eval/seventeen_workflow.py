@@ -10,8 +10,8 @@ from .runtime_acceptance import _rows, compare
 
 def load_detector_384(model_path):
     """Keep verified checkpoint weights/threshold; apply the registered study size."""
-    from lpr.recognize import load_corner_detector
     from lpr.plate_det import PlateDetector
+    from lpr.recognize import load_corner_detector
     detector = load_corner_detector(Path(model_path))
     if not isinstance(detector, PlateDetector):
         raise ValueError('Batch 17 requires plate_det')
@@ -29,11 +29,12 @@ def load_box_reader_checked(model_path):
 
 def select(args):
     """Freeze fit optimum, then apply the preregistered full-data exception."""
-    from lpr.config import load_config
     from lpr.arbitration import arbitrate
-    from .four_threshold_search import search_fit, tighten_full, score_records, replay_auto
-    from .three_route_expected import export_expected
+    from lpr.config import load_config
+
+    from .four_threshold_search import replay_auto, score_records, search_fit, tighten_full
     from .route_split import assert_content_separation
+    from .three_route_expected import export_expected
     directory = Path(args.trace_dir)
     output = Path(args.out)
     output.mkdir(parents=True, exist_ok=False)
@@ -99,7 +100,7 @@ def select(args):
     old_report = json.loads(Path(args.old_report).read_text(encoding='utf-8'))
     if load_config(args.old_config).model_dump(mode='json') != old_report['config']['effective_config']:
         raise ValueError('old default differs from verified Batch 16 baseline')
-    for r, previous in zip(selected_rows, old):
+    for r, previous in zip(selected_rows, old, strict=False):
         if any(r[k] != previous[k] for k in ('truth', 'partition', 'subset', 'brightness')):
             raise ValueError('old/new evaluation metadata differs')
     current_metrics = summary(selected_rows)

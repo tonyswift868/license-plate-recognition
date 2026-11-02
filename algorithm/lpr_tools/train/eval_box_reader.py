@@ -15,22 +15,24 @@ import os
 import random
 import statistics
 import time
-from datetime import datetime, timezone
 from collections import defaultdict
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from lpr_tools.train.box_data import bbox_from_quad
+from lpr.config import ALGORITHM_DIR
+
+from lpr_tools.train.box_data import bbox_from_quad, sample_jitter
 from lpr_tools.train.box_data import jitter_bbox as apply_box_jitter
 from lpr_tools.train.box_data import read_jitter_samples as measured_box_deltas
-from lpr_tools.train.box_data import sample_jitter
 
 ROOT = Path(__file__).resolve().parents[3]
 ALGORITHM = ROOT / "algorithm"
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
-VAL_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
-DEV_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv")
-CEILING_REPORT = Path(r"D:\keshe2\algorithm\out\tmp_arch\ceiling_v2\report.json")
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
+VAL_MANIFEST = ALGORITHM_DIR / "data/index/val1000_v1.csv"
+DEV_MANIFEST = ALGORITHM_DIR / "data/index/devhard_v1.csv"
+CEILING_REPORT = ALGORITHM_DIR / "out/tmp_arch/ceiling_v2/report.json"
 MODEL = ALGORITHM / "models" / "box_reader_v1.pt"
 JITTER_SOURCE = ROOT / "algorithm" / "out" / "receipts" / "batch9" / "geometry" / "train_per_image.jsonl"
 TUNE_SUBSETS = {"db", "blur", "tilt", "rotate", "fn", "challenge", "weather"}
@@ -239,8 +241,8 @@ def _read_tune(reader, rows: list[dict[str, str]], source: Path,
 
 def _fixed_rows(index_path: Path, manifest_path: Path, purpose: str) -> list[dict[str, Any]]:
     from lpr_tools.data.ccpd import parse_ccpd_name
-    from lpr_tools.eval.index_samples import fixed_manifest_samples
     from lpr_tools.data.manifest import image_path
+    from lpr_tools.eval.index_samples import fixed_manifest_samples
 
     samples, _ = fixed_manifest_samples(index_path, manifest_path, purpose=purpose)
     result = []
@@ -324,8 +326,8 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
         val_manifest: Path = VAL_MANIFEST, dev_manifest: Path = DEV_MANIFEST,
         ceiling_path: Path = CEILING_REPORT, jitter_path: Path = JITTER_SOURCE, seed: int = 7319,
         include_actual: bool = True) -> dict[str, Any]:
-    import torch
     import cv2
+    import torch
     from lpr.config import load_config
     from lpr.recognize import load_box_reader, load_corner_detector
     from lpr.recognize.box_reader import INPUT_SIZE
@@ -399,7 +401,7 @@ def run(tune_csv: Path, output: Path, *, config_path: Path | None = None,
         "corner_source": ALGORITHM / "lpr" / "corner_net.py",
     }
     result["provenance"] = {
-        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "created_utc": datetime.now(UTC).isoformat(),
         "config_path": str(config_source.resolve()) if config_source else None,
         "config_sha256": config_digest,
         "files": {name: {"path": str(path.resolve()), "sha256": _sha256_file(path)}

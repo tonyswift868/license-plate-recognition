@@ -3,13 +3,12 @@ from __future__ import annotations
 import csv
 import json
 import shutil
-from pathlib import Path
-import uuid
 import tarfile
+import uuid
+from pathlib import Path
 
 import numpy as np
 import pytest
-
 from lpr_tools.train import cache_box_crops as cache
 from lpr_tools.train.box_data import sha256_file
 

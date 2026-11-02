@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import hashlib
 import gzip
+import hashlib
 import json
-from pathlib import Path
 
 import pytest
 from lpr_tools.eval.fallback_refine import (
     PREREG_PATH,
     RULES,
-    _decision,
     _complete_fallback,
+    _decision,
     _fallback_feature_view,
     _green_gate_minimum,
+    _legacy_sr,
     _load_frozen_rule_id,
     _load_policy,
-    _legacy_sr,
     _manual_best_sr,
     _rule_target,
     apply_frozen,

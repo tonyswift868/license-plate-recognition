@@ -33,7 +33,7 @@ def analyze(normal_path, oracle_path):
     plated = [(n, o) for n, o in decoded if n["category"] != "np"]
     normal_errors = [(n, o) for n, o in plated if n["prediction"] != n["truth"]]
     loss = Counter()
-    for n, o in normal_errors:
+    for n, _o in normal_errors:
         if n.get("top3_hit") is False:
             bucket = "localization_top3_miss"
         elif n.get("top3_hit") is True and n.get("status") in {"SEG_FAILED", "NO_PLATE"}:

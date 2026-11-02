@@ -3,9 +3,15 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from lpr_tools.eval_det import (bbox_iou, corner_error_px, first_ok_read,
-                                BoxCrnnAdapter, summarize_np, topk_hits,
-                                validate_purpose)
+from lpr_tools.eval_det import (
+    BoxCrnnAdapter,
+    bbox_iou,
+    corner_error_px,
+    first_ok_read,
+    summarize_np,
+    topk_hits,
+    validate_purpose,
+)
 
 
 @dataclass

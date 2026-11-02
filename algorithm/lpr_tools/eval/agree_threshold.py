@@ -17,21 +17,25 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr import pipeline
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.locate import locate
 from lpr.preprocess import preprocess
 from lpr.segment import segment
 from lpr.types import RecogStatus as S
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
-from lpr_tools.eval.common import effective_config_info, make_recognizer
 from lpr_tools.eval.agree_bits import DecisionBits
-from lpr_tools.eval.index_samples import FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST, fixed_manifest_samples
+from lpr_tools.eval.common import effective_config_info, make_recognizer
+from lpr_tools.eval.index_samples import (
+    FIXED_HARD_MANIFEST,
+    FIXED_VAL_MANIFEST,
+    fixed_manifest_samples,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 
 
 def sha256(path: Path) -> str:
@@ -350,7 +354,7 @@ def exact_branch_bound(records, permille, *, max_nodes=200_000, checkpoint_path=
                      (.5, .7, .8, .9, .92, .95, .97, .98, .99, .995, .999, 1.0, 1.0000000000000002),
                      (.5, .7, .8, .9, .92, .95, .97, .98, .99, .995, .999, 1.0, 1.0000000000000002))
         seed_indexes = []
-        for values, seed_values in zip(domains, seed_sets):
+        for values, seed_values in zip(domains, seed_sets, strict=False):
             seed_indexes.append(sorted({min(len(values)-1, bisect.bisect_left(values, v)) for v in seed_values}))
         seeds = []
         for prefer in ("segment", "reader"):
@@ -360,7 +364,7 @@ def exact_branch_bound(records, permille, *, max_nodes=200_000, checkpoint_path=
                         seeds.append(params_at((a, s, r), prefer))
         for item in seed_params:
             indexes = tuple(min(len(values)-1, bisect.bisect_left(values, float(item[key])))
-                            for values, key in zip(domains, ("agree_min", "solo_seg", "solo_reader")))
+                            for values, key in zip(domains, ("agree_min", "solo_seg", "solo_reader"), strict=False))
             seeds.append(params_at(indexes, item["prefer"]))
         seen_seeds = set()
         for params in seeds:
@@ -624,7 +628,7 @@ def main(argv=None):
             samples.extend(SimpleNamespace(row=row, split=split,
                                            subset=row.source.rsplit("/", 1)[-1]) for row in rows)
         if len(records) != len(samples) or any(record["path"] != sample.row.path
-                                               for record, sample in zip(records, samples)):
+                                               for record, sample in zip(records, samples, strict=False)):
             raise ValueError("cannot repair trace: fixed ordered rows differ")
         original_trace = out / "trace.pre-invalid-repair.jsonl"
         if original_trace.exists():
@@ -634,7 +638,7 @@ def main(argv=None):
                                                         config=args.config))
         repaired = []
         replacements = []
-        for index, (record, sample) in enumerate(zip(records, samples)):
+        for index, (record, sample) in enumerate(zip(records, samples, strict=False)):
             has_valid = any(route and route.get("valid", True)
                             for rect in record.get("rects", [])
                             for route in (rect.get("segment"), rect.get("reader")))

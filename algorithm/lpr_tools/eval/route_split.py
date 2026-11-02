@@ -1,10 +1,10 @@
 """Fixed seed, label-independent half split shared by three-route diagnostics."""
-from collections import defaultdict
 import hashlib
 import json
-from pathlib import Path
 import posixpath
 import random
+from collections import defaultdict
+from pathlib import Path
 
 
 def path_key(path):

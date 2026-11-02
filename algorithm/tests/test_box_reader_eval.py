@@ -4,15 +4,14 @@ import json
 import math
 
 import pytest
-
 from lpr_tools.train.eval_box_reader import (
     _actual_group_summary,
+    _read_csv,
     apply_box_jitter,
     bbox_from_quad,
     choose_highest_legal,
     measured_box_deltas,
     summarize_read_timings,
-    _read_csv,
 )
 
 

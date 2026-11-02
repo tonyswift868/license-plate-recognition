@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -13,7 +12,6 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
-
 from lpr.recognize.crnn import CrnnNet, CrnnReader
 
 CONFIDENCE_EDGES = (0.0, 0.5, 0.8, 0.9, 0.95, 0.99, 1.0)
@@ -70,7 +68,7 @@ def _make_accumulator() -> dict[str, Any]:
     return {"n": 0, "plate_correct": 0, "char_correct": 0, "char_total": 0,
             "conf_bins": [{"lower": lo, "upper": hi, "n": 0, "correct": 0,
                            "confidence_sum": 0.0}
-                          for lo, hi in zip(CONFIDENCE_EDGES[:-1], CONFIDENCE_EDGES[1:])]}
+                          for lo, hi in zip(CONFIDENCE_EDGES[:-1], CONFIDENCE_EDGES[1:], strict=False)]}
 
 
 def _confidence_bin(confidence: float) -> int:
@@ -84,7 +82,7 @@ def _add(acc: dict[str, Any], truth: str, prediction: str, confidence: float) ->
     correct = prediction == truth
     acc["n"] += 1
     acc["plate_correct"] += int(correct)
-    acc["char_correct"] += sum(a == b for a, b in zip(truth, prediction))
+    acc["char_correct"] += sum(a == b for a, b in zip(truth, prediction, strict=False))
     acc["char_total"] += max(len(truth), len(prediction))
     bucket = acc["conf_bins"][_confidence_bin(confidence)]
     bucket["n"] += 1

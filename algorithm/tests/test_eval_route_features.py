@@ -1,5 +1,4 @@
 import pytest
-
 from lpr_tools.eval.route_features import (
     _box_gray_mean,
     _candidate_agrees,

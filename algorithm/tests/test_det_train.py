@@ -1,17 +1,23 @@
 """CPU tests for target creation and detector training loss semantics."""
+import json
+import tempfile
 import unittest
 from array import array
-import tempfile
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import torch
-
-from lpr_tools.train_det import (CompactPool, detector_geometry_is_valid,
-                                 background_negative, detector_loss, jpeg_size, make_targets,
-                                 read_training_sample, reduced_to_original)
+from lpr_tools.train_det import (
+    CompactPool,
+    background_negative,
+    detector_geometry_is_valid,
+    detector_loss,
+    jpeg_size,
+    make_targets,
+    read_training_sample,
+    reduced_to_original,
+)
 
 
 class DetectorTrainingLossTests(unittest.TestCase):

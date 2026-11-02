@@ -14,12 +14,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from lpr.charset import CHAR_TO_INDEX, CHARSET
+from lpr.recognize import file_sha256, write_manifest_entry
+from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from lpr.charset import CHARSET, CHAR_TO_INDEX
-from lpr.recognize import file_sha256, write_manifest_entry
-from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
 from lpr_tools.train.train_crnn import _collate, _worker_init
 
 SUBSETS = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
@@ -150,7 +150,7 @@ def evaluate(model, rows, batch_size=128):
     model.eval()
     offset = 0
     with torch.inference_mode():
-        for images, targets, lengths, _ in DataLoader(Crops(rows), batch_size=batch_size, collate_fn=_collate):
+        for images, _targets, _lengths, _ in DataLoader(Crops(rows), batch_size=batch_size, collate_fn=_collate):
             indices = model(images).argmax(-1).transpose(0, 1).tolist()
             for ids in indices:
                 row = rows[offset]
@@ -169,7 +169,7 @@ def evaluate(model, rows, batch_size=128):
                 for key in keys:
                     metrics[key][0] += int(prediction == row.text)
                     metrics[key][1] += 1
-                metrics["characters"][0] += sum(a == b for a, b in zip(prediction, row.text))
+                metrics["characters"][0] += sum(a == b for a, b in zip(prediction, row.text, strict=False))
                 metrics["characters"][1] += max(len(prediction), len(row.text))
     return {key: {"correct": a, "n": n, "accuracy": a / n} for key, (a, n) in metrics.items()}
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.io_utils import imwrite
 
 COLORS = {"blue": (180, 65, 15), "yellow": (20, 205, 235), "green": (110, 210, 100)}
@@ -29,7 +28,7 @@ def draw_plate(text: str = "皖A12345", color: str = "blue") -> np.ndarray:
         plate = np.clip(plate * gradient, 0, 255).astype(np.uint8)
     cv2.rectangle(plate, (3, 3), (width - 4, 136), fg, 2)
     centers = CENTERS8 if len(text) == 8 else CENTERS7
-    for i, (char, center) in enumerate(zip(text, centers)):
+    for i, (char, center) in enumerate(zip(text, centers, strict=False)):
         x = round(float(center))
         if i == 0:
             cv2.rectangle(plate, (x - 20, 26), (x + 20, 113), fg, 5)

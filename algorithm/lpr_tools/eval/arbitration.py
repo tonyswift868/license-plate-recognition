@@ -8,24 +8,23 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import sys
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
-
 from lpr import pipeline
+from lpr.config import ALGORITHM_DIR
 from lpr.locate import locate
 from lpr.preprocess import preprocess
 from lpr.segment import segment
 from lpr.types import RecogStatus as S
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest, write_manifest
-from .common import effective_config_info, make_recognizer
-from .index_samples import DEFAULT_SEED, DEFAULT_VALIDATION_N, path_key, sample_validation
 
+from .common import effective_config_info, make_recognizer
+from .index_samples import DEFAULT_SEED, path_key, sample_validation
 
 STATUS_RANK = {"OK": 3, "LOW_CONFIDENCE": 2, "INVALID_FORMAT": 1}
 
@@ -304,18 +303,18 @@ def analyze(records: list[dict]) -> dict:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Exhaustively trace val pipeline arbitration attempts")
-    parser.add_argument("--index", default=r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
-    parser.add_argument("--exclude-manifest", default=r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv")
+    parser.add_argument("--index", default=str(ALGORITHM_DIR / "data/index/ccpd_index.csv"))
+    parser.add_argument("--exclude-manifest", default=str(ALGORITHM_DIR / "data/index/testset_manifest_v1.csv"))
     parser.add_argument("--n", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--manifest", default=r"D:\keshe2\algorithm\data\index\val1000_v1.csv",
+    parser.add_argument("--manifest", default=str(ALGORITHM_DIR / "data/index/val1000_v1.csv"),
                         help="fixed ordered validation manifest")
     parser.add_argument("--config", default=str(Path(__file__).parents[2] / "config" / "default.toml"))
     parser.add_argument("--out", required=True)
     parser.add_argument("--validation-run-dir", help="reuse completed daily val1000 output directory and its sampling report")
     parser.add_argument("--reanalyze", action="store_true", help="recompute summaries from an existing attempts.jsonl without model inference")
     args = parser.parse_args(argv)
-    fixed_manifest = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv").resolve()
+    fixed_manifest = ALGORITHM_DIR / "data/index/val1000_v1.csv".resolve()
     if Path(args.manifest).resolve() != fixed_manifest:
         parser.error("--manifest must be the fixed shared val1000_v1.csv")
     if args.validation_run_dir:
@@ -399,7 +398,7 @@ def main(argv=None):
                           "wrong_with_other_correct_attempt": report["wrong_with_other_correct_attempt"],
                           "alternative_rules_at_0_80": report["alternative_rules_at_0_80"]}, ensure_ascii=False, indent=2))
         return 0
-    validation_report = None
+    _validation_report = None
     if args.manifest:
         manifest = Path(args.manifest)
         rows = read_manifest(manifest, check_files=True)
@@ -465,8 +464,8 @@ def main(argv=None):
     selected_keys = [path_key(image_path(s.row, manifest)) for s in selected]
     frozen_paths, frozen_hashes = set(), set()
     exclusion_manifests = [Path(args.exclude_manifest), algorithm_dir / "tests/data/golden/golden_manifest.csv",
-                           Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv"),
-                           Path(r"D:\keshe2\algorithm\data\index\undecodable.csv")]
+                           ALGORITHM_DIR / "data/index/devhard_v1.csv",
+                           ALGORITHM_DIR / "data/index/undecodable.csv"]
     for frozen_manifest in exclusion_manifests:
         if not frozen_manifest.is_file():
             raise FileNotFoundError(f"required frozen exclusion list missing: {frozen_manifest}")

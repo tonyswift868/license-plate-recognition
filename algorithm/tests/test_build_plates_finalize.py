@@ -5,7 +5,6 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-
 from lpr_tools.data.build_plates import FIELDS
 from lpr_tools.data.finalize_plates import finalize
 

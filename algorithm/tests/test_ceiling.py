@@ -1,12 +1,17 @@
-import numpy as np
-import pytest
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 from lpr.config import load_config
 from lpr_tools.data.manifest import ManifestRow
 from lpr_tools.eval import ceiling
-from lpr_tools.eval.ceiling import (_ensure_output_available, _gt_rect, _iou,
-                                   _runtime_overrides, _summarize)
+from lpr_tools.eval.ceiling import (
+    _ensure_output_available,
+    _gt_rect,
+    _iou,
+    _runtime_overrides,
+    _summarize,
+)
 
 
 def _record(subset="ccpd_db", brightness=19, hit=True, actual=True, gt=True):

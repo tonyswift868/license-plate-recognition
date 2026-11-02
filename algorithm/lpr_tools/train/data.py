@@ -1,11 +1,10 @@
 """Shared directory dataset reader for CNN and baselines."""
 
-from pathlib import Path
 from concurrent.futures import Executor, ThreadPoolExecutor
+from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.charset import NUM_CLASSES
 from lpr.io_utils import imread
 

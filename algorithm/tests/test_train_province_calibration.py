@@ -1,16 +1,18 @@
 """Small tensor-contract tests for province model calibration and export."""
 from __future__ import annotations
 
-import pytest
-import torch
 import hashlib
 import json
 
+import lpr_tools.train.calibrate_province_readers as calibration
+import pytest
+import torch
 from lpr_tools.train.calibrate_province_readers import (
-    _char_province_only, _temperature_export, _unwrap_model,
+    _char_province_only,
+    _temperature_export,
+    _unwrap_model,
     _validate_training_history,
 )
-import lpr_tools.train.calibrate_province_readers as calibration
 
 
 def test_unwraps_only_matching_province_training_checkpoint():
@@ -81,7 +83,8 @@ def test_history_proof_checks_full_epochs_provenance_and_stable_best(tmp_path, m
     independent = data / "independent_audit.json"
     for path in (init, sampler, tune):
         path.write_bytes(path.name.encode())
-    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
     audit = {"schema": "province-coverage-data-v1", "outputs": {
         index.name: {"sha256": digest(index)},
     }, "source_hashes": {"batch11_tune_sha256": digest(tune)}}
@@ -118,11 +121,13 @@ def test_history_proof_accepts_real_batch12_metadata_and_checkpoint_contract(tmp
     index = data / "combined_train.csv"
     audit = data / "province_audit.json"
     sampler = root / "algorithm" / "out" / "data" / "batch11" / "sampler.json"
-    if not all(p.exists() for p in (index, audit, sampler, tune)):
-        pytest.skip("第十二批本地训练数据只在 01 工位（out/ 不入库）")
     init = root / "algorithm" / "models" / "box_reader_v2.pt"
     augmentation_source = root / "algorithm" / "lpr_tools" / "train" / "province_synth.py"
-    font = Path(r"C:\Windows\Fonts\simhei.ttf")
+    from lpr_tools.train.province_synth import DEFAULT_FONT
+    font = DEFAULT_FONT
+    missing = [str(path) for path in (index, audit, sampler, tune, init, font) if not path.is_file()]
+    if missing:
+        pytest.skip("missing local batch12 inputs: " + ", ".join(missing))
 
     def sha(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()

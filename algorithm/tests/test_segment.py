@@ -1,16 +1,23 @@
 import cv2
 import numpy as np
 import pytest
-
 from lpr import charnorm
-from lpr.locate import locate, box_iou
+from lpr.locate import box_iou, locate
 from lpr.preprocess import preprocess
 from lpr.rectify import rectify
-from lpr.segment import (_aligned_slots, _crossing_edge_ink, _fallback_binary_from_gray,
-                         _glyph_like_border_component,
-                         _fit_slots_to_text_extent, _segment_binary, binary_plate, segment)
-from lpr.types import RectifiedPlate, PlateCandidate
+from lpr.segment import (
+    _aligned_slots,
+    _crossing_edge_ink,
+    _fallback_binary_from_gray,
+    _fit_slots_to_text_extent,
+    _glyph_like_border_component,
+    _segment_binary,
+    binary_plate,
+    segment,
+)
+from lpr.types import RectifiedPlate
 from lpr_tools.synth_scenes import draw_plate, make_scene
+
 from .test_locate import truth_bbox
 
 
@@ -30,9 +37,12 @@ def test_segment_clean_polarity_boxes_and_normalization(cfg, color, layout, bina
     normalize_inputs = []
     unify, normalize = charnorm.unify_polarity, charnorm.normalize_char
     def tracked_unify(g, c):
-        calls.append(('polarity', c)); return unify(g, c)
+        calls.append(('polarity', c))
+        return unify(g, c)
     def tracked_normalize(crop):
-        calls.append(('normalize', crop.shape)); normalize_inputs.append(crop.copy()); return normalize(crop)
+        calls.append(('normalize', crop.shape))
+        normalize_inputs.append(crop.copy())
+        return normalize(crop)
     monkeypatch.setattr(charnorm, 'unify_polarity', tracked_unify)
     monkeypatch.setattr(charnorm, 'normalize_char', tracked_normalize)
     result = segment(rect, layout, scfg)
@@ -44,7 +54,7 @@ def test_segment_clean_polarity_boxes_and_normalization(cfg, color, layout, bina
     slots = _aligned_slots(binary, scfg.layout7_centers if layout == 7 else scfg.layout8_centers,
                            scfg.layout7_char_w if layout == 7 else scfg.layout8_char_w)
     assert len(normalize_inputs) == layout
-    for i, ((left, right), box, char) in enumerate(zip(slots, result.boxes, result.chars)):
+    for i, ((left, right), box, char) in enumerate(zip(slots, result.boxes, result.chars, strict=False)):
         x, y, w, h = box
         assert 0 <= x < x+w <= rect.image.shape[1] and 0 <= y < y+h <= 80
         assert np.array_equal(char, normalize(g[:, left:right]))
@@ -112,7 +122,7 @@ def _legacy_aligned_slots(binary, centers, char_w):
             score = (total + .1*len(centers)*amounts.min() - .5*boundary_ink
                      - .05*abs(offset)*h - .02*abs(scale-1)*w*h)
             if score > best_score:
-                best_score, best = score, list(zip(left.tolist(), right.tolist()))
+                best_score, best = score, list(zip(left.tolist(), right.tolist(), strict=False))
     return best
 
 

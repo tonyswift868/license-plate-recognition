@@ -14,8 +14,10 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-from lpr_tools.eval.three_route import ROUTE_PAIRS, _fallback, _valid, validate_records
+from lpr.config import ALGORITHM_DIR
+
 from lpr_tools.eval.route_split import path_key, split_assignments
+from lpr_tools.eval.three_route import ROUTE_PAIRS, _fallback, _valid, validate_records
 
 TAU_AGREE = 0.8839523792266846
 TAU_BOX = 0.9605637192726135
@@ -462,8 +464,8 @@ def _load_or_create_assignments(records, split_json=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trace", default=r"D:\keshe2\algorithm\out\tmp_arch\three_v1\live.jsonl.gz")
-    parser.add_argument("--base-report", default=r"D:\keshe2\algorithm\out\tmp_arch\three_v1\report.json")
+    parser.add_argument("--trace", default=str(ALGORITHM_DIR / "out/tmp_arch/three_v1/live.jsonl.gz"))
+    parser.add_argument("--base-report", default=str(ALGORITHM_DIR / "out/tmp_arch/three_v1/report.json"))
     parser.add_argument("--split-json", required=True, help="shared content-safe fit/hold assignment JSON")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)

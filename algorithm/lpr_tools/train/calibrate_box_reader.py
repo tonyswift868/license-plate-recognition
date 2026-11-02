@@ -7,11 +7,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lpr.charset import CHAR_TO_INDEX
-from lpr_tools.train.box_data import bbox_from_quad
+from lpr.config import ALGORITHM_DIR
 from lpr.plate_rules import match_layout
+
+from lpr_tools.train.box_data import bbox_from_quad
+
+if TYPE_CHECKING:
+    import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_INDEX = ROOT / "algorithm" / "out" / "data" / "batch10" / "tune.csv"
@@ -20,7 +25,7 @@ DEFAULT_POOL_AUDIT = ROOT / "algorithm" / "out" / "data" / "batch10" / "audit.js
 DEFAULT_BEST = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "best.pt"
 DEFAULT_MODEL = ROOT / "algorithm" / "models" / "box_reader_v1.pt"
 DEFAULT_REPORT = ROOT / "algorithm" / "out" / "train" / "box_reader_v1" / "calibration_report.json"
-DEFAULT_CACHE_INDEX = Path(r"D:\keshe2\algorithm\data\boxcrop_cache\box_reader_v1\index.csv")
+DEFAULT_CACHE_INDEX = ALGORITHM_DIR / "data/boxcrop_cache/box_reader_v1/index.csv"
 DEFAULT_CACHE_AUDIT = DEFAULT_CACHE_INDEX.parent / "audit.json"
 EXPECTED_PER_FOLD = 1050
 MIN_RELEASE_EPOCHS = 30
@@ -320,10 +325,9 @@ def _collect_logits(model, rows: list[dict[str, str]], box_pad: tuple[float, flo
                     index_path: Path, input_size: tuple[int, int]
                     ) -> list[torch.Tensor]:
     import torch
-
     from lpr.boxcrop import crop_box
     from lpr.io_utils import imread
-    from lpr.recognize.box_reader import BoxNet, box_tensor
+    from lpr.recognize.box_reader import box_tensor
 
     logits_list = []
     for row in rows:
@@ -348,14 +352,14 @@ def _collect_logits(model, rows: list[dict[str, str]], box_pad: tuple[float, flo
 def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
                  temperature: float) -> dict[str, Any]:
     import torch
-
     from lpr.recognize.crnn import _greedy_decode
+
     from lpr_tools.train.calibrate_crnn_v2 import _ctc_loss, _ece_summary
 
     before_nll = after_nll = 0.0
     correct, confidence_before, confidence_after = [], [], []
     predictions = []
-    for row, logits in zip(rows, logits_list):
+    for row, logits in zip(rows, logits_list, strict=False):
         truth = row["label"]
         if not torch.equal(logits.argmax(-1), (logits / temperature).argmax(-1)):
             raise AssertionError("positive scalar temperature changed CTC frame argmax")
@@ -371,7 +375,7 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
         confidence_after.append(min(conf_calibrated) if conf_calibrated else 0.0)
     n = len(rows)
     by_subset: dict[str, dict[str, int]] = {}
-    for row, is_correct in zip(rows, correct):
+    for row, is_correct in zip(rows, correct, strict=False):
         name = row.get("subset", "unknown").removeprefix("ccpd_")
         counts = by_subset.setdefault(name, {"correct": 0, "n": 0})
         counts["correct"] += int(is_correct)
@@ -395,9 +399,9 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
               audit_path: Path | None = None) -> dict[str, Any]:
     import cv2
     import torch
-
     from lpr.recognize import read_manifest, write_manifest_entry
     from lpr.recognize.box_reader import checkpoint, model_from_checkpoint
+
     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
 
     if model_path.exists():

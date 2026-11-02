@@ -1,7 +1,8 @@
 import pytest
-
 from lpr_tools.eval.route_split import (
-    assert_content_separation, path_key, split_assignments,
+    assert_content_separation,
+    path_key,
+    split_assignments,
 )
 
 

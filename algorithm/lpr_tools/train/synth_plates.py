@@ -5,16 +5,15 @@ import argparse
 import csv
 import hashlib
 import json
-from functools import lru_cache
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-
 from lpr.charset import DIGITS, LETTERS, PROVINCES
 from lpr.plate_rules import match_layout
+from PIL import Image, ImageDraw, ImageFont
 
 DEFAULT_FONT = Path("C:/Windows/Fonts/simhei.ttf")
 FIELDS = ("file", "plate_no", "layout", "color", "source", "orig_path")
@@ -60,7 +59,7 @@ def _render(text: str, layout: int, font_paths: tuple[Path, ...], rng: np.random
     canvas = Image.new("RGB", (width, 80), background)
     font_path = font_paths[int(rng.integers(len(font_paths)))]
     centers = np.asarray(LAYOUT_CENTERS[layout]) * width
-    for index, (char, center) in enumerate(zip(text, centers)):
+    for index, (char, center) in enumerate(zip(text, centers, strict=False)):
         glyph_h = int(rng.integers(49, 63))
         glyph_w = int(rng.integers(25, 31)) if index == 0 else int(rng.integers(20, 28))
         font = _font(str(font_path), glyph_h + 18)
@@ -91,7 +90,8 @@ def _render(text: str, layout: int, font_paths: tuple[Path, ...], rng: np.random
         noise = rng.normal(0, rng.uniform(1, 5), image.shape).astype(np.float32)
         image = np.clip(image.astype(np.float32) + noise, 0, 255).astype(np.uint8)
     if rng.random() < .08:
-        x = int(rng.integers(8, width - 12)); y = int(rng.integers(8, 70))
+        x = int(rng.integers(8, width - 12))
+        y = int(rng.integers(8, 70))
         cv2.line(image, (x, y), (min(width - 1, x + int(rng.integers(3, 9))), y),
                  color=(112, 112, 112) if layout == 7 else (85, 110, 85), thickness=1)
     return image

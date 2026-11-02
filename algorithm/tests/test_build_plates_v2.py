@@ -1,13 +1,12 @@
-from types import SimpleNamespace
 import csv
 import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from lpr.types import PlateCandidate
 from lpr_tools.data import build_plates_v2
 from lpr_tools.data.manifest import ManifestRow, write_manifest
@@ -147,26 +146,35 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
     import lpr_tools.data.build_plates_v2 as builder
 
     v1, target = tmp_path / "v1", tmp_path / "v2"
-    (v1 / "train").mkdir(parents=True); (v1 / "val").mkdir()
-    frozen_original = tmp_path / "frozen-original.jpg"; frozen_original.write_bytes(b"devhard-image")
-    val_original = tmp_path / "val-original.jpg"; val_original.write_bytes(b"ordinary val image")
+    (v1 / "train").mkdir(parents=True)
+    (v1 / "val").mkdir()
+    frozen_original = tmp_path / "frozen-original.jpg"
+    frozen_original.write_bytes(b"devhard-image")
+    val_original = tmp_path / "val-original.jpg"
+    val_original.write_bytes(b"ordinary val image")
     rows = [
         ["train/frozen-gt.jpg", "皖A12345", "7", "blue", "ground_truth", str(frozen_original)],
         ["train/frozen-pipe.jpg", "皖A12345", "7", "blue", "pipeline_candidate:0:0", str(frozen_original)],
         ["val/ordinary-gt.jpg", "皖A54321", "7", "blue", "ground_truth", str(val_original)],
     ]
     with (v1 / "labels.csv").open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f); writer.writerow(builder.FIELDS); writer.writerows(rows)
+        writer = csv.writer(f)
+        writer.writerow(builder.FIELDS)
+        writer.writerows(rows)
     for row in rows:
         (v1 / row[0]).write_bytes(b"crop")
     source_ledger = {str(frozen_original): {"sha256": builder._sha(frozen_original)[1], "split": "train"},
                      str(val_original): {"sha256": builder._sha(val_original)[1], "split": "val"}}
     (v1 / "source_hashes.json").write_text(json.dumps(source_ledger), encoding="utf-8")
 
-    duplicate_copy = tmp_path / "hard-duplicate.jpg"; duplicate_copy.write_bytes(frozen_original.read_bytes())
-    excluded_path = tmp_path / "frozen-path.jpg"; excluded_path.write_bytes(b"path only exclusion")
-    allowed = tmp_path / "hard-paired.jpg"; allowed.write_bytes(b"unique hard source")
-    allowed_missing = tmp_path / "hard-gt-only.jpg"; allowed_missing.write_bytes(b"unique source with no pipeline warp")
+    duplicate_copy = tmp_path / "hard-duplicate.jpg"
+    duplicate_copy.write_bytes(frozen_original.read_bytes())
+    excluded_path = tmp_path / "frozen-path.jpg"
+    excluded_path.write_bytes(b"path only exclusion")
+    allowed = tmp_path / "hard-paired.jpg"
+    allowed.write_bytes(b"unique hard source")
+    allowed_missing = tmp_path / "hard-gt-only.jpg"
+    allowed_missing.write_bytes(b"unique source with no pipeline warp")
     def sample(path):
         return {"path": str(path), "split": "test", "subset": "ccpd_blur", "has_plate": "1", "skip_reason": "",
                 "plate_no": "皖A12345", "layout": "7", "plate_color": "blue",
@@ -174,8 +182,10 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
     index_rows = [sample(p) for p in (allowed, allowed_missing, duplicate_copy, excluded_path)]
     monkeypatch.setattr(builder, "read_index", lambda _: index_rows)
     monkeypatch.setattr(builder, "_exclusions", lambda: ({builder._key(excluded_path)}, {builder._sha(frozen_original)}))
-    cfg_path = tmp_path / "corner.toml"; cfg_path.write_text("corner_model_path", encoding="utf-8")
-    model = tmp_path / "corner_net_v1.pt"; model.write_bytes(b"corner model")
+    cfg_path = tmp_path / "corner.toml"
+    cfg_path.write_text("corner_model_path", encoding="utf-8")
+    model = tmp_path / "corner_net_v1.pt"
+    model.write_bytes(b"corner model")
     cfg = SimpleNamespace(runtime=SimpleNamespace(corner_model_path="models/corner_net_v1.pt", max_candidates=3),
                           resolve_path=lambda _: model)
     monkeypatch.setattr(builder, "load_config", lambda _: cfg)
@@ -189,10 +199,12 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
         def __exit__(self, *args): return False
         def map(self, func, jobs, chunksize):
             assert func is builder._hard_one and 1 <= chunksize <= 8
-            for row, out, config, expected in jobs:
-                digest = expected[1]; key = hashlib.sha1(row["path"].casefold().encode()).hexdigest()
+            for row, out, _config, expected in jobs:
+                digest = expected[1]
+                key = hashlib.sha1(row["path"].casefold().encode()).hexdigest()
                 subset = row["subset"].removeprefix("ccpd_")
-                gt = f"train/hard_{key}_gt.jpg"; pipe = f"train/hard_{key}_pipe.jpg"
+                gt = f"train/hard_{key}_gt.jpg"
+                pipe = f"train/hard_{key}_pipe.jpg"
                 (Path(out) / gt).write_bytes(b"gt crop")
                 gt_label = [gt, row["plate_no"], row["layout"], row["plate_color"], f"hard_train:{subset}:ground_truth", row["path"]]
                 if Path(row["path"]) == allowed_missing:
@@ -209,7 +221,8 @@ def test_tiny_v2_build_filters_frozen_copies_and_keeps_val_from_v1(tmp_path, mon
     stats = builder.build(index=tmp_path / "index.csv", v1=v1, target=target,
                           receipt=tmp_path / "receipt", workers=2, config=cfg_path)
     with (target / "labels.csv").open(encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f); output_rows = list(reader)
+        reader = csv.DictReader(f)
+        output_rows = list(reader)
         assert tuple(reader.fieldnames) == builder.FIELDS
     assert stats["v1_frozen_overlaps_excluded"] == 2
     assert stats["hard_sources_accepted"] == 2 and stats["hard_sources_paired"] == 1

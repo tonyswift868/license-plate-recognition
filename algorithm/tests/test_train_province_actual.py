@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from lpr_tools.train.eval_province_actual import aggregate, nonwan_membership, select
 
 

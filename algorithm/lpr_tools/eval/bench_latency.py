@@ -9,13 +9,22 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-
 from lpr.io_utils import list_images
-from lpr_tools.data.manifest import image_path, read_manifest
+
 from lpr_tools.data.image_health import decode_image
-from .common import (add_backend_args, config_for_args, effective_config_info,
-                     latency_stats, letterbox, make_recognizer,
-                     mode_name, parse_size, runtime_info)
+from lpr_tools.data.manifest import image_path, read_manifest
+
+from .common import (
+    add_backend_args,
+    config_for_args,
+    effective_config_info,
+    latency_stats,
+    letterbox,
+    make_recognizer,
+    mode_name,
+    parse_size,
+    runtime_info,
+)
 
 STAGES = ("preprocess", "locate", "rectify", "segment", "recognize", "postprocess",
           "corner", "reader", "box_reader")

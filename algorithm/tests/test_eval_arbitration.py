@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from lpr.types import PlateCandidate, RecogStatus
 from lpr_tools.eval import arbitration
 from lpr_tools.eval.arbitration import _rank_rule, replay_attempts

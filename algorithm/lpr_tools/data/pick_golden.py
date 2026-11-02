@@ -8,9 +8,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from lpr.plate_rules import match_layout
+
 from lpr_tools.data.ccpd import read_index
 from lpr_tools.data.manifest import ManifestRow, parse_quad, read_manifest, write_manifest
-from lpr.plate_rules import match_layout
 
 LABEL_FIELDS = ("file", "plate_no", "plate_color", "category", "source")
 SEED = 42
@@ -178,7 +179,7 @@ def pick_golden(index: str | Path | None, out: str | Path, *, seed: int = SEED,
 
     # Names include source and bucket so same basenames from distinct datasets never collide.
     names: list[str] = []
-    for (row, category, _), source in zip(chosen, resolved):
+    for (row, _category, _), source in zip(chosen, resolved, strict=False):
         base = source.name
         prefix = f"{row['dataset']}_{row['subset']}"
         name = f"{prefix}_{base}"
@@ -192,7 +193,7 @@ def pick_golden(index: str | Path | None, out: str | Path, *, seed: int = SEED,
     staging = Path(tempfile.mkdtemp(prefix="golden-pick-", dir=staging_root))
     try:
         labels: list[dict[str, str]] = []
-        for (row, category, color), source, name in zip(chosen, resolved, names):
+        for (row, category, color), source, name in zip(chosen, resolved, names, strict=False):
             shutil.copy2(source, staging / name)
             labels.append({"file": name,
                            "plate_no": "" if category == "np" else row["plate_no"],
@@ -204,7 +205,7 @@ def pick_golden(index: str | Path | None, out: str | Path, *, seed: int = SEED,
             writer.writeheader()
             writer.writerows(labels)
         golden_rows = []
-        for (row, category, color), source in zip(chosen, resolved):
+        for (row, category, color), source in zip(chosen, resolved, strict=False):
             golden_rows.append(ManifestRow(
                 path=str(source), plate_no="" if category == "np" else row["plate_no"],
                 plate_color=color, category=category,

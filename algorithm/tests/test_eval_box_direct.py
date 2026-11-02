@@ -1,18 +1,22 @@
-from types import SimpleNamespace
 import os
-
-import pytest
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
-from torch import nn
-
 from lpr.boxcrop import crop_box
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize.crnn import CrnnReader, plate_tensor
-from lpr_tools.eval.box_direct import (PAD_GRID, _choose_best_pad, _gt_bbox_from_quad,
-                                       _group_keys, _read_crnn_native, _read_outcome,
-                                       _select_candidate)
+from lpr_tools.eval.box_direct import (
+    PAD_GRID,
+    _choose_best_pad,
+    _group_keys,
+    _gt_bbox_from_quad,
+    _read_crnn_native,
+    _read_outcome,
+    _select_candidate,
+)
+from torch import nn
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process-memory ABI")

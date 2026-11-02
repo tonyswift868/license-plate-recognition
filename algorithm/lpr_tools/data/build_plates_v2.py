@@ -18,27 +18,26 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-from lpr.config import DEFAULT_CONFIG_PATH, load_config
-from lpr.io_utils import decode_image, imread, imwrite
+from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
+from lpr.io_utils import decode_image, imwrite
 from lpr.locate import box_iou, locate
-from lpr.plate_rules import match_layout
-from lpr.preprocess import preprocess
-from lpr.rectify import rectify_candidates
-from lpr.recognize import load_corner_detector
 from lpr.pipeline import _in_roi, _merge_candidates
-from lpr_tools.data.ccpd import read_index
-from lpr_tools.data.build_plates import _warp_gt, FIELDS
-from lpr_tools.data.manifest import read_manifest, image_path
+from lpr.preprocess import preprocess
+from lpr.recognize import load_corner_detector
+from lpr.rectify import rectify_candidates
 
-V1 = Path(r"D:\keshe2\algorithm\data\plates\v1")
-V2 = Path(r"D:\keshe2\algorithm\data\plates\v2")
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+from lpr_tools.data.build_plates import FIELDS, _warp_gt
+from lpr_tools.data.ccpd import read_index
+from lpr_tools.data.manifest import image_path, read_manifest
+
+V1 = ALGORITHM_DIR / "data/plates/v1"
+V2 = ALGORITHM_DIR / "data/plates/v2"
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 HARD = {"ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate", "ccpd_fn", "ccpd_challenge", "ccpd_weather"}
-FROZEN = [Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
-          Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden\golden_manifest.csv"),
-          Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv"),
-          Path(r"D:\keshe2\algorithm\data\index\undecodable.csv")]
+FROZEN = [ALGORITHM_DIR / "data/index/testset_manifest_v1.csv",
+          ALGORITHM_DIR / "tests/data/golden/golden_manifest.csv",
+          ALGORITHM_DIR / "data/index/devhard_v1.csv",
+          ALGORITHM_DIR / "data/index/undecodable.csv"]
 GOLDEN = FROZEN[1].parent
 _CFG = None
 _CORNER = None
@@ -55,15 +54,18 @@ def _key(path: str | Path) -> str:
 
 
 def _sha(path: str | Path) -> tuple[int, str]:
-    h = hashlib.sha256(); size = 0
+    h = hashlib.sha256()
+    size = 0
     with Path(path).open("rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
-            size += len(block); h.update(block)
+            size += len(block)
+            h.update(block)
     return size, h.hexdigest()
 
 
 def _exclusions() -> tuple[set[str], set[tuple[int, str]]]:
-    paths: set[str] = set(); hashes: set[tuple[int, str]] = set()
+    paths: set[str] = set()
+    hashes: set[tuple[int, str]] = set()
     for manifest in FROZEN:
         if not manifest.is_file():
             raise FileNotFoundError(f"required exclusion list missing: {manifest}")
@@ -85,7 +87,9 @@ def _exclusions() -> tuple[set[str], set[tuple[int, str]]]:
         raise FileNotFoundError(f"golden image folder missing: {GOLDEN}")
     for p in GOLDEN.rglob("*"):
         if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
-            p = p.resolve(); paths.add(_key(p)); hashes.add(_sha(p))
+            p = p.resolve()
+            paths.add(_key(p))
+            hashes.add(_sha(p))
     return paths, hashes
 
 
@@ -157,7 +161,7 @@ def _hard_one(job: tuple[dict, str, str, tuple[int, str]]) -> dict:
         subset = row["subset"].removeprefix("ccpd_")
         gt_rel, pipe_rel = f"train/hard_{relative}_gt.jpg", f"train/hard_{relative}_pipe.jpg"
         quad_values = [float(x) for x in row["quad"].split()]
-        quad = tuple(zip(quad_values[::2], quad_values[1::2]))
+        quad = tuple(zip(quad_values[::2], quad_values[1::2], strict=False))
         out = Path(root)
         gt = _warp_gt(image, quad, int(row["layout"]))
         imwrite(out / gt_rel, gt, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -266,7 +270,7 @@ def _preflight_sources(index, target, identity, known, blocked_paths, blocked_ha
     with ThreadPoolExecutor(max_workers=4) as pool:
         for offset in range(0, len(candidates), 512):
             batch = candidates[offset:offset + 512]
-            for row, signature in zip(batch, pool.map(hash_source, batch)):
+            for row, signature in zip(batch, pool.map(hash_source, batch), strict=False):
                 if signature is None:
                     skipped["unreadable"] += 1
                     continue
@@ -362,14 +366,17 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
             "base_v1_labels": len(base_rows)}, indent=2), encoding="utf-8")
     known = {item["sha256"] for p, item in ledger.items() if p not in blocked_ledger}
     selected, skipped = _preflight_sources(index, target, identity, known, blocked_paths, blocked_hashes, limit)
-    frozen_paths_count = len(blocked_paths); frozen_bytes_count = len(blocked_hashes)
+    frozen_paths_count = len(blocked_paths)
+    frozen_bytes_count = len(blocked_hashes)
     if old_state.get("hard_sources") not in (None, len(selected)):
         raise ValueError("resume hard-source count differs from saved selection")
     if not selected:
         raise ValueError("no eligible hard-training sources after frozen and duplicate exclusions")
-    target.mkdir(parents=True, exist_ok=True); receipt.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True)
+    receipt.mkdir(parents=True, exist_ok=True)
     for n, r in enumerate(base_rows, 1):
-        source = v1_root / r[0]; dest = target / r[0]
+        source = v1_root / r[0]
+        dest = target / r[0]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             os.link(source, dest)
@@ -398,10 +405,13 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
                 print(json.dumps(state, ensure_ascii=True), flush=True)
     all_rows = base_rows + completed
     with (target / "labels.csv").open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f); writer.writerow(FIELDS); writer.writerows(all_rows)
+        writer = csv.writer(f)
+        writer.writerow(FIELDS)
+        writer.writerows(all_rows)
     (target / "source_hashes.json").write_text(json.dumps({**{p:v for p,v in ledger.items() if p not in blocked_ledger},
        **{x["path"]:{"sha256":x["sha256"],"split":"train","subset":x["subset"]} for x in outcomes if x["status"] in {"ok","pipeline_missing"}}}, ensure_ascii=False, indent=2), encoding="utf-8")
-    by_split=Counter(Path(r[0]).parts[0] for r in all_rows); by_source=Counter(_source_group(r[4]) for r in all_rows)
+    by_split=Counter(Path(r[0]).parts[0] for r in all_rows)
+    by_source=Counter(_source_group(r[4]) for r in all_rows)
     stats={"v1_labels_read":v1_label_count,"base_v1_rows":len(base_rows),"v1_frozen_overlaps_excluded":v1_label_count-len(base_rows),"hard_sources_eligible":len(selected),"hard_sources_accepted":sum(x["status"] in {"ok","pipeline_missing"} for x in outcomes),
            "hard_sources_paired":sum(x["status"]=="ok" for x in outcomes),"pipeline_missing":sum(x["status"]=="pipeline_missing" for x in outcomes),
            "by_split":dict(by_split),"by_source":dict(by_source),"hard_subsets":dict(Counter(x["subset"] for x in outcomes if x["status"] in {"ok","pipeline_missing"})),
@@ -428,13 +438,18 @@ def build(*, index: Path = INDEX, v1: Path = V1, target: Path = V2,
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--index",type=Path,default=INDEX);parser.add_argument("--v1",type=Path,default=V1)
-    parser.add_argument("--out",type=Path,default=V2);parser.add_argument("--receipt-dir",type=Path,default=Path("algorithm/out/receipts/第八批/data"))
-    parser.add_argument("--workers",type=int,default=4);parser.add_argument("--limit",type=int,default=0);parser.add_argument("--config",type=Path)
+    parser.add_argument("--index",type=Path,default=INDEX)
+    parser.add_argument("--v1",type=Path,default=V1)
+    parser.add_argument("--out",type=Path,default=V2)
+    parser.add_argument("--receipt-dir",type=Path,default=Path("algorithm/out/receipts/第八批/data"))
+    parser.add_argument("--workers",type=int,default=4)
+    parser.add_argument("--limit",type=int,default=0)
+    parser.add_argument("--config",type=Path)
     parser.add_argument("--resume", action="store_true", help="reuse verified preflight/base links before any hard crop has been written")
     args=parser.parse_args(argv)
     print(json.dumps(build(index=args.index,v1=args.v1,target=args.out,receipt=args.receipt_dir,workers=args.workers,limit=args.limit,config=args.config,resume=args.resume),ensure_ascii=False,indent=2))
     return 0
 
 
-if __name__=="__main__": raise SystemExit(main())
+if __name__=="__main__":
+    raise SystemExit(main())

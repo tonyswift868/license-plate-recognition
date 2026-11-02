@@ -14,13 +14,13 @@ import math
 import subprocess
 from pathlib import Path
 
-from lpr.config import ALGORITHM_DIR
-from lpr.config import load_config
 from lpr import PlateRecognizer
+from lpr.config import ALGORITHM_DIR, load_config
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path, read_manifest
-from lpr_tools.eval.index_samples import path_key
 from lpr_tools.eval.arbitration import replay_attempts
+from lpr_tools.eval.index_samples import path_key
 
 
 def sha256(path: str | Path) -> str:
@@ -171,7 +171,7 @@ def validate_provenance(records: list[dict], trace_path: Path, source: dict) -> 
     if not manifest_path.is_file() or source.get("selection", {}).get("manifest_sha256") != sha256(manifest_path):
         raise ValueError("validation manifest SHA256 differs from the source report")
     sample_paths = [path_key(record["path"]) for record in records]
-    fixed_manifest = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
+    fixed_manifest = ALGORITHM_DIR / "data/index/val1000_v1.csv"
     if (Path(selection.get("manifest_path", "")).resolve() != fixed_manifest.resolve()
             or not fixed_manifest.is_file()
             or selection.get("manifest_sha256") != sha256(fixed_manifest)
@@ -180,10 +180,10 @@ def validate_provenance(records: list[dict], trace_path: Path, source: dict) -> 
     expected_list_hash = hashlib.sha256(("\n".join(sample_paths) + "\n").encode("utf-8")).hexdigest()
     if len(set(sample_paths)) != n or selection.get("path_list_sha256") != expected_list_hash:
         raise ValueError("trace paths are duplicated or do not match the source selection hash")
-    frozen = [Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
+    frozen = [ALGORITHM_DIR / "data/index/testset_manifest_v1.csv",
               ALGORITHM_DIR / "tests" / "data" / "golden" / "golden_manifest.csv",
-              Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv"),
-              Path(r"D:\keshe2\algorithm\data\index\undecodable.csv")]
+              ALGORITHM_DIR / "data/index/devhard_v1.csv",
+              ALGORITHM_DIR / "data/index/undecodable.csv"]
     declared_manifests = {path_key(item["path"]): item["sha256"]
                           for item in selection.get("frozen_manifests", [])}
     frozen_paths = set()
@@ -263,7 +263,7 @@ def verify_runtime(records: list[dict], manifest: Path, threshold: float) -> dic
     mismatches = []
     mismatch_count = 0
     accepted = correct = 0
-    for i, (row, record) in enumerate(zip(rows, records)):
+    for i, (row, record) in enumerate(zip(rows, records, strict=False)):
         if path_key(image_path(row, manifest)) != path_key(record["path"]):
             raise ValueError(f"runtime verification path/order mismatch at row {i}")
         image, reason = decode_image(image_path(row, manifest))

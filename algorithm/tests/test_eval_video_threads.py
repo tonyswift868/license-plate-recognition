@@ -1,4 +1,5 @@
 import json
+
 import cv2
 import numpy as np
 import pytest
@@ -17,8 +18,10 @@ def test_video_explicit_threads_real_capture_and_cli(tmp_path, monkeypatch, caps
     writer=cv2.VideoWriter(str(path),cv2.VideoWriter_fourcc(*'mp4v'),25.,(160,120))
     assert writer.isOpened()
     try:
-        for _ in range(5):writer.write(np.zeros((120,160,3),np.uint8))
-    finally:writer.release()
+        for _ in range(5):
+            writer.write(np.zeros((120,160,3),np.uint8))
+    finally:
+        writer.release()
     result=bv.benchmark_video(FakeRecognizer(),path,decoder_threads=1)
     assert (result['decoded_frames'],result['sampled_frames'])==(5,1)
     assert result['decoder_threads']==1 and result['decoder_backend']=='FFMPEG'
@@ -34,8 +37,11 @@ def test_video_refuses_unapplied_decoder_limit_and_releases(monkeypatch):
         def get(self,prop):return 2
         def release(self):self.released=True
         def read(self):raise AssertionError('must fail before decoding or recognition')
-    cap=Capture();calls=[]
-    def opened(*args):calls.append(args);return cap
+    cap=Capture()
+    calls=[]
+    def opened(*args):
+        calls.append(args)
+        return cap
     monkeypatch.setattr(bv.cv2,'VideoCapture',opened)
     with pytest.raises(ValueError,match='thread limit not applied'):
         bv.benchmark_video(FakeRecognizer(),'input.mp4',decoder_threads=1)

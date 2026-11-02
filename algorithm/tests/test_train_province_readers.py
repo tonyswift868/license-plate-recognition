@@ -4,11 +4,9 @@ from __future__ import annotations
 import threading
 
 import cv2
+import lpr_tools.train.train_province_readers as trainer
 import numpy as np
 import torch
-
-import lpr_tools.train.train_province_readers as trainer
-
 
 GROUPS = ("base", "green", "db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
 
@@ -86,16 +84,16 @@ def test_serial_and_single_thread_prefetch_batches_are_identical(tmp_path):
     prefetched = _collect(trainer.PackedEpoch(prefetched_ds, [r["label"] for r in rows],
         [r["subset"] for r in rows], batch_size=4, block_size=3, prefetch=True))
     assert len(serial) == len(prefetched)
-    for left, right in zip(serial, prefetched):
+    for left, right in zip(serial, prefetched, strict=False):
         assert len(left) == len(right)
-        for a, b in zip(left, right):
+        for a, b in zip(left, right, strict=False):
             if isinstance(a, torch.Tensor):
                 assert torch.equal(a, b)
             else:
                 assert a == b
     assert len(serial_ds.row_threads) == len(prefetched_ds.row_threads) == len(rows)
     assert any(thread_id != threading.get_ident() for thread_id in prefetched_ds.row_threads)
-    real_indices = [index for batch in prefetched for index, synthetic in zip(batch[4], batch[7])
+    real_indices = [index for batch in prefetched for index, synthetic in zip(batch[4], batch[7], strict=False)
                     if not synthetic]
     assert sorted(real_indices) == list(range(len(rows)))
     assert len(real_indices) == len(set(real_indices))

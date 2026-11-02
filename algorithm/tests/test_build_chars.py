@@ -7,7 +7,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-
 from lpr.io_utils import imread, imwrite
 from lpr.types import SegmentResult
 from lpr_tools.data.ccpd import INDEX_FIELDS, parse_ccpd_name
@@ -509,7 +508,6 @@ def test_segment_can_add_only_located_candidates_meeting_gt_iou(tmp_path, monkey
 
 
 def test_locate_failure_checkpoint_resumes_closed_prefix_without_overwrite(tmp_path, monkeypatch):
-    import hashlib
     import lpr_tools.train.build_chars as builder
     from lpr.config import DEFAULT_CONFIG_PATH, load_config
     from lpr.types import PlateCandidate, RectifiedPlate
@@ -611,6 +609,7 @@ def test_locate_failure_checkpoint_resumes_closed_prefix_without_overwrite(tmp_p
 
 def test_locate_memory_retry_retries_only_memory_failures_and_is_bounded(monkeypatch):
     from types import SimpleNamespace
+
     import lpr_tools.train.build_chars as builder
 
     config = SimpleNamespace(preprocess=object(), locate=object(),

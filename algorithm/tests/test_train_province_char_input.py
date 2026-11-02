@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from lpr.charnorm import normalize_char, unify_polarity
 from lpr_tools.train import province_synth
 from lpr_tools.train.province_char_input import normalized_first_char

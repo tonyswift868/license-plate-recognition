@@ -5,23 +5,24 @@ import array
 import csv
 import hashlib
 import json
-import random
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from lpr.charset import PROVINCES
+from lpr.config import ALGORITHM_DIR
+
 from lpr_tools.train import box_data
 
 ROOT = Path(__file__).resolve().parents[3]
-DATA = Path(r"D:\keshe2\algorithm\data")
+DATA = ALGORITHM_DIR / "data"
 INDEX = DATA / "index" / "ccpd_index.csv"
 V2 = DATA / "plates" / "v2"
 BATCH10 = ROOT / "algorithm" / "out" / "data" / "batch10"
 BATCH11 = ROOT / "algorithm" / "out" / "data" / "batch11"
 DEFAULT_OUT = ROOT / "algorithm" / "out" / "data" / "batch12"
-CACHE_INDEX = Path(r"D:\keshe2\algorithm\data\boxcrop_cache\box_reader_v1\index.csv")
+CACHE_INDEX = ALGORITHM_DIR / "data/boxcrop_cache/box_reader_v1/index.csv"
 SEED = 12042
 HOLDOUT_FIELDS = ("path", "province", "label", "subset", "brightness", "quad", "sha256", "split")
 SYNTH_FIELDS = ("path", "label", "subset", "brightness", "quad", "sha256",
@@ -93,7 +94,7 @@ def province_repeat_additions(rows: Sequence[Mapping[str, str]], *, seed: int,
         base, remainder = divmod(budget, len(members)) if members else (0, 0)
         # Deterministic hash ranking rotates the fractional remainder by epoch.
         ranked = sorted(members, key=lambda i: hashlib.sha256(
-            f"{seed}:{epoch}:{province}:{i}".encode("utf-8")).digest())
+            f"{seed}:{epoch}:{province}:{i}".encode()).digest())
         for i in members:
             additions[i] = base
         for i in ranked[:remainder]:
@@ -201,7 +202,7 @@ def prepare_batch12(*, out_dir: Path = DEFAULT_OUT, index_path: Path = INDEX,
         # 30% sample and avoids claiming a real-image province holdout.
         count = holdout_size(n, cap=holdout_cap, fraction=holdout_fraction)
         ranked = sorted(values, key=lambda row: hashlib.sha256(
-            f"{seed}:{province}:{row['sha256']}".encode("utf-8")).digest())
+            f"{seed}:{province}:{row['sha256']}".encode()).digest())
         # Prefer an origin not used by the previous reader's pool, making the
         # province holdout fresh for the continued checkpoint. If the eligible
         # unseen bucket cannot meet the fixed quota, fill from the complete safe
@@ -226,7 +227,8 @@ def prepare_batch12(*, out_dir: Path = DEFAULT_OUT, index_path: Path = INDEX,
                                      "synthetic_only": int(n < 5)}
     with holdout_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=HOLDOUT_FIELDS, lineterminator="\n")
-        writer.writeheader(); writer.writerows(sorted(held, key=lambda row: (row["province"], row["sha256"])))
+        writer.writeheader()
+        writer.writerows(sorted(held, key=lambda row: (row["province"], row["sha256"])))
 
     tune_rows = old_tune_rows
     tune_hashes = set()
@@ -251,7 +253,7 @@ def prepare_batch12(*, out_dir: Path = DEFAULT_OUT, index_path: Path = INDEX,
             # too small; replacement still uses an independently selected seed.
             candidates = safe_tune
         ranked = sorted(candidates, key=lambda row: hashlib.sha256(
-            f"{seed}:synth:{province}:{row['sha256']}".encode("utf-8")).digest())
+            f"{seed}:synth:{province}:{row['sha256']}".encode()).digest())
         for ordinal, row in enumerate(ranked[:synthetic_per_province]):
             recipes.append({
                 "path": row["path"], "label": row["label"], "subset": row.get("subset", ""),
@@ -261,7 +263,8 @@ def prepare_batch12(*, out_dir: Path = DEFAULT_OUT, index_path: Path = INDEX,
             })
     with synth_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SYNTH_FIELDS, lineterminator="\n")
-        writer.writeheader(); writer.writerows(recipes)
+        writer.writeheader()
+        writer.writerows(recipes)
 
     # Preserve the audited packed-cache schema exactly, removing only held-out
     # or otherwise protected same-byte origins. This is metadata, not a new cache.
@@ -302,7 +305,8 @@ def prepare_batch12(*, out_dir: Path = DEFAULT_OUT, index_path: Path = INDEX,
             extras.append(row)
     with extra_train_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=HOLDOUT_FIELDS, lineterminator="\n")
-        writer.writeheader(); writer.writerows(extras)
+        writer.writeheader()
+        writer.writerows(extras)
 
     with train_cache_path.open("r", encoding="utf-8", newline="") as source, \
             combined_train_path.open("w", encoding="utf-8", newline="") as target:

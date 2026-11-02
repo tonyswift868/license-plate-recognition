@@ -1,5 +1,6 @@
 """Continue own CRNN v2 with measured crop errors; inference architecture is unchanged."""
 from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -11,15 +12,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-
 from lpr.charset import CHAR_TO_INDEX
 from lpr.recognize import file_sha256, write_manifest_entry
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+
 from lpr_tools.data.ccpd import parse_ccpd_name
-from lpr_tools.train.train_crnn import _collate, _worker_init
 from lpr_tools.train import train_crnn_v2 as v2
+from lpr_tools.train.train_crnn import _collate, _worker_init
 
 SUBSETS = v2.SUBSETS
 MIXTURE = {**{s: .62 / 7 for s in SUBSETS}, 'base7': .12, 'real8': .18, 'font': .08}
@@ -174,8 +175,11 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
         raise ValueError('invalid training limits')
     if out.resolve() == init.resolve() or init.resolve() == (out/'best.pt').resolve():
         raise ValueError('initializer cannot be overwritten')
-    torch.set_num_threads(4); cv2.setNumThreads(1)
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    torch.set_num_threads(4)
+    cv2.setNumThreads(1)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     audit = validate_audit(index_dir)
     empirical = load_empirical(empirical_path,index_dir)
     originals = original_lookup(index_dir/'train.csv')
@@ -201,7 +205,8 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
     if not resume and any(p.exists() for p in (checkpoint,best_path,metadata_path)):
         raise FileExistsError('training outputs already exist')
     model = CrnnNet()
-    state = dict(torch.load(init,map_location='cpu',weights_only=True)); state.pop('ctc_temperature',None)
+    state = dict(torch.load(init,map_location='cpu',weights_only=True))
+    state.pop('ctc_temperature',None)
     model.load_state_dict(state,strict=True)
     optimizer = torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=1e-4)
     criterion = nn.CTCLoss(blank=BLANK,zero_infinity=False)
@@ -209,7 +214,8 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
         old = torch.load(checkpoint,map_location='cpu',weights_only=True)
         if old['metadata'] != metadata:
             raise ValueError('resume provenance differs')
-        model.load_state_dict(old['model'],strict=True); optimizer.load_state_dict(old['optimizer'])
+        model.load_state_dict(old['model'],strict=True)
+        optimizer.load_state_dict(old['optimizer'])
         history,start,best_score,best_epoch = old['history'],old['epoch'],tuple(old['best_score']),old['best_epoch']
         baseline_tune,baseline_val=old['baseline_tune'],old['baseline_val']
         torch.set_rng_state(old['torch_rng'])
@@ -223,31 +229,43 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
     for epoch in range(start,end):
         if reason:
             break
-        began=time.perf_counter(); current_lr=lr*(1. if epoch<4 else .5)
-        for group in optimizer.param_groups: group['lr']=current_lr
+        began=time.perf_counter()
+        current_lr=lr*(1. if epoch<4 else .5)
+        for group in optimizer.param_groups:
+            group['lr']=current_lr
         draws=torch.multinomial(weights,samples_per_epoch,replacement=True,
             generator=torch.Generator().manual_seed(seed+epoch)).tolist()
         loader=DataLoader(Crops(rows,draws=draws,epoch=epoch,seed=seed,empirical=empirical,originals=originals),
             batch_size=batch_size,num_workers=num_workers,collate_fn=_collate,
             worker_init_fn=_worker_init if num_workers else None,
             generator=torch.Generator().manual_seed(seed+epoch+100000))
-        counts,losses=Counter(),[]; model.train()
+        counts,losses=Counter(),[]
+        model.train()
         for step,(images,targets,lengths,sources) in enumerate(loader,1):
-            counts.update(sources); optimizer.zero_grad(set_to_none=True)
+            counts.update(sources)
+            optimizer.zero_grad(set_to_none=True)
             logits=model(images)
             loss=criterion(logits.log_softmax(2),targets,torch.full((len(images),),logits.shape[0],dtype=torch.long),lengths)
-            if not torch.isfinite(loss): raise RuntimeError('nonfinite CTC loss')
-            loss.backward(); nn.utils.clip_grad_norm_(model.parameters(),5.,error_if_nonfinite=True)
-            optimizer.step(); losses.append(float(loss.detach()))
-            if step%50==0: print(json.dumps(dict(epoch=epoch+1,step=step,loss=sum(losses)/len(losses),seconds=time.perf_counter()-began)),flush=True)
-        if sum(counts.values()) != samples_per_epoch: raise RuntimeError('draw count mismatch')
+            if not torch.isfinite(loss):
+                raise RuntimeError('nonfinite CTC loss')
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(),5.,error_if_nonfinite=True)
+            optimizer.step()
+            losses.append(float(loss.detach()))
+            if step%50==0:
+                print(json.dumps(dict(epoch=epoch+1,step=step,loss=sum(losses)/len(losses),seconds=time.perf_counter()-began)),flush=True)
+        if sum(counts.values()) != samples_per_epoch:
+            raise RuntimeError('draw count mismatch')
         tune,val=v2.evaluate(model,tune_rows),v2.evaluate(model,val_rows)
-        qualifies=eligible(tune,val,baseline_tune,baseline_val); score=v2.selection_score(tune,val)
+        qualifies=eligible(tune,val,baseline_tune,baseline_val)
+        score=v2.selection_score(tune,val)
         if score>best_score:
-            best_score,best_epoch=score,epoch+1; v2._atomic_save(model.state_dict(),best_path)
+            best_score,best_epoch=score,epoch+1
+            v2._atomic_save(model.state_dict(),best_path)
         record=dict(epoch=epoch+1,loss=sum(losses)/len(losses),lr=current_lr,tune=tune,val=val,
             eligible=qualifies,actual_draw_counts=dict(counts),epoch_seconds=time.perf_counter()-began,best_epoch=best_epoch)
-        history.append(record); reason=stop_reason(history,baseline_tune['pipeline']['accuracy'],epochs)
+        history.append(record)
+        reason=stop_reason(history,baseline_tune['pipeline']['accuracy'],epochs)
         v2._atomic_save(dict(metadata=metadata,model=model.state_dict(),optimizer=optimizer.state_dict(),history=history,
             epoch=epoch+1,best_score=best_score,best_epoch=best_epoch,torch_rng=torch.get_rng_state(),
             baseline_tune=baseline_tune,baseline_val=baseline_val),checkpoint)
@@ -264,15 +282,21 @@ def train(index_dir, fonts, init, empirical_path, out, *, epochs=8, samples_per_
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    for name in ('index-dir','fonts','init','empirical','out'): parser.add_argument('--'+name,type=Path,required=True)
-    parser.add_argument('--epochs',type=int,default=8); parser.add_argument('--samples-per-epoch',type=int,default=65536)
-    parser.add_argument('--batch-size',type=int,default=128); parser.add_argument('--lr',type=float,default=.0001)
-    parser.add_argument('--num-workers',type=int,default=1); parser.add_argument('--seed',type=int,default=142)
-    parser.add_argument('--resume',action='store_true'); parser.add_argument('--stop-after',type=int)
+    for name in ('index-dir','fonts','init','empirical','out'):
+        parser.add_argument('--'+name,type=Path,required=True)
+    parser.add_argument('--epochs',type=int,default=8)
+    parser.add_argument('--samples-per-epoch',type=int,default=65536)
+    parser.add_argument('--batch-size',type=int,default=128)
+    parser.add_argument('--lr',type=float,default=.0001)
+    parser.add_argument('--num-workers',type=int,default=1)
+    parser.add_argument('--seed',type=int,default=142)
+    parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--stop-after',type=int)
     args=parser.parse_args()
     result=train(args.index_dir,args.fonts,args.init,args.empirical,args.out,epochs=args.epochs,
         samples_per_epoch=args.samples_per_epoch,batch_size=args.batch_size,lr=args.lr,seed=args.seed,
         num_workers=args.num_workers,resume=args.resume,stop_after=args.stop_after)
     print(json.dumps(result),flush=True)
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    main()

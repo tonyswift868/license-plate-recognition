@@ -1,14 +1,13 @@
 """CPU unit tests for plate detector output decoding and model heads."""
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
 from unittest.mock import patch
 
 import numpy as np
 import torch
-
 from lpr.corner_net import CornerNet
-from lpr.plate_det import ARCHITECTURE, PlateDetModel, PlateDetector, decode_predictions
+from lpr.plate_det import ARCHITECTURE, PlateDetector, PlateDetModel, decode_predictions
 
 
 class IdentityTransform:

@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 import torch
-
 from lpr.boxcrop import crop_box
 from lpr_tools.train.gpu_box_batches import GpuBoxBatches, rgb_region_for_box
 from lpr_tools.train.train_box_reader import collate

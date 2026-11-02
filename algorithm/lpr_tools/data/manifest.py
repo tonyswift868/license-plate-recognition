@@ -4,9 +4,9 @@ from __future__ import annotations
 import csv
 import math
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Iterable
 
 from lpr.plate_rules import match_layout
 
@@ -32,7 +32,7 @@ def parse_quad(value: str) -> tuple[tuple[float, float], ...] | None:
     numbers = [float(v) for v in value.split()]
     if len(numbers) != 8 or not all(math.isfinite(v) and v >= 0 for v in numbers):
         raise ValueError("quad must contain eight finite nonnegative coordinates (LT RT RB LB)")
-    return tuple(zip(numbers[::2], numbers[1::2]))
+    return tuple(zip(numbers[::2], numbers[1::2], strict=False))
 
 
 def image_path(row: ManifestRow, manifest_path: str | Path) -> Path:

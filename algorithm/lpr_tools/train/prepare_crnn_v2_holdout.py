@@ -1,19 +1,27 @@
 """Prepare isolated CRNN v2 training and hard calibration data."""
 from __future__ import annotations
-import argparse, csv, hashlib, json, os, random
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+import random
 from collections import Counter
 from pathlib import Path
 
+from lpr.config import ALGORITHM_DIR
+
 SUBSETS = ("blur", "challenge", "db", "fn", "rotate", "tilt", "weather")
 FIELDS = ("file", "orig_path", "source", "layout", "plate_no", "crop_path", "subset", "brightness", "partition", "calibration_fold")
-DATA = Path("D:/keshe2/algorithm/data")
+DATA = ALGORITHM_DIR / "data"
 V2 = DATA / "plates/v2"
 V1 = DATA / "plates/v1"
 OUT = Path("algorithm/out/data/batch8")
 PROTECTED = (
     ("testset", DATA / "index/testset_manifest_v1.csv"),
     ("golden", Path("algorithm/tests/data/golden/golden_manifest.csv")),
-    ("worker03_golden", Path("D:/keshe2/workers/03/algorithm/tests/data/golden/golden_manifest.csv")),
+    ("worker03_golden", ALGORITHM_DIR / "tests/data/golden/golden_manifest.csv"),
     ("devhard", DATA / "index/devhard_v1.csv"),
     ("val1000", DATA / "index/val1000_v1.csv"),
     ("undecodable", DATA / "index/undecodable.csv"),

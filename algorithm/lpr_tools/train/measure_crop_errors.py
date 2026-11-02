@@ -18,19 +18,20 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+if str(Path(__file__).resolve().parents[2]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.locate import locate
 from lpr.pipeline import _in_roi, _merge_candidates, _rectifications
 from lpr.preprocess import preprocess
 from lpr.recognize import load_corner_detector
+
 from lpr_tools.data.image_health import decode_image
 
+ROOT = Path(__file__).resolve().parents[2]
 SUBSETS = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 DEFAULT_CONFIG = ROOT / "config" / "default.toml"
 DEFAULT_MODEL = ROOT / "models" / "corner_net_v1.pt"
 IOU_MIN = 0.5
@@ -50,7 +51,8 @@ def pathkey(path: str | Path) -> str:
 
 def _box(quad):
     a = np.asarray(quad, np.float32)
-    x, y = a.min(axis=0); right, bottom = a.max(axis=0)
+    x, y = a.min(axis=0)
+    right, bottom = a.max(axis=0)
     return float(x), float(y), float(right-x), float(bottom-y)
 
 
@@ -136,15 +138,17 @@ def measure(train_csv: Path, index_csv: Path, out_dir: Path, *, per_subset=300,
     aggregate = {s: {"selected": 0, "decoded": 0, "candidate_count_zero": 0,
                      "bbox_hit": 0, "bbox_miss": 0, "vectors": [], "pixel_l2": [],
                      "proposal_l2": [], "raw_norm": [], "mean_pixel_l2": []} for s in SUBSETS}
-    for subset, key, source_row, meta in sources:
-        group = aggregate[subset]; group["selected"] += 1
+    for subset, _key, source_row, meta in sources:
+        group = aggregate[subset]
+        group["selected"] += 1
         path = Path(meta["path"])
         image, error = decode_image(path)
         rec = {"subset": subset, "partition": "train", "orig_path": str(path),
                "source_sha256": None, "decode_error": error, "candidate_count": 0,
                "match_iou": None, "matched": False}
         if image is None or error:
-            rows.append(rec); continue
+            rows.append(rec)
+            continue
         rec["source_sha256"] = sha256(path)
         group["decoded"] += 1
         gt = _quad(meta["quad"])
@@ -156,7 +160,8 @@ def measure(train_csv: Path, index_csv: Path, out_dir: Path, *, per_subset=300,
         rec["candidate_count"] = len(candidates)
         if not candidates:
             group["candidate_count_zero"] += 1
-            rows.append(rec); continue
+            rows.append(rec)
+            continue
         gt_box = _box(gt)
         found = False
         layout = len(source_row["plate_no"])
@@ -236,7 +241,7 @@ def measure(train_csv: Path, index_csv: Path, out_dir: Path, *, per_subset=300,
     summary["files"][str(out_dir / "train_sampler.json")] = sha256(out_dir / "train_sampler.json")
     for s, g in aggregate.items():
         n = g["selected"]
-        px = np.asarray(g["pixel_l2"], np.float64).reshape(-1).tolist()
+        _px = np.asarray(g["pixel_l2"], np.float64).reshape(-1).tolist()
         unit = np.linalg.norm(np.asarray(g["vectors"], np.float64).reshape(-1, 4, 2), axis=2).reshape(-1).tolist() if g["vectors"] else []
         summary["subsets"][s] = {"selected": n, "decoded": g["decoded"], "matched": g["bbox_hit"],
             "unmatched": n-g["bbox_hit"], "candidate_count_zero": g["candidate_count_zero"],

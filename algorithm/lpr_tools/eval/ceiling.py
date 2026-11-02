@@ -14,8 +14,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.locate import locate
 from lpr.pipeline import _decode_text, _in_roi, _layouts_to_try, _merge_candidates, _rectifications
 from lpr.postprocess import decode
@@ -23,13 +22,21 @@ from lpr.preprocess import preprocess
 from lpr.rectify import RectifiedPlate
 from lpr.segment import segment
 from lpr.types import PlateCandidate
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path
-from .common import effective_config_info
-from .index_samples import (FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST, FIXED_HARD_N,
-                            FIXED_VAL_N, fixed_manifest_samples, path_key)
 
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+from .common import effective_config_info
+from .index_samples import (
+    FIXED_HARD_MANIFEST,
+    FIXED_HARD_N,
+    FIXED_VAL_MANIFEST,
+    FIXED_VAL_N,
+    fixed_manifest_samples,
+    path_key,
+)
+
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 IOU_MIN = 0.5
 
 

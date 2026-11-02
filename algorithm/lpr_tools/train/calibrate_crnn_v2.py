@@ -14,10 +14,10 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.crnn import CrnnNet, _greedy_decode, plate_tensor
+
 from lpr_tools.train.eval_crnn_v2 import CONFIDENCE_EDGES, _confidence_bin, _resolve_crop
 
 BOUNDS = (0.05, 10.0)
@@ -120,9 +120,9 @@ def fit_temperature(logits_list: list[torch.Tensor], labels: list[str],
 
 def _ece_summary(correct: list[bool], confidence: list[float]) -> dict[str, Any]:
     buckets = [{"lower": lo, "upper": hi, "n": 0, "correct": 0, "confidence_sum": 0.0}
-               for lo, hi in zip(CONFIDENCE_EDGES[:-1], CONFIDENCE_EDGES[1:])]
+               for lo, hi in zip(CONFIDENCE_EDGES[:-1], CONFIDENCE_EDGES[1:], strict=False)]
     brier = 0.0
-    for ok, conf in zip(correct, confidence):
+    for ok, conf in zip(correct, confidence, strict=False):
         conf = min(1.0, max(0.0, float(conf)))
         bucket = buckets[_confidence_bin(conf)]
         bucket["n"] += 1
@@ -165,7 +165,7 @@ def _report_fold(model: CrnnNet, rows: list[dict[str, str]], logits: list[torch.
     truth_correct: list[bool] = []
     conf_before: list[float] = []
     conf_after: list[float] = []
-    for row, raw_logits in zip(rows, logits):
+    for row, raw_logits in zip(rows, logits, strict=False):
         truth = row["plate_no"]
         if not torch.equal(raw_logits.argmax(-1), (raw_logits / temperature).argmax(-1)):
             raise AssertionError("positive scalar temperature changed CTC frame argmax")

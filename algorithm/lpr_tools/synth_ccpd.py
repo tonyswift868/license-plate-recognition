@@ -19,10 +19,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from lpr.charset import LETTERS, PROVINCES
+from lpr.config import ALGORITHM_DIR
+from lpr.io_utils import imwrite
 from PIL import Image, ImageDraw, ImageFont
 
-from lpr.charset import LETTERS, PROVINCES
-from lpr.io_utils import imwrite
 from lpr_tools.data.ccpd import ADS, ALPHABETS, PROVINCES_CCPD
 from lpr_tools.synth_scenes import CENTERS7, CENTERS8, draw_plate
 
@@ -32,7 +33,7 @@ SPLITS_2020 = ("train", "val", "test")
 HARD_SUBSETS = ("ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
                 "ccpd_fn", "ccpd_challenge", "ccpd_weather")
 WORKER_ROOT = Path(__file__).resolve().parents[2]
-SHARED_INDEX_ROOT = Path("D:/keshe2/algorithm/data/index")
+SHARED_INDEX_ROOT = ALGORITHM_DIR / "data/index"
 
 
 def _normalized_path(path: str) -> str:
@@ -162,7 +163,7 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
                 batch_hashes = list(executor.map(image_hash, batch))
                 hashes.extend(batch_hashes)
                 with cache_path.open("a", encoding="utf-8") as handle:
-                    for path, digest in zip(batch, batch_hashes):
+                    for path, digest in zip(batch, batch_hashes, strict=False):
                         key = _normalized_path(path)
                         fact = digest_facts[key]
                         if _file_facts(path) != fact:
@@ -225,7 +226,7 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
     np_val_hashes = rows_hashes("np_val")
     fixed_holdout_hashes = safe_val_hashes | np_val_hashes
     existing_train_hashes = safe_train_hashes | np_train_hashes_all
-    hard_blocked_hashes = excluded_hashes | fixed_holdout_hashes | existing_train_hashes
+    _hard_blocked_hashes = excluded_hashes | fixed_holdout_hashes | existing_train_hashes
     with index_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         fields = list(reader.fieldnames or [])
@@ -251,7 +252,7 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
         candidate_hashes = cache_hashes(candidate_paths, "hard_candidates")
     except OSError as exc:
         raise ValueError(f"cannot hash a hard-pool candidate: {exc}") from exc
-    for row, digest in zip(candidates, candidate_hashes):
+    for row, digest in zip(candidates, candidate_hashes, strict=False):
         digest_by_path[_normalized_path(row["path"])] = digest
 
     pool_rows: list[dict[str, str]] = []
@@ -309,7 +310,7 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
         hashable_rows = [row for row in rows if _normalized_path(row["path"]) not in excluded_paths]
         row_hashes = cache_hashes([row["path"] for row in hashable_rows], "safe_partition")
         hashes_by_key = {_normalized_path(row["path"]): digest
-                         for row, digest in zip(hashable_rows, row_hashes)}
+                         for row, digest in zip(hashable_rows, row_hashes, strict=False)}
         for row in rows:
             key = _normalized_path(row["path"])
             if key in excluded_paths:
@@ -340,8 +341,10 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
     for name, rows in (("safe_train", train_safe), ("safe_val", val_safe),
                        ("np_train_safe", np_train_safe), ("np_val_safe", np_val_safe)):
         fields = source_rows[name.removesuffix("_safe") if name.startswith("np_") else name][0]
-        if name == "np_train_safe": fields = source_rows["np_train"][0]
-        if name == "np_val_safe": fields = source_rows["np_val"][0]
+        if name == "np_train_safe":
+            fields = source_rows["np_train"][0]
+        if name == "np_val_safe":
+            fields = source_rows["np_val"][0]
         _write_csv(output_dir / f"{name}.csv", rows, fields)
     train_pathsets = {name: {_normalized_path(r["path"]) for r in rows}
                       for name, rows in (("safe_train", train_safe), ("np_train", np_train_safe),
@@ -389,7 +392,7 @@ def prepare_hard_pool(*, output_dir: str | Path | None = None,
                                            "audit_val_csv_sha256": source_np_audit["csv"]["np_val.csv_sha256"]},
                 "csv": {"np_train.csv_sha256": safe_hashes["np_train_safe.csv"],
                         "np_val.csv_sha256": safe_hashes["np_val_safe.csv"]},
-                "manifest_sha256": manifest_sha256 if "manifest_sha256" in locals() else {
+                "manifest_sha256": {
                     name: item["manifest_sha256"] for name, item in source_audit.items()},
                 "disjointness": {"np_train_val_intersection": 0,
                                  "np_train_excluded_content_intersection": 0,
@@ -465,7 +468,7 @@ def _plate_text(rng: random.Random, layout: int) -> str:
 
 def _ccpd_indices(text: str) -> str:
     tables = [PROVINCES_CCPD, ALPHABETS] + [ADS] * (len(text) - 2)
-    return "_".join(str(table.index(ch)) for table, ch in zip(tables, text))
+    return "_".join(str(table.index(ch)) for table, ch in zip(tables, text, strict=False))
 
 
 @lru_cache(maxsize=1)
@@ -547,7 +550,7 @@ def _filename(text: str | None, quad: list[tuple[int, int]], image: np.ndarray,
                                               "brightness_method": "not_applicable", "blurriness_method": "not_applicable"}
     # Filename vertex order is RB, LB, LT, RT; parse_ccpd_name reorders to LT,RT,RB,LB.
     lt, rt, rb, lb = quad
-    xs, ys = zip(*quad)
+    xs, ys = zip(*quad, strict=False)
     x1, x2 = min(xs), max(xs)
     y1, y2 = min(ys), max(ys)
     area_ratio = cv2.contourArea(np.asarray(quad, dtype=np.float32)) / (IMAGE_SIZE[0] * IMAGE_SIZE[1])

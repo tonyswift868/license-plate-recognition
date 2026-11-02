@@ -6,12 +6,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-
 from lpr.io_utils import imread, imwrite
 from lpr.recognize import load_classifier, write_manifest_entry
 from lpr.recognize.cnn_model import CharCNN
 from lpr_tools.eval.ablation import (
-    _training_seconds, evaluate, fill_plate_accuracy, load_chars, render_markdown,
+    _training_seconds,
+    evaluate,
+    fill_plate_accuracy,
+    load_chars,
+    render_markdown,
 )
 from lpr_tools.train.build_templates import build
 from lpr_tools.train.synth_chars import generate_dataset
@@ -19,7 +22,7 @@ from lpr_tools.train.train_svm import train
 
 
 @pytest.fixture(scope="module")
-def trained_models(tmp_path_factory):
+def trained_models(default_font, tmp_path_factory):
     root = tmp_path_factory.mktemp("ablation-models")
     data = root / "data"
     generate_dataset(data, per_class=8)

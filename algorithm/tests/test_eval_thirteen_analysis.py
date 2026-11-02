@@ -1,4 +1,4 @@
-from lpr_tools.eval.thirteen_analysis import _category, _norm, _xywh_iou, _read_index
+from lpr_tools.eval.thirteen_analysis import _category, _norm, _read_index, _xywh_iou
 
 
 def test_mosaic_roundtrips_through_a_chinese_windows_filename(tmp_path):
