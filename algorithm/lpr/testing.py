@@ -20,7 +20,7 @@ from .charset import NUM_CLASSES
 from .errors import DEFAULT_MESSAGES, ERROR_CODES, failure_result
 from .io_utils import decode_image, list_images
 from .pipeline import _BYTES_TYPES, _check_image
-from .types import PlateColor, RecogStatus, RecognitionResult, VehicleTypeHint
+from .types import PlateColor, RecognitionResult, RecogStatus, VehicleTypeHint
 
 S = RecogStatus
 
@@ -106,7 +106,7 @@ class FakeRecognizer:
             self._load_samples(Path(samples_dir))
 
     @classmethod
-    def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> "FakeRecognizer":
+    def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> FakeRecognizer:
         """与 PlateRecognizer.from_config 签名一致；桩不读配置。"""
         return cls()
 

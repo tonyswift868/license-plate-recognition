@@ -106,7 +106,7 @@ class BoxPlateReader:
         self.box_pad = tuple(float(v) for v in box_pad)
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "BoxPlateReader":
+    def from_file(cls, path: Path, *, version: str) -> BoxPlateReader:
         from . import read_manifest
 
         saved = torch.load(path, map_location="cpu", weights_only=True)

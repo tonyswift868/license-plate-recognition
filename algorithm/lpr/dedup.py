@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 from .config import LprConfig
-from .types import RecogStatus as S, RecognitionResult
+from .types import RecognitionResult
+from .types import RecogStatus as S
 
 
 def dhash(image: np.ndarray | None) -> int | None:
@@ -34,7 +35,7 @@ def _edit_distance_at_most_one(a: str, b: str) -> bool:
     if abs(len(a) - len(b)) > 1:
         return False
     if len(a) == len(b):
-        return sum(x != y for x, y in zip(a, b)) <= 1
+        return sum(x != y for x, y in zip(a, b, strict=False)) <= 1
     if len(a) > len(b):
         a, b = b, a
     i = j = edits = 0
@@ -61,7 +62,7 @@ class DuplicateFilter:
         self._last: float | None = None
 
     @classmethod
-    def from_config(cls, cfg: LprConfig) -> "DuplicateFilter":
+    def from_config(cls, cfg: LprConfig) -> DuplicateFilter:
         return cls(cfg.dedup.window_s, cfg.dedup.dhash_max_hamming)
 
     def check(self, lane_id: int, result: RecognitionResult, ts: float) -> tuple[bool, str]:

@@ -6,9 +6,10 @@ caller, so frozen traces can be replayed with the same production policy.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,7 @@ def _province_support(plate: str, ci: int, rect_index: int | None,
         relevant = [r for r in relevant if int(r["rect_index"]) == rect_index]
     for rect in relevant:
         routes = (rect.get("segment"), rect.get("reader"), box)
-        support = {name for name, result in zip(("segment", "reader", "box"), routes)
+        support = {name for name, result in zip(("segment", "reader", "box"), routes, strict=False)
                    if _valid(result) and result["plate"].startswith(plate[0])}
         if len(support) >= min_routes:
             return True

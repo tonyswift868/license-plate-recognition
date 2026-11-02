@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import cv2
 import joblib
+import numpy as np
 
 from ..charset import NUM_CLASSES
 
@@ -45,7 +45,7 @@ class SvmClassifier:
         self.model = model
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "SvmClassifier":
+    def from_file(cls, path: Path, *, version: str) -> SvmClassifier:
         return cls(version, joblib.load(path))
 
     def predict_proba(self, chars: np.ndarray) -> np.ndarray:

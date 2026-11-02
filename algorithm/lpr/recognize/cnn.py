@@ -21,7 +21,7 @@ class CnnClassifier:
         self.model = model.cpu().eval()
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "CnnClassifier":
+    def from_file(cls, path: Path, *, version: str) -> CnnClassifier:
         """加载 state_dict（torch.load(..., weights_only=True)），模型置为 eval 模式。"""
         model = CharCNN()
         model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))

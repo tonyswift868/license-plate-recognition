@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -210,7 +210,7 @@ class KeypointModel(nn.Module):
         # Each deeper context level contributes to the stride-4 representation.
         fused = sum(torch.nn.functional.interpolate(proj(feature), size=target_size, mode="bilinear",
                                   align_corners=False)
-                    for proj, feature in zip(self.lateral, levels))
+                    for proj, feature in zip(self.lateral, levels, strict=False))
         return self.heatmaps(self.fuse(fused))
 
 
@@ -450,7 +450,7 @@ def _decode_candidates(image: np.ndarray, heatmap_logits: np.ndarray,
     scores = 1. / (1. + np.exp(-np.clip(heatmap, -40, 40)))
     local_max = cv2.dilate(scores, np.ones((3, 3), np.uint8))
     ys, xs = np.where((scores >= score_threshold) & (scores >= local_max-1e-7))
-    order = sorted(zip(ys.tolist(), xs.tolist()), key=lambda pos: (-float(scores[pos]), pos[0], pos[1]))
+    order = sorted(zip(ys.tolist(), xs.tolist(), strict=False), key=lambda pos: (-float(scores[pos]), pos[0], pos[1]))
     found: list[PlateCandidate] = []
     for y, x in order:
         candidate = _candidate_from_peak(image, float(scores[y, x]), corners[:, y, x], transform)
@@ -491,7 +491,7 @@ class CornerNet:
 
     @classmethod
     def from_file(cls, path: Path, *, version: str,
-                  score_threshold_override: float | None = None) -> "CornerNet":
+                  score_threshold_override: float | None = None) -> CornerNet:
         """只加载安全 state_dict；兼容纯state_dict和本项目版本化checkpoint。"""
         try:
             checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
@@ -650,7 +650,7 @@ class RefineModel(nn.Module):
         x8 = self.stage8(x4)
         x16 = self.stage16(x8)
         fused = self.lateral[0](x2)
-        for layer, feature in zip(self.lateral[1:], (x4, x8, x16)):
+        for layer, feature in zip(self.lateral[1:], (x4, x8, x16), strict=False):
             fused = fused + torch.nn.functional.interpolate(
                 layer(feature), size=x2.shape[-2:], mode="bilinear", align_corners=False)
         return self.head(fused)
@@ -681,7 +681,7 @@ class CornerRefiner:
         self.model = model.to("cpu").eval()
 
     @classmethod
-    def from_file(cls, path: Path) -> "CornerRefiner":
+    def from_file(cls, path: Path) -> CornerRefiner:
         try:
             payload = torch.load(Path(path), map_location="cpu", weights_only=True)
             if (not isinstance(payload, dict) or payload.get("architecture") != REFINE_ARCHITECTURE
