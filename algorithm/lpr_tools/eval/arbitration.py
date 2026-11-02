@@ -314,7 +314,7 @@ def main(argv=None):
     parser.add_argument("--validation-run-dir", help="reuse completed daily val1000 output directory and its sampling report")
     parser.add_argument("--reanalyze", action="store_true", help="recompute summaries from an existing attempts.jsonl without model inference")
     args = parser.parse_args(argv)
-    fixed_manifest = ALGORITHM_DIR / "data/index/val1000_v1.csv".resolve()
+    fixed_manifest = (ALGORITHM_DIR / "data/index/val1000_v1.csv").resolve()
     if Path(args.manifest).resolve() != fixed_manifest:
         parser.error("--manifest must be the fixed shared val1000_v1.csv")
     if args.validation_run_dir:
