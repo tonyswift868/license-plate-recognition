@@ -1,12 +1,14 @@
 """流水线编排（架构师）：PlateRecognizer，见开发文档 4.4、5.1、5.6。
 
-recognize* 永不抛异常：任何错误都通过 status 与 error_code 返回。
+PlateRecognizer.recognize* 永不抛异常：错误通过 status 与 error_code 返回。
+模块级 recognize 是团队后端适配入口，模型初始化失败抛 RuntimeError。
 阶段函数尚未实现（抛 NotImplementedError）时返回 INTERNAL_ERROR，保证桩阶段也能端到端跑通。
 """
 
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -16,6 +18,7 @@ import numpy as np
 from loguru import logger
 
 from ._version import __version__
+from .boxcrop import crop_box
 from .config import LprConfig, load_config
 from .errors import DEFAULT_MESSAGES, ERROR_CODES, BadInputError, ConfigError, failure_result
 from .io_utils import decode_image
@@ -25,7 +28,6 @@ from .postprocess import decode
 from .preprocess import preprocess
 from .recognize import load_box_reader, load_classifier, load_corner_detector, load_plate_reader
 from .recognize.base import BoxReader, CharClassifier, CornerDetector, PlateReader
-from .boxcrop import crop_box
 from .rectify import rectify
 from .segment import segment
 
@@ -33,8 +35,16 @@ try:                                                     # 可选：同一候选
     from .rectify import rectify_candidates
 except ImportError:
     rectify_candidates = None
-from .types import (Box, DecodeResult, PlateCandidate, PlateColor, RecogStatus, RecognitionResult,
-                    RectifiedPlate, SegmentResult)
+from .types import (
+    Box,
+    DecodeResult,
+    PlateCandidate,
+    PlateColor,
+    RecognitionResult,
+    RecogStatus,
+    RectifiedPlate,
+    SegmentResult,
+)
 from .voting import vote
 
 S = RecogStatus
@@ -226,12 +236,12 @@ class PlateRecognizer:
         self.box_reader = box_reader                     # 可选：原框整牌识别（three_route）
 
     @classmethod
-    def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> "PlateRecognizer":
+    def from_config(cls, path: str | os.PathLike[str] | None = None, **overrides: object) -> PlateRecognizer:
         """加载配置与模型。模型缺失或字符表哈希不匹配时立即抛 ModelLoadError（启动即失败）。
         path 为空时先读环境变量 LPR_CONFIG，再缺省为 algorithm/config/default.toml。
         overrides 写法：runtime__classifier="svm"、postprocess__min_confidence=0.9。"""
         cfg = load_config(path, **overrides)
-        import torch                                     # 延迟导入：FakeRecognizer 与 import lpr 不需要 torch
+        import torch  # 延迟导入：FakeRecognizer 与 import lpr 不需要 torch
 
         torch.set_num_threads(cfg.runtime.torch_threads)
         rt = cfg.runtime
@@ -633,3 +643,38 @@ class PlateRecognizer:
                     lane_id, result.plate_no, result.confidence, result.status.value,
                     result.frames_used, result.elapsed_ms)
         logger.debug("lpr stage_ms={}", {k: round(v, 2) for k, v in result.stage_ms.items()})
+
+
+_backend_recognizer: PlateRecognizer | None = None
+_backend_init_lock = threading.Lock()
+
+
+def recognize(image_bytes: bytes | None, *, lane_id: int | None = None) -> dict:
+    """团队六字段契约；进程内延迟加载一次，失败不缓存，非 OK 保留最佳猜测。"""
+    global _backend_recognizer
+
+    started = time.perf_counter()
+    image = decode_image(image_bytes) if image_bytes else None
+    decode_ms = (time.perf_counter() - started) * 1000
+    if image is None:
+        result = failure_result(S.BAD_INPUT, "图像无效：无法解码为 jpg/png")
+    else:
+        with _backend_init_lock:
+            if _backend_recognizer is None:
+                try:
+                    _backend_recognizer = PlateRecognizer.from_config()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"车牌识别模型加载失败：{type(exc).__name__}: {exc}；"
+                        "请运行 pip install -r requirements-algo.txt 并检查模型与 manifest"
+                    ) from exc
+            recognizer = _backend_recognizer
+        result = recognizer.recognize(image, lane_id=lane_id)
+    return {
+        "plate_no": result.plate_no or "",
+        "confidence": float(result.confidence),
+        "image_path": None,
+        "stage_ms": {k: int(v + 0.5) for k, v in {"decode": decode_ms, **result.stage_ms}.items()},
+        "success": result.status == S.OK,
+        "message": None if result.status == S.OK else result.message,
+    }
