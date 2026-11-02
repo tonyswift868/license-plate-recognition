@@ -18,7 +18,7 @@ Point = tuple[float, float]               # (x, y)，原图像素坐标
 Box = tuple[int, int, int, int]           # (x, y, w, h)
 
 
-class RecogStatus(str, Enum):
+class RecogStatus(str, Enum):  # noqa: UP042 -- StrEnum changes str(RecogStatus.OK), a frozen API.
     OK = "OK"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     NO_PLATE = "NO_PLATE"

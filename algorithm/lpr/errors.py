@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from .types import RecogStatus, RecognitionResult
+from .types import RecognitionResult, RecogStatus
 
 ERROR_CODES: dict[RecogStatus, int] = {
     RecogStatus.OK: 0,

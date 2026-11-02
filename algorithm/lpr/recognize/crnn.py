@@ -44,7 +44,7 @@ def _greedy_decode(logits: torch.Tensor) -> tuple[str, list[float]]:
     chars: list[str] = []
     confs: list[float] = []
     previous = BLANK
-    for index, confidence in zip(indices.tolist(), values.tolist()):
+    for index, confidence in zip(indices.tolist(), values.tolist(), strict=False):
         if index != BLANK and index != previous:
             chars.append(CHARSET[index])
             confs.append(float(confidence))
@@ -73,7 +73,7 @@ class CrnnReader:
         self.temperature = float(temperature)
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "CrnnReader":
+    def from_file(cls, path: Path, *, version: str) -> CrnnReader:
         entry = read_manifest(path.parent).get(path.name)
         if entry is not None and entry.get("input_size") != list(INPUT_SIZE):
             raise ValueError(f"CRNN manifest input_size must match {INPUT_SIZE}")

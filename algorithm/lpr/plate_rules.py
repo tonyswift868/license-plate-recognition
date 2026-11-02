@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .charset import CHAR_TO_INDEX, DIGIT_IDX, LETTER_IDX, PROVINCES, PROVINCE_IDX
+from .charset import CHAR_TO_INDEX, DIGIT_IDX, LETTER_IDX, PROVINCE_IDX, PROVINCES
 from .types import VehicleTypeHint
 
 PROV = PROVINCE_IDX

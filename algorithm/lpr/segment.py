@@ -86,13 +86,13 @@ def _fallback_binary_from_gray(gray: np.ndarray, cfg: SegmentConfig) -> np.ndarr
     for y in list(range(rim_y)) + list(range(h-rim_y, h)):
         active = edge_ink[y] > 0
         edges = np.diff(np.r_[False, active, False].astype(np.int8))
-        for left, right in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        for left, right in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1), strict=False):
             if right-left >= .28*w:
                 cv2.line(binary, (int(left), y), (int(right-1), y), 0, 3)
     for x in list(range(rim_x)) + list(range(w-rim_x, w)):
         active = edge_ink[:, x] > 0
         edges = np.diff(np.r_[False, active, False].astype(np.int8))
-        for top, bottom in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        for top, bottom in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1), strict=False):
             if bottom-top >= .30*h:
                 cv2.line(binary, (x, int(top)), (x, int(bottom-1)), 0, 3)
 
@@ -183,7 +183,7 @@ def _aligned_slots(binary: np.ndarray, centers: list[float], char_w: float,
     scores = (total + .1*len(centers)*amounts.min(axis=1) - .5*boundary_ink
               - .05*np.abs(trial_offsets)*h - .02*np.abs(trial_scales-1)*w*h)
     best = int(np.argmax(scores))
-    slots = list(zip(left[best].tolist(), right[best].tolist()))
+    slots = list(zip(left[best].tolist(), right[best].tolist(), strict=False))
     fit = (float(trial_scales[best]), int(trial_offsets[best]))
     if return_fit:
         return slots, fit[0], fit[1], round(w*.06)

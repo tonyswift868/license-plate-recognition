@@ -108,7 +108,7 @@ def decode_predictions(outputs: dict[str, torch.Tensor], image_shape: tuple[int,
     grid_width = heatmap.shape[-1]
     height, width = image_shape[:2]
     found: list[PlateCandidate] = []
-    for score, flat_index in zip(values, indices):
+    for score, flat_index in zip(values, indices, strict=False):
         if float(score) < score_threshold:
             continue
         y, x = divmod(int(flat_index), grid_width)
@@ -162,7 +162,7 @@ class PlateDetector:
 
     @classmethod
     def from_checkpoint(cls, payload: dict, *, version: str,
-                        score_threshold: float | None = None) -> "PlateDetector":
+                        score_threshold: float | None = None) -> PlateDetector:
         if payload.get("architecture") != ARCHITECTURE:
             raise ModelLoadError("plate detector architecture mismatch")
         size = payload.get("input_size")
@@ -181,7 +181,7 @@ class PlateDetector:
 
     @classmethod
     def from_file(cls, path: Path, *, version: str = "plate_det_v1",
-                  score_threshold: float | None = None) -> "PlateDetector":
+                  score_threshold: float | None = None) -> PlateDetector:
         try:
             payload = torch.load(Path(path), map_location="cpu", weights_only=True)
             if not isinstance(payload, dict):

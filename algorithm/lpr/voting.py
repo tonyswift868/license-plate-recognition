@@ -10,7 +10,8 @@ from dataclasses import replace
 from .config import LprConfig
 from .errors import DEFAULT_MESSAGES, ERROR_CODES, failure_result
 from .plate_rules import match_layout, vehicle_type_hint
-from .types import RecogStatus as S, RecognitionResult
+from .types import RecognitionResult
+from .types import RecogStatus as S
 
 
 def _valid(r: RecognitionResult) -> bool:
@@ -81,7 +82,7 @@ class PlateVoteSession:
         self._last: float | None = None
 
     @classmethod
-    def from_config(cls, cfg: LprConfig) -> "PlateVoteSession":
+    def from_config(cls, cfg: LprConfig) -> PlateVoteSession:
         return cls(cfg.voting.agree_frames, cfg.voting.window_s,
                    min_frames=cfg.voting.min_frames, min_confidence=cfg.postprocess.min_confidence)
 

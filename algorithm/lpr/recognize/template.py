@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import cv2
+import numpy as np
 
 from ..charset import NUM_CLASSES
 
@@ -33,7 +33,7 @@ class TemplateClassifier:
         self.temperature = float(temperature)
 
     @classmethod
-    def from_file(cls, path: Path, *, version: str) -> "TemplateClassifier":
+    def from_file(cls, path: Path, *, version: str) -> TemplateClassifier:
         with np.load(path, allow_pickle=False) as archive:
             mask = archive["present_classes"] if "present_classes" in archive else None
             return cls(version, archive["templates"], float(archive["temperature"].item()), mask)

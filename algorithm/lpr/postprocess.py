@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import math
+
 import numpy as np
 
-from .charset import CHARSET, CHAR_TO_INDEX, NUM_CLASSES
+from .charset import CHAR_TO_INDEX, CHARSET, NUM_CLASSES
 from .config import PostprocessConfig
 from .plate_rules import LAYOUTS, PlateLayout, match_layout, vehicle_type_hint
 from .types import DecodeResult, PlateColor, RecogStatus
@@ -62,6 +63,6 @@ def decode(probs: np.ndarray, layout: int, color: PlateColor, cfg: PostprocessCo
     maximum = beam[0][1]
     masses = [math.exp(score-maximum) if math.isfinite(maximum) else 0. for _,score,_ in beam]
     total = sum(masses)
-    candidates = [(entry[0], mass/total if total else 0.) for entry,mass in zip(beam,masses)]
+    candidates = [(entry[0], mass/total if total else 0.) for entry,mass in zip(beam,masses, strict=False)]
     return DecodeResult(status, plate, layout, hyp.name, confidence, char_conf,
                         candidates, vehicle_type_hint(color, hyp.name))
