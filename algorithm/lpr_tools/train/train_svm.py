@@ -2,16 +2,16 @@
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 import joblib
 import numpy as np
-from sklearn.svm import SVC
-from sklearn.calibration import CalibratedClassifierCV
-
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.svm import SvmClassifier, hog_features
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.svm import SVC
+
 from .data import load_split
 
 

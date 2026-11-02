@@ -1,7 +1,6 @@
 import unittest
 
 import numpy as np
-
 from lpr_tools.train.measure_crop_errors import _box, _iou, _quad, pathkey, select_sources
 
 
@@ -50,8 +49,10 @@ if __name__ == "__main__":
 def test_measure_refuses_existing_evidence_before_loading_data(tmp_path):
     import pytest
     from lpr_tools.train.measure_crop_errors import measure
-    evidence=tmp_path/'geometry';evidence.mkdir()
-    saved=evidence/'train_sampler.json';saved.write_text('retained')
+    evidence=tmp_path/'geometry'
+    evidence.mkdir()
+    saved=evidence/'train_sampler.json'
+    saved.write_text('retained')
     with pytest.raises(FileExistsError):
         measure(tmp_path/'missing_train.csv',tmp_path/'missing_index.csv',evidence)
     assert saved.read_text()=='retained'

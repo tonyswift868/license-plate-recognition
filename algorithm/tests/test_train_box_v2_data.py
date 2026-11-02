@@ -5,7 +5,6 @@ import hashlib
 from pathlib import Path
 
 import pytest
-
 from lpr_tools.train.box_data_v2 import GROUPS, _candidate_green_rows, build_balanced_multiplicity
 
 
@@ -17,21 +16,21 @@ def _green_row(path: Path, content: bytes, label: str = "皖A123456") -> dict[st
 
 
 def test_balanced_plan_covers_all_unique_examples_and_equalizes_nine_groups():
-    subsets = [group for group, size in zip(GROUPS, (5, 2, 1, 3, 2, 1, 4, 2, 1))
+    subsets = [group for group, size in zip(GROUPS, (5, 2, 1, 3, 2, 1, 4, 2, 1), strict=False)
                for _ in range(size)]
     plan = build_balanced_multiplicity(subsets, seed=11042, epoch=0)
 
     assert plan.unique_samples == len(subsets)
     assert len(plan.multiplicity) == len(subsets)
     assert min(plan.multiplicity) >= 1
-    assert plan.group_unique == dict(zip(GROUPS, (5, 2, 1, 3, 2, 1, 4, 2, 1)))
+    assert plan.group_unique == dict(zip(GROUPS, (5, 2, 1, 3, 2, 1, 4, 2, 1), strict=False))
     assert set(plan.group_exposures.values()) == {5}
     assert plan.total_exposures == 45
     assert sum(plan.multiplicity) == plan.total_exposures
 
 
 def test_balanced_plan_is_reproducible_for_all_sixty_epochs():
-    subsets = [group for group, size in zip(GROUPS, (17, 7, 4, 8, 13, 6, 9, 3, 5))
+    subsets = [group for group, size in zip(GROUPS, (17, 7, 4, 8, 13, 6, 9, 3, 5), strict=False)
                for _ in range(size)]
     for epoch in range(60):
         first = build_balanced_multiplicity(subsets, seed=7, epoch=epoch)

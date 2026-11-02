@@ -3,10 +3,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from lpr import pipeline
 from lpr.config import load_config
-from lpr.types import DecodeResult, PlateCandidate, RectifiedPlate, RecogStatus as S, SegmentResult
+from lpr.types import DecodeResult, PlateCandidate, RectifiedPlate, SegmentResult
+from lpr.types import RecogStatus as S
 from lpr_tools.eval import arbitration
 
 
@@ -34,8 +34,10 @@ def test_exhaustive_replay_matches_pipeline_across_thresholds(monkeypatch, thres
         status = S.OK if confidence >= post_cfg.min_confidence else S.LOW_CONFIDENCE
         return DecodeResult(status, plate, layout, 'L7' if layout == 7 else 'L8S', confidence,
                             [confidence] * layout, [(plate, 1.)])
-    pre = lambda *_args: SimpleNamespace()
-    loc = lambda *_args: candidates
+    def pre(*_args):
+        return SimpleNamespace()
+    def loc(*_args):
+        return candidates
     for module in (pipeline, arbitration):
         monkeypatch.setattr(module, 'preprocess', pre)
         monkeypatch.setattr(module, 'locate', loc)

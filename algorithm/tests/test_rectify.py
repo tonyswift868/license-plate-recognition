@@ -1,20 +1,28 @@
 import cv2
+import lpr.rectify as rectify_module
 import numpy as np
 import pytest
-
 from lpr.errors import BadInputError
-from lpr.locate import locate, order_points
+from lpr.locate import box_iou, locate, order_points
 from lpr.preprocess import preprocess
-import lpr.rectify as rectify_module
-from lpr.rectify import (_quad_candidates, _rank_quad_candidates,
-                         _green_boundary_quad, _linear_percentile_sorted,
-                         _quad_glyph_evidence, _quad_iou, _quad_pixel_quality,
-                         _quad_rank_score, classify_color, refine_quad, rectify,
-                         rectify_candidates)
+from lpr.rectify import (
+    _green_boundary_quad,
+    _linear_percentile_sorted,
+    _quad_candidates,
+    _quad_glyph_evidence,
+    _quad_iou,
+    _quad_pixel_quality,
+    _quad_rank_score,
+    _rank_quad_candidates,
+    classify_color,
+    rectify,
+    rectify_candidates,
+    refine_quad,
+)
 from lpr.types import PlateCandidate, RectifiedPlate
 from lpr_tools.synth_scenes import make_scene
+
 from .test_locate import truth_bbox
-from lpr.locate import box_iou
 
 
 @pytest.mark.parametrize('index', [0, 1, 2, 3, 4, 5, 7, 8])

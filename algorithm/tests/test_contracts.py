@@ -8,10 +8,9 @@ from __future__ import annotations
 import inspect
 import json
 
+import lpr
 import numpy as np
 import pytest
-
-import lpr
 from lpr import charset
 from lpr.charnorm import CHAR_SIZE, normalize_char, unify_polarity
 from lpr.config import load_config
@@ -20,7 +19,7 @@ from lpr.io_utils import decode_image, encode_jpg, imread, imwrite
 from lpr.pipeline import PlateRecognizer
 from lpr.recognize import load_classifier, write_manifest_entry
 from lpr.testing import FakeRecognizer
-from lpr.types import RecogStatus, RecognitionResult
+from lpr.types import RecognitionResult, RecogStatus
 
 S = RecogStatus
 

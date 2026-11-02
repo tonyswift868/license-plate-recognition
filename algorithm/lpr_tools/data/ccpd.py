@@ -76,9 +76,9 @@ def parse_ccpd_name(name: str | Path) -> CcpdRecord:
         raise ValueError("plate must have 7 or 8 indices")
     indices = _numbers(labels, "_", len(label_parts))
     tables = [PROVINCES_CCPD, ALPHABETS] + [ADS] * (len(indices) - 2)
-    if any(i >= len(table) for i, table in zip(indices, tables)):
+    if any(i >= len(table) for i, table in zip(indices, tables, strict=False)):
         raise ValueError("CCPD character index out of range")
-    plate = "".join(table[i] for i, table in zip(indices, tables))
+    plate = "".join(table[i] for i, table in zip(indices, tables, strict=False))
     reason = ("placeholder" if "O" in plate else "unsupported_province" if plate[0] in "警学"
               else "invalid_format" if match_layout(plate) is None else "")
     return CcpdRecord(plate, len(plate), [quad[i] for i in (2, 3, 0, 1)],

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from lpr_tools.train.province_data import holdout_size, province_repeat_additions
 
 

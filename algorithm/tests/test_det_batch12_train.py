@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-
 from lpr_tools import train_det
 
 

@@ -1,6 +1,5 @@
 """Agree daily must enforce its own precision and latency contract."""
 import pytest
-
 from lpr_tools.eval.daily import _acceptance, _decision_policy, _effective_config
 
 

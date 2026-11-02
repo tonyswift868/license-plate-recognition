@@ -1,5 +1,5 @@
 import pytest
-from lpr_tools.eval.detector_size_study import stratified_sample,metrics,paired_changes,summary
+from lpr_tools.eval.detector_size_study import metrics, paired_changes, stratified_sample, summary
 
 
 def test_sampling_exact_proportional_reproducible_and_original_order():
@@ -10,7 +10,8 @@ def test_sampling_exact_proportional_reproducible_and_original_order():
     assert sample==stratified_sample(rows)
     assert sample!=stratified_sample(rows,seed=43)
     assert [rows.index(r) for r in sample]==sorted(rows.index(r) for r in sample)
-    with pytest.raises(ValueError):stratified_sample(rows+rows[:1])
+    with pytest.raises(ValueError):
+        stratified_sample(rows+rows[:1])
 
 
 def test_metrics_denominators_and_paired_changes():
@@ -24,7 +25,8 @@ def test_metrics_denominators_and_paired_changes():
     paired=paired_changes(rows,[{'path':'a','plate':'wrong'},{'path':'b','plate':'B'},{'path':'c','plate':None}])
     assert paired['improved']==paired['regressed']==1
     assert paired['representatives']['improved'][0]['path']=='a'
-    with pytest.raises(ValueError):paired_changes(rows,[])
+    with pytest.raises(ValueError):
+        paired_changes(rows,[])
 
 
 def test_native_composition_keeps_frozen_weights_and_dark_filter():

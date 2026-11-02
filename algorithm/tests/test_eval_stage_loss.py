@@ -1,6 +1,12 @@
 import json
-import pytest
 
+import numpy as np
+import pytest
+from lpr.errors import failure_result
+from lpr.io_utils import imwrite
+from lpr.types import RecogStatus
+from lpr_tools.data.manifest import ManifestRow, write_manifest
+from lpr_tools.eval.eval_accuracy import evaluate
 from lpr_tools.eval.stage_loss import analyze, render_markdown
 
 
@@ -60,13 +66,6 @@ def test_trace_rejects_mismatched_truth_or_category(tmp_path):
     _write(o_path, oracle)
     with pytest.raises(ValueError, match="truth and category"):
         analyze(n_path, o_path)
-import numpy as np
-
-from lpr.errors import failure_result
-from lpr.io_utils import imwrite
-from lpr.types import RecogStatus
-from lpr_tools.data.manifest import ManifestRow, write_manifest
-from lpr_tools.eval.eval_accuracy import evaluate
 
 
 class _FakeRecognizer:

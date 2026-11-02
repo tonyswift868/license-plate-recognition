@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-
 from lpr.boxcrop import crop_box
 
 

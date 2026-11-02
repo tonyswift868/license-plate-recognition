@@ -17,21 +17,37 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.config import ALGORITHM_DIR, load_config
 from lpr.errors import DEFAULT_MESSAGES, ERROR_CODES, failure_result
 from lpr.io_utils import imwrite
 from lpr.postprocess import decode
 from lpr.segment import segment
-from lpr.types import PlateCandidate, RectifiedPlate, RecognitionResult, RecogStatus as S
-from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
+from lpr.types import PlateCandidate, RecognitionResult, RectifiedPlate
+from lpr.types import RecogStatus as S
+
 from lpr_tools.data.image_health import decode_image
-from .common import (add_backend_args, config_for_args, effective_config_info,
-                     make_recognizer, mode_name)
-from .index_samples import (DEFAULT_SEED, DEFAULT_VALIDATION_N, FIXED_HARD_MANIFEST,
-                           FIXED_VAL_MANIFEST, fixed_manifest_samples, path_key,
-                           read_samples, sample_dev_hard, sample_validation)
-from .locate_recall import locate_match, summarize as summarize_location
+from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
+
+from .common import (
+    add_backend_args,
+    config_for_args,
+    effective_config_info,
+    make_recognizer,
+    mode_name,
+)
+from .index_samples import (
+    DEFAULT_SEED,
+    DEFAULT_VALIDATION_N,
+    FIXED_HARD_MANIFEST,
+    FIXED_VAL_MANIFEST,
+    fixed_manifest_samples,
+    path_key,
+    read_samples,
+    sample_dev_hard,
+    sample_validation,
+)
+from .locate_recall import locate_match
+from .locate_recall import summarize as summarize_location
 
 
 class OracleRecognizer:
@@ -85,7 +101,7 @@ def metrics(samples):
     plated = [(row, result) for row, result in samples if row.category != "np"]
     correct = sum(result.plate_no == row.plate_no for row, result in plated)
     accepted = [(row, result) for row, result in plated if result.status == S.OK]
-    char_correct = sum(sum(a == b for a,b in zip(row.plate_no, result.plate_no or "")) for row,result in plated)
+    char_correct = sum(sum(a == b for a,b in zip(row.plate_no, result.plate_no or "", strict=False)) for row,result in plated)
     char_total = sum(max(len(row.plate_no),len(result.plate_no or "")) for row,result in plated)
     np_rows = [(row,result) for row,result in samples if row.category == "np"]
     false_positives = sum(bool(result.plate_no) for _,result in np_rows)
@@ -405,7 +421,7 @@ def append_scoreboard(path, report, *, split, classifier):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="G2 evaluator v1: indexed validation sampling and Top-3 localization recall")
     parser.add_argument("--manifest", default="algorithm/testset/manifest.csv")
-    parser.add_argument("--index", default=r"D:\keshe2\algorithm\data\index\ccpd_index.csv", help="CCPD index; relative images resolve beside CSV")
+    parser.add_argument("--index", default=str(ALGORITHM_DIR / "data/index/ccpd_index.csv"), help="CCPD index; relative images resolve beside CSV")
     parser.add_argument("--split", choices=("test", "val", "manifest-val"), default="test",
                         help="val samples only the index val split; manifest-val uses a supplied validation manifest")
     parser.add_argument("--n", type=int, help="explicitly resample this many validation rows (legacy exploratory mode)")
@@ -413,7 +429,7 @@ def main(argv=None):
     parser.add_argument("--subset", action="append", help="restrict val sampling to a CCPD subset; repeatable")
     parser.add_argument("--dev-hard", action="store_true", help="use the fixed 7x300 development hard manifest")
     parser.add_argument("--fixed-manifest", help="override the versioned daily list (still validated against the CCPD index)")
-    parser.add_argument("--exclude-manifest", default=r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv",
+    parser.add_argument("--exclude-manifest", default=str(ALGORITHM_DIR / "data/index/testset_manifest_v1.csv"),
                         help="primary manifest of frozen test images excluded from val/dev-hard sampling; golden-only images are also excluded when golden_manifest.csv exists")
     parser.add_argument("--locate-recall", action="store_true", help="Top-3 original-space bbox IoU >= 0.5; requires --index")
     parser.add_argument("--locate-only", action="store_true", help="measure Top-3 localization without loading a classifier")

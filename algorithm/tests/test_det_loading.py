@@ -5,10 +5,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import torch
-
 from lpr.corner_net import CornerNet
 from lpr.errors import ModelLoadError
-from lpr.plate_det import ARCHITECTURE, PlateDetModel, PlateDetector, load_plate_detector
+from lpr.plate_det import ARCHITECTURE, PlateDetector, PlateDetModel, load_plate_detector
 
 
 class LoadingThresholdTests(unittest.TestCase):

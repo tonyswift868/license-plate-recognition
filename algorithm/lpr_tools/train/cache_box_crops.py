@@ -7,28 +7,28 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import math
 import random
+import tarfile
 import time
-from collections import Counter, defaultdict, deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import tarfile
 
 import cv2
 import numpy as np
-
 from lpr.boxcrop import crop_box
+from lpr.config import ALGORITHM_DIR
+
 from lpr_tools.train.box_data import bbox_from_quad, iter_rows, sha256_file
 
 CACHE_FIELDS = ("path", "label", "subset", "brightness", "sha256", "quad", "cache_file",
                 "x0", "y0", "orig_w", "orig_h")
 PACK_FIELDS = ("path", "label", "subset", "brightness", "sha256", "quad", "cache_pack",
                "pack_offset", "pack_length", "x0", "y0", "orig_w", "orig_h")
-DEFAULT_CACHE = Path(r"D:\keshe2\algorithm\data\boxcrop_cache\box_reader_v1")
+DEFAULT_CACHE = ALGORITHM_DIR / "data/boxcrop_cache/box_reader_v1"
 DEFAULT_LIMIT = 2_800_000_000
 PACK_TAR_LIMIT = 2_750_000_000
 PACK_TOTAL_LIMIT = 3_000_000_000

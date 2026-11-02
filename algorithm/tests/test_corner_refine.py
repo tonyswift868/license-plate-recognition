@@ -4,13 +4,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
-from lpr.corner_net import (CornerRefiner, RefineModel, REFINE_ARCHITECTURE,
-                            REFINE_INPUT_SIZE, _roi_bounds, letterbox_image,
-                            refine_coordinates)
+from lpr.corner_net import (
+    REFINE_ARCHITECTURE,
+    REFINE_INPUT_SIZE,
+    CornerRefiner,
+    RefineModel,
+    _roi_bounds,
+    letterbox_image,
+    refine_coordinates,
+)
 from lpr.errors import ModelLoadError
 from lpr.types import PlateCandidate
+from torch import nn
 
 
 def candidate(source="color"):

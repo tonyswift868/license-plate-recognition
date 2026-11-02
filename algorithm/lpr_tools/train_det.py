@@ -10,7 +10,6 @@ import sqlite3
 import time
 from pathlib import Path
 
-
 WORKER = Path(__file__).resolve().parents[2]
 PROJECT = WORKER.parent.parent
 OUT = WORKER / "algorithm" / "out" / "eleventh"
@@ -116,7 +115,7 @@ def load_forbidden(conn: sqlite3.Connection) -> dict[str, dict[str, int | str]]:
         if not manifest.is_file():
             raise FileNotFoundError(f"required protected manifest missing: {manifest}")
         n = 0
-        sha_set: set[str] = set()
+        _sha_set: set[str] = set()
         for item in csv_rows(manifest):
             value = item.get("path", "")
             if not value:
@@ -397,12 +396,15 @@ def export_holdout_partitions(data_dir: Path) -> dict:
     try:
         writers = {key: csv.DictWriter(stream, fieldnames=FIELDS, extrasaction="ignore")
                    for key, stream in streams.items()}
-        for writer in writers.values(): writer.writeheader()
+        for writer in writers.values():
+            writer.writeheader()
         for row in csv_rows(data_dir/"holdout.csv"):
             key = "hard" if row["has_plate"] == "1" else "np"
-            writers[key].writerow(row); counts[key] += 1
+            writers[key].writerow(row)
+            counts[key] += 1
     finally:
-        for stream in streams.values(): stream.close()
+        for stream in streams.values():
+            stream.close()
     if counts != {"hard": 2100, "np": 601}:
         raise ValueError(f"unexpected independent holdout partitions: {counts}")
     metadata = {key: {"path": str(path), "n": counts[key], "sha256": file_digest(path)}
@@ -425,7 +427,8 @@ def process_memory() -> dict[str, int]:
                     ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
                     ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                     ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
-    value = Counters(); value.cb = ctypes.sizeof(value)
+    value = Counters()
+    value.cb = ctypes.sizeof(value)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
     kernel32.GetCurrentProcess.argtypes = []
@@ -449,7 +452,8 @@ def available_memory() -> int:
                     *[(name, ctypes.c_ulonglong) for name in
                       ("total", "available", "total_page", "available_page",
                        "total_virtual", "available_virtual", "extended")]]
-    status = Status(); status.length = ctypes.sizeof(status)
+    status = Status()
+    status.length = ctypes.sizeof(status)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(Status)]
     kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
@@ -487,8 +491,8 @@ def _parse_numbers(value: str, count: int) -> list[float]:
 class CompactPool:
     """Paths and contiguous float labels, rather than hundreds of thousands of dicts."""
     def __init__(self, path: Path, *, limit: int = 0):
-        from array import array
         import sys
+        from array import array
         self.paths, self.subsets, self.labels = [], [], array("f")
         for row in csv_rows(path):
             positive = row["has_plate"] == "1"
@@ -521,7 +525,8 @@ def read_training_sample(pool: CompactPool, index: int, epoch: int, size: int,
     if image is None:
         raise OSError(f"training JPEG cannot decode: {path}")
     ih, iw = image.shape[:2]
-    boxes = np.zeros((0, 4), np.float32); corners = np.zeros((0, 4, 2), np.float32)
+    boxes = np.zeros((0, 4), np.float32)
+    corners = np.zeros((0, 4, 2), np.float32)
     source_box = source_points = None
     if positive:
         x, y, w, h = raw[1:5]
@@ -529,7 +534,8 @@ def read_training_sample(pool: CompactPool, index: int, epoch: int, size: int,
             raise ValueError(f"invalid source dimensions/box: {path}")
         source_box = np.asarray([x*iw/ow, y*ih/oh, w*iw/ow, h*ih/oh], np.float32)
         source_points = np.asarray(raw[5:13], np.float32).reshape(4, 2)
-        source_points[:, 0] *= iw/ow; source_points[:, 1] *= ih/oh
+        source_points[:, 0] *= iw/ow
+        source_points[:, 1] *= ih/oh
     rng = np.random.default_rng(42 + epoch*1_000_003 + index)
     use_camera_canvas = bool(camera_augment and rng.random() < .8)
     if use_camera_canvas:
@@ -639,8 +645,9 @@ def make_targets(samples, size: int, device):
     indices, batch_indices, offsets, whs, relative = [], [], [], [], []
     for b, sample in enumerate(samples):
         boxes, corners = sample[1], sample[2]
-        for box, points in zip(boxes, corners):
-            xy = (box[:2]+box[2:])/16.; wh = (box[2:]-box[:2])/8.
+        for box, points in zip(boxes, corners, strict=False):
+            xy = (box[:2]+box[2:])/16.
+            wh = (box[2:]-box[:2])/8.
             ix, iy = np.floor(xy).astype(int)
             if not (0 <= ix < grid and 0 <= iy < grid) or min(wh) <= 0:
                 raise ValueError("augmented object outside output grid")
@@ -651,11 +658,14 @@ def make_targets(samples, size: int, device):
             patch = np.exp(-((xs-ix)**2+(ys-iy)**2)/(2*sigma*sigma))
             heat[b, 0, max(0, iy-radius):min(grid, iy+radius+1),
                  max(0, ix-radius):min(grid, ix+radius+1)] = patch
-            indices.append(iy*grid+ix); batch_indices.append(b)
-            offsets.append(xy-[ix, iy]); whs.append(wh)
+            indices.append(iy*grid+ix)
+            batch_indices.append(b)
+            offsets.append(xy-[ix, iy])
+            whs.append(wh)
             center = (box[:2]+box[2:])/2
             relative.append((points-center)/(box[2:]-box[:2]))
-    tensor = lambda x, dtype=torch.float32: torch.as_tensor(
+    def tensor(x, dtype=torch.float32):
+        return torch.as_tensor(
         np.asarray(x), dtype=dtype).to(device=device, non_blocking=True)
     return {"heatmap": tensor(heat), "index": tensor(indices, torch.long),
             "batch": tensor(batch_indices, torch.long),
@@ -692,19 +702,23 @@ def background_negative(sample):
 def detector_loss(outputs, target):
     import torch
     import torch.nn.functional as F
-    logits = outputs["heatmap"].float(); truth = target["heatmap"]
+    logits = outputs["heatmap"].float()
+    truth = target["heatmap"]
     probability = logits.sigmoid().clamp(1e-5, 1-1e-5)
-    positive = truth.eq(1); negative = truth.lt(1)
+    positive = truth.eq(1)
+    negative = truth.lt(1)
     focal = -(probability.log()*(1-probability).pow(2)*positive
               +(1-probability).log()*probability.pow(2)*(1-truth).pow(4)*negative).sum()
-    count = target["index"].numel(); focal = focal/max(1, count)
+    count = target["index"].numel()
+    focal = focal/max(1, count)
     if not count:
         empty = outputs["box"].sum()*0+outputs["corners"].sum()*0
         return focal+empty, {"heatmap": focal.detach(), "box": empty.detach(), "corners": empty.detach()}
     def gather(x):
         return x.float().flatten(2).transpose(1, 2)[target["batch"], target["index"]]
     raw = gather(outputs["box"])
-    offset = raw[:, :2].sigmoid(); wh = raw[:, 2:].clamp(-6, 7).exp()
+    offset = raw[:, :2].sigmoid()
+    wh = raw[:, 2:].clamp(-6, 7).exp()
     offset_loss = F.smooth_l1_loss(offset, target["offset"], beta=.1)
     size_loss = F.smooth_l1_loss(raw[:, 2:], target["wh"].log(), beta=.2)
     pred0, pred1 = offset-wh/2, offset+wh/2
@@ -722,7 +736,8 @@ def detector_loss(outputs, target):
 def _save_atomic(payload, path: Path):
     import torch
     temporary = path.with_suffix(path.suffix+".tmp")
-    torch.save(payload, temporary); temporary.replace(path)
+    torch.save(payload, temporary)
+    temporary.replace(path)
 
 
 def record_finite_loss(history, loss):
@@ -860,11 +875,13 @@ def run_training(args):
     import math
     from collections import Counter
     from concurrent.futures import ThreadPoolExecutor
+
     import cv2
     import numpy as np
     import torch
-    from lpr.plate_det import PlateDetModel, PlateDetector, ARCHITECTURE
-    torch.set_num_threads(2); cv2.setNumThreads(1)
+    from lpr.plate_det import ARCHITECTURE, PlateDetector, PlateDetModel
+    torch.set_num_threads(2)
+    cv2.setNumThreads(1)
     torch.manual_seed(42)
     if args.device == "cuda":
         if not torch.cuda.is_available():
@@ -886,7 +903,7 @@ def run_training(args):
     if last.exists() and args.resume is None:
         raise FileExistsError("last checkpoint exists; pass explicit --resume")
     memory_format = torch.channels_last if args.device == "cuda" else torch.contiguous_format
-    stage_parent = None
+    _stage_parent = None
     model = PlateDetModel(pretrained=args.resume is None and args.init_from is None and not args.random_smoke).to(
         device=args.device, memory_format=memory_format)
     for block in model.features[:args.freeze_backbone_blocks]:
@@ -918,7 +935,8 @@ def run_training(args):
         # counters; update that flag before loading a pre-optimization checkpoint.
         for group in payload["optimizer"]["param_groups"]:
             group.update(fused=args.device == "cuda", foreach=False)
-        optimizer.load_state_dict(payload["optimizer"]); scaler.load_state_dict(payload["scaler"])
+        optimizer.load_state_dict(payload["optimizer"])
+        scaler.load_state_dict(payload["scaler"])
         epoch_completed, cursor, exposures = payload["epoch_completed"], payload["batch_cursor"], payload["exposures"]
         args._stage_parent = payload.get("stage_parent")
         saved_rates = payload.get("training_config", {}).get("stage_learning_rates")
@@ -967,7 +985,9 @@ def run_training(args):
             release_manifest_sha256=file_digest(release_path) if verified_parent else None)
     elif not args.smoke and args.epochs < minimum_complete_epochs(stage_parent=False):
         raise ValueError("formal training requires at least40 complete epochs")
-    model.train(); started = time.monotonic(); steps_this_run = 0
+    model.train()
+    started = time.monotonic()
+    steps_this_run = 0
     for block in model.features[:args.freeze_backbone_blocks]:
         block.eval()
     args._wall_start = started
@@ -980,7 +1000,8 @@ def run_training(args):
         for epoch in range(epoch_completed, args.epochs):
             order = np.random.default_rng(42+epoch).permutation(len(pool))
             coverage = hashlib.sha256(order.astype("uint32").tobytes()).hexdigest()
-            epoch_start = time.monotonic(); start_cursor = cursor
+            epoch_start = time.monotonic()
+            start_cursor = cursor
             epoch_exposures, new_exposures = cursor, 0
             counts = Counter(restored_counts or {})
             if cursor and restored_counts is None:
@@ -988,7 +1009,7 @@ def run_training(args):
             restored_counts = None
             args._epoch_counts = counts
             args._epoch_start, args._epoch_before = epoch_start, epoch_before
-            def schedule(offset):
+            def schedule(offset, *, epoch=epoch, order=order):
                 return [executor.submit(read_training_sample, pool, int(i), epoch, args.image_size,
                                         augment=not args.smoke,
                                         camera_augment=args.camera_augment)
@@ -1018,28 +1039,34 @@ def run_training(args):
                     dtype=torch.float32, memory_format=memory_format).div_(255.)
                 targets = make_targets(samples, args.image_size, args.device)
                 prof_targets = time.perf_counter() if args.profile else 0.
-                if args.profile: events[1].record()
+                if args.profile:
+                    events[1].record()
                 progress = (epoch+offset/len(pool))/max(1, args.epochs)
                 factor = .01+.99*(1+math.cos(math.pi*progress))/2
                 warm = min(1., (epoch+offset/len(pool)+.01))
-                for group, base_lr in zip(optimizer.param_groups, args._base_lrs):
+                for group, base_lr in zip(optimizer.param_groups, args._base_lrs, strict=False):
                     group["lr"] = base_lr*factor*warm
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=args.device, dtype=torch.float16, enabled=args.device == "cuda"):
                     output = model(images)
                 prof_forward = time.perf_counter() if args.profile else 0.
-                if args.profile: events[2].record()
+                if args.profile:
+                    events[2].record()
                 loss, parts = detector_loss(output, targets)
-                if args.profile: events[3].record()
+                if args.profile:
+                    events[3].record()
                 record_finite_loss(args._finite_history, loss)
                 if args.device == "cpu":
                     check_finite_history(args._finite_history)
                 prof_loss = time.perf_counter() if args.profile else 0.
-                scaler.scale(loss).backward(); scaler.unscale_(optimizer)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 10.)
                 prof_backward = time.perf_counter() if args.profile else 0.
-                if args.profile: events[4].record()
-                scaler.step(optimizer); scaler.update()
+                if args.profile:
+                    events[4].record()
+                scaler.step(optimizer)
+                scaler.update()
                 if args.profile:
                     events[5].record()
                     prof_end = time.perf_counter()
@@ -1051,8 +1078,10 @@ def run_training(args):
                         "backward_clip_enqueue": (prof_backward-prof_loss)*1000,
                         "optimizer_enqueue": (prof_end-prof_backward)*1000,
                         "batch_total": (prof_end-prof_start)*1000}, events))
-                exposures += len(indices); epoch_exposures += len(indices)
-                new_exposures += len(indices); steps_this_run += 1
+                exposures += len(indices)
+                epoch_exposures += len(indices)
+                new_exposures += len(indices)
+                steps_this_run += 1
                 counts.update(s[3] for s in samples)
                 next_cursor = offset+len(indices)
                 if steps_this_run % 50 == 0 or args.smoke:
@@ -1088,7 +1117,8 @@ def run_training(args):
                              "device": args.device, "deployment_safe_load": True,
                              "pretrained_backbone": not args.random_smoke}
                     (args.out_dir/"smoke.json").write_text(json.dumps(smoke, indent=2), encoding="utf-8")
-                    print(json.dumps(smoke)); return smoke
+                    print(json.dumps(smoke))
+                    return smoke
                 if args._wall_before+(time.monotonic()-started) > args.max_hours*3600:
                     _save_atomic(_checkpoint(model, optimizer, scaler, args, epoch, next_cursor, exposures, pool_sha), last)
                     raise RuntimeError("wall-clock budget reached before completion; last saved, cannot claim40 epochs")
@@ -1100,7 +1130,8 @@ def run_training(args):
                     return {"epoch_completed": epoch, "cursor": next_cursor, "exposures": exposures}
             if epoch_exposures != len(pool) or new_exposures != len(pool)-start_cursor:
                 raise AssertionError("epoch did not cover every remaining training row")
-            cursor = 0; epoch_completed = epoch+1
+            cursor = 0
+            epoch_completed = epoch+1
             _save_atomic(_checkpoint(model, optimizer, scaler, args, epoch_completed, 0, exposures, pool_sha), last)
             elapsed = epoch_before+time.monotonic()-epoch_start
             epoch_before = 0.
@@ -1117,7 +1148,8 @@ def run_training(args):
                       "memory": process_memory(), "cuda_peak_reserved": torch.cuda.max_memory_reserved()}
             with (args.out_dir/"epochs.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record)+"\n")
-            print(json.dumps(record), flush=True); completed_this_run.append(record)
+            print(json.dumps(record), flush=True)
+            completed_this_run.append(record)
             args._background_unknown = 0
             if (args.stop_after_epoch and epoch_completed >= args.stop_after_epoch) or (
                     epoch_completed == 1 and total_hours_at_rate > args.max_hours):

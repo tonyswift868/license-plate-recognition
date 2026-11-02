@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from lpr.io_utils import imread
 from lpr_tools.data.ccpd import build_index, parse_ccpd_name
 from lpr_tools.synth_ccpd import generate, main
@@ -50,7 +49,7 @@ def test_generate_is_seeded_and_rejects_bad_scale(tmp_path):
     assert [(r["file"], r["plate_no"], r["quad"]) for r in first] == [
         (r["file"], r["plate_no"], r["quad"]) for r in second
     ]
-    for a, b in zip(first, second):
+    for a, b in zip(first, second, strict=False):
         assert Path(a["path"]).read_bytes() == Path(b["path"]).read_bytes()
     with pytest.raises(ValueError):
         generate(tmp_path / "bad", -1, 42)

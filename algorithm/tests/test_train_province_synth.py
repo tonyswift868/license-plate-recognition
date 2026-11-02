@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pathlib import Path
+from lpr_tools.train.province_synth import (
+    DEFAULT_FONT,
+    _canonical,
+    _erase_province_glyph,
+    _glyph_mask,
+    _row_background,
+    normalized_first_char,
+    replace_province,
+)
 
 cv2 = pytest.importorskip("cv2")
-pytest.importorskip("PIL")
-from PIL import Image, ImageDraw, ImageFont
-
-from lpr_tools.train.province_synth import (
-    _canonical, _erase_province_glyph, _glyph_mask, _row_background,
-    normalized_first_char, replace_province,
-)
+Image = pytest.importorskip("PIL.Image")
+ImageDraw = pytest.importorskip("PIL.ImageDraw")
+ImageFont = pytest.importorskip("PIL.ImageFont")
 
 
 def _plate(color: str, label: str):
+    if not DEFAULT_FONT.is_file():
+        pytest.skip(f"missing local font: {DEFAULT_FONT}")
     if color == "green":
         background, foreground = (150, 220, 130), (16, 16, 16)
     else:
@@ -22,15 +28,15 @@ def _plate(color: str, label: str):
     canonical = np.full((80, 256, 3), background, dtype=np.uint8)
     # Production slot centers the province glyph at .0754 and the next glyph
     # starts at .153. Draw the source glyph and A in their own production cells.
-    province = _glyph_mask(label[0], 26, 60, Path(r"C:\Windows\Fonts\simhei.ttf"))
+    province = _glyph_mask(label[0], 26, 60, DEFAULT_FONT)
     ink = np.asarray(foreground, dtype=np.uint8)
     canonical[10:70, 6:32] = np.where(province[..., None] > 0, ink, canonical[10:70, 6:32])
     pil = Image.fromarray(cv2.cvtColor(canonical, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
-    font = ImageFont.truetype(r"C:\Windows\Fonts\simhei.ttf", 50)
+    font = ImageFont.truetype(str(DEFAULT_FONT), 50)
     draw.text((42, 10), label[1], fill=foreground, font=font)
     for i, char in enumerate(label[2:]):
-        draw.text((82 + i * 25, 16), char, fill=foreground, font=ImageFont.truetype(r"C:\Windows\Fonts\simhei.ttf", 42))
+        draw.text((82 + i * 25, 16), char, fill=foreground, font=ImageFont.truetype(str(DEFAULT_FONT), 42))
     canonical = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
     image = np.zeros((180, 400, 3), dtype=np.uint8)
     quad = np.asarray([[40, 35], [339, 40], [334, 119], [35, 114]], dtype=np.float32)
@@ -85,7 +91,7 @@ def test_vectorized_row_background_matches_loop_reference(mask_case):
     if mask_case == "all_covered":
         assert np.isnan(actual[0]).all() and np.isnan(actual[1]).all()
         return
-    for got, want in zip(actual, expected):
+    for got, want in zip(actual, expected, strict=False):
         np.testing.assert_array_equal(got, want)
 
 

@@ -2,7 +2,6 @@ import csv
 from pathlib import Path
 
 import pytest
-
 from lpr_tools.data.ccpd import INDEX_FIELDS
 from lpr_tools.data.manifest import ManifestRow, write_manifest
 from lpr_tools.data.pick_golden import LABEL_FIELDS, pick_golden

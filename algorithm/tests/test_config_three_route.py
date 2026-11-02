@@ -1,4 +1,3 @@
-import math
 import pytest
 from lpr.config import load_config
 from lpr.errors import ConfigError

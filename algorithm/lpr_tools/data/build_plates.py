@@ -19,15 +19,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.io_utils import decode_image, imwrite
 from lpr.locate import box_iou, locate
 from lpr.plate_rules import match_layout
 from lpr.preprocess import preprocess
 from lpr.rectify import rectify_candidates
+
 from lpr_tools.data.ccpd import read_index
-from lpr_tools.data.manifest import read_manifest, image_path
+from lpr_tools.data.manifest import image_path, read_manifest
 
 FIELDS = ("file", "plate_no", "layout", "color", "source", "orig_path")
 WORKER_CONFIG = None
@@ -68,10 +68,10 @@ def _process_one(task: tuple[dict, str, str]) -> dict:
         layout = int(raw["layout"])
         color = raw["plate_color"]
         quad_nums = [float(x) for x in raw["quad"].split()]
-        quad = tuple(zip(quad_nums[::2], quad_nums[1::2]))
+        quad = tuple(zip(quad_nums[::2], quad_nums[1::2], strict=False))
         bbox = tuple(float(x) for x in raw["bbox"].split())
         key = hashlib.sha1((raw["split"] + "\0" + str(original).casefold()).encode("utf-8")).hexdigest()
-        split_root = Path(out_root) / raw["split"]
+        _split_root = Path(out_root) / raw["split"]
         rows = []
         crop_provenance = [{"file": f"{raw['split']}/{key}_gt.jpg", "orig_path": str(original),
                             "split": raw["split"], "source": "ground_truth", "bbox_iou": 1.0,
@@ -138,7 +138,7 @@ def _frozen_paths_and_hashes(manifests: list[Path], golden_dir: Path) -> tuple[s
 
 def build(index: Path, target: Path, receipt_dir: Path, *, workers: int = 4,
           config: str | None = None, limit_train: int = 0, limit_val: int = 0,
-          raw_root: Path = Path(r"D:\keshe2\algorithm\data\raw"),
+          raw_root: Path = ALGORITHM_DIR / "data/raw",
           frozen_manifests: list[Path] | None = None, golden_dir: Path | None = None) -> dict:
     has_existing_content = target.exists() and any(p.is_file() for p in target.rglob("*"))
     if has_existing_content and not (target / "build_state.json").is_file():
@@ -148,10 +148,10 @@ def build(index: Path, target: Path, receipt_dir: Path, *, workers: int = 4,
     for split in ("train", "val"):
         (target / split).mkdir(parents=True, exist_ok=True)
     if frozen_manifests is None:
-        frozen_manifests = [Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
-                            Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden\golden_manifest.csv")]
+        frozen_manifests = [ALGORITHM_DIR / "data/index/testset_manifest_v1.csv",
+                            ALGORITHM_DIR / "tests/data/golden/golden_manifest.csv"]
     if golden_dir is None:
-        golden_dir = Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden")
+        golden_dir = ALGORITHM_DIR / "tests/data/golden"
     raw_root = raw_root.resolve()
     frozen_paths, frozen_hashes = _frozen_paths_and_hashes(frozen_manifests, golden_dir)
     rows = read_index(index)
@@ -304,7 +304,7 @@ def build(index: Path, target: Path, receipt_dir: Path, *, workers: int = 4,
                     print(json.dumps(state, ensure_ascii=False), flush=True)
     (target / "source_hashes.json").write_text(json.dumps(completed_source_hash, ensure_ascii=False), encoding="utf-8")
     (receipt_dir / "errors.json").write_text(json.dumps(error_rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    counts = Counter()
+    _counts = Counter()
     province = Counter()
     greens = Counter()
     sources = Counter()
@@ -338,14 +338,14 @@ def build(index: Path, target: Path, receipt_dir: Path, *, workers: int = 4,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--index", type=Path, default=Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv"))
-    parser.add_argument("--out", type=Path, default=Path(r"D:\keshe2\algorithm\data\plates\v1"))
+    parser.add_argument("--index", type=Path, default=ALGORITHM_DIR / "data/index/ccpd_index.csv")
+    parser.add_argument("--out", type=Path, default=ALGORITHM_DIR / "data/plates/v1")
     parser.add_argument("--receipt-dir", type=Path, default=Path("algorithm/out/receipts/第七批/plates"))
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--config")
     parser.add_argument("--limit-train", type=int, default=0, help="small smoke run only")
     parser.add_argument("--limit-val", type=int, default=0, help="small smoke run only")
-    parser.add_argument("--raw-root", type=Path, default=Path(r"D:\keshe2\algorithm\data\raw"))
+    parser.add_argument("--raw-root", type=Path, default=ALGORITHM_DIR / "data/raw")
     parser.add_argument("--frozen-manifest", type=Path, action="append", default=None)
     parser.add_argument("--golden-dir", type=Path)
     args = parser.parse_args(argv)

@@ -13,31 +13,28 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Keep numerical libraries single-threaded before NumPy/Torch imports.
-for _thread_env in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                    "BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-    os.environ[_thread_env] = "1"
+os.environ.update(dict.fromkeys(('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'BLIS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'), '1'))
 
 import cv2
-import numpy as np
-
 from lpr.boxcrop import crop_box
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.locate import locate
 from lpr.pipeline import _in_roi, _merge_candidates
 from lpr.preprocess import preprocess
 from lpr.recognize import load_corner_detector, load_plate_reader
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path
-from .common import effective_config_info, model_identity
-from .index_samples import (FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST,
-                            fixed_manifest_samples, path_key)
 
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
-CEILING = Path(r"D:\keshe2\algorithm\out\tmp_arch\ceiling_v2\report.json")
+from .common import effective_config_info, model_identity
+from .index_samples import FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST, fixed_manifest_samples, path_key
+
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
+CEILING = ALGORITHM_DIR / "out/tmp_arch/ceiling_v2/report.json"
 OUTPUT = Path("algorithm/out/receipts/第十一批/box-direct")
 PAD_GRID = tuple((pad_x, pad_y) for pad_x in (.05, .10, .15, .25)
                  for pad_y in (.15, .25, .40))
@@ -111,7 +108,7 @@ def _read_outcome(text, confidences, color, min_confidence, truth):
         status = decision.status.value
         legal = status in {"OK", "LOW_CONFIDENCE"}
         layout_name = decision.layout_name or None
-    matches = sum(a == b for a, b in zip(text, truth))
+    matches = sum(a == b for a, b in zip(text, truth, strict=False))
     return {"prediction": text, "layout_name": layout_name,
             "min_confidence": float(confidence) if confidence is not None else None,
             "status": status, "legal": legal, "correct": text == truth,
@@ -124,8 +121,8 @@ def _read_crnn_native(reader, crop, torch):
     # the new crop_box contract intentionally returns native-resolution crops.
     # Reuse the reader's own plate_tensor preprocessing and model path so resize
     # remains CRNN-owned and no evaluator-specific resize is introduced.
-    from lpr.recognize.crnn import CrnnReader, _greedy_decode, plate_tensor
     from lpr.charset import NUM_CLASSES
+    from lpr.recognize.crnn import CrnnReader, _greedy_decode, plate_tensor
 
     if not isinstance(reader, CrnnReader):
         raise TypeError("box-direct only adapts the existing CrnnReader; future Reader types need their own native-crop contract")
@@ -417,7 +414,7 @@ def run(*, index=INDEX, val_manifest=FIXED_VAL_MANIFEST,
                        for name, filename in (("boxcrop", "boxcrop.py"),
                                               ("crnn", "recognize/crnn.py"),
                                               ("pipeline", "pipeline.py"))}
-    metadata = {"status": "starting", "started_utc": datetime.now(timezone.utc).isoformat(),
+    metadata = {"status": "starting", "started_utc": datetime.now(UTC).isoformat(),
                 "command": list(sys.argv), "config": cfg_info,
                 "models": models, "index": {"path": str(Path(index).resolve()), "sha256": index_sha},
                 "manifests": identities, "ceiling_compatibility": ceiling_check,
@@ -511,7 +508,7 @@ def run(*, index=INDEX, val_manifest=FIXED_VAL_MANIFEST,
             subset = key.split("/", 1)[1]
         summaries[key] = _summarize_counts(value, ceiling_data, split=split, subset=subset)
     metadata["status"] = "complete" if not decode_errors and not locator_errors and not read_errors else "completed_with_errors"
-    metadata["finished_utc"] = datetime.now(timezone.utc).isoformat()
+    metadata["finished_utc"] = datetime.now(UTC).isoformat()
     report = {"status": metadata["status"], "method": metadata,
               "record_count": len(samples), "decode_error_count": len(decode_errors),
               "locator_error_count": len(locator_errors),

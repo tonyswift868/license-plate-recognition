@@ -71,7 +71,7 @@ def _segment_decode(rect, classifier, cfg, *, segmenter=None, decoder=None,
 def _position_top1(probabilities, layout_name, province_prior=None):
     """Return raw-global and position-constrained top1s for one selected decode."""
     import numpy as np
-    from lpr.charset import CHARSET, CHAR_TO_INDEX
+    from lpr.charset import CHAR_TO_INDEX, CHARSET
     from lpr.plate_rules import LAYOUTS
 
     probs = np.asarray(probabilities)
@@ -120,7 +120,7 @@ def _alnum_analysis(segment_read, truth: str, province_prior=None):
 
 
 def _summarize_alnum(records):
-    from lpr.charset import CHARSET, DIGITS, LETTERS, CHAR_TO_INDEX
+    from lpr.charset import CHAR_TO_INDEX, DIGITS, LETTERS
 
     skipped = defaultdict(lambda: {"rows": 0, "characters": 0})
     class_counts = {char: {"support": 0, "raw_global_correct": 0,
@@ -235,15 +235,16 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
     import cv2
     import numpy as np
     import torch
-    from lpr.charset import CHARSET, CHAR_TO_INDEX, PROVINCES, PROVINCE_IDX
+    from lpr.charset import CHAR_TO_INDEX, CHARSET, PROVINCE_IDX
     from lpr.config import load_config
     from lpr.recognize import load_classifier
-    from lpr.recognize.cnn_model import CharCNN
     from lpr.recognize.cnn import CnnClassifier
-    from lpr_tools.train.province_synth import replace_province
+    from lpr.recognize.cnn_model import CharCNN
+
     from lpr_tools.train.province_char_input import normalized_first_char
     from lpr_tools.train.province_inference_timing import instrument_method, summarize
-    from lpr_tools.train.score_province_readers import _image, _metrics, _quad, _first_char_patch
+    from lpr_tools.train.province_synth import replace_province
+    from lpr_tools.train.score_province_readers import _first_char_patch, _image, _metrics, _quad
 
     torch.set_num_threads(2)
     cv2.setNumThreads(1)

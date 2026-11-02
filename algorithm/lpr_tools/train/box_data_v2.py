@@ -11,17 +11,19 @@ import hashlib
 import io
 import json
 import random
-from collections import Counter, defaultdict
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+
+from lpr.config import ALGORITHM_DIR
 
 from lpr_tools.train import box_data
 
 ROOT = Path(__file__).resolve().parents[3]
-DATA = Path(r"D:\keshe2\algorithm\data")
+DATA = ALGORITHM_DIR / "data"
 V2 = DATA / "plates" / "v2"
-CACHE_INDEX = Path(r"D:\keshe2\algorithm\data\boxcrop_cache\box_reader_v1\index.csv")
+CACHE_INDEX = ALGORITHM_DIR / "data/boxcrop_cache/box_reader_v1/index.csv"
 BATCH10 = ROOT / "algorithm" / "out" / "data" / "batch10"
 DEFAULT_OUT = ROOT / "algorithm" / "out" / "data" / "batch11"
 CCPD_INDEX = DATA / "index" / "ccpd_index.csv"

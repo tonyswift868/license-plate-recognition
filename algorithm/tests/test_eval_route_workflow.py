@@ -2,7 +2,6 @@ import gzip
 import json
 
 import pytest
-
 from lpr_tools.eval import three_route_workflow as workflow
 
 
@@ -73,7 +72,8 @@ def test_auto_only_content_split_hashes_images_without_loading_models(tmp_path, 
     # Two duplicate rows cannot balance this tiny stratum; include two singleton
     # images so the actual content-safe splitter can restore the exact halves.
     for n in range(2, 4):
-        p = tmp_path / f"{n}.jpg"; p.write_bytes(str(n).encode())
+        p = tmp_path / f"{n}.jpg"
+        p.write_bytes(str(n).encode())
         records.append({"path":str(p),"split":"val","subset":"tiny"})
     target = workflow._content_split(trace, tmp_path / "split.json")
     assignments = json.loads(target.read_text(encoding="utf-8"))["assignments"]

@@ -4,20 +4,20 @@ import argparse
 import csv
 import hashlib
 import json
-from numbers import Integral
-from pathlib import Path
 import random
 import time
+from numbers import Integral
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+from lpr.charset import CHAR_TO_INDEX, CHARSET, DIGIT_IDX, LETTER_IDX, NUM_CLASSES, PROVINCE_IDX
+from lpr.recognize import write_manifest_entry
+from lpr.recognize.cnn_model import CharCNN
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from lpr.charset import CHARSET, CHAR_TO_INDEX, DIGIT_IDX, LETTER_IDX, NUM_CLASSES, PROVINCE_IDX
-from lpr.recognize import write_manifest_entry
-from lpr.recognize.cnn_model import CharCNN
 from .augment import augment_char
 from .data import load_split
 
@@ -59,7 +59,7 @@ def _as_sources(data, data_weights=None):
 def _load_sources(sources, weights, split, *, seed, require_all, class_boosts=None):
     imgs, labs, sample_weights = [], [], []
     class_boosts = class_boosts or {}
-    for source_id, (root, source_weight) in enumerate(zip(sources, weights)):
+    for source_id, (root, source_weight) in enumerate(zip(sources, weights, strict=False)):
         images, labels = load_split(root, split, seed=seed + source_id, require_all=False)
         if not len(labels):
             if split == "val":
@@ -183,8 +183,12 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
               "init_weights": init_metadata,
               "samples_per_epoch": int(samples_per_epoch) if samples_per_epoch is not None else None}
     signature = _data_signature(sources)
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    torch.set_num_threads(2); torch.use_deterministic_algorithms(True); cv2.setNumThreads(1)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_num_threads(2)
+    torch.use_deterministic_algorithms(True)
+    cv2.setNumThreads(1)
     train_images, train_labels, sampling_weights = _load_sources(
         sources, weights_by_source, "train", seed=seed, require_all=True,
         class_boosts=class_boosts)
@@ -216,7 +220,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else out.with_suffix(".checkpoint.pt")
     log_path = Path(log_path) if log_path is not None else out.with_suffix(".train.csv")
     sidecar_path = out.with_suffix(".training.json")
@@ -251,7 +256,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
         first_epoch = int(state["epoch"])
         if epochs < first_epoch:
             raise ValueError("epochs is the target total and cannot be less than completed checkpoint epochs")
-        model.load_state_dict(state["model"]); optimizer.load_state_dict(state["optimizer"])
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
         random.setstate(state["python_rng"])
         np_state = state["numpy_rng"]
@@ -259,7 +265,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
                              int(np_state["pos"]), int(np_state["has_gauss"]),
                              float(np_state["cached_gaussian"])))
         torch.set_rng_state(state["torch_rng"])
-        loader_generator.set_state(state["loader_rng"]); sampler_generator.set_state(state["sampler_rng"])
+        loader_generator.set_state(state["loader_rng"])
+        sampler_generator.set_state(state["sampler_rng"])
         elapsed_total = float(state.get("train_seconds", 0.0))
         last_accuracy = state.get("val_char_acc")
         last_province_accuracy = state.get("val_province_acc")
@@ -281,16 +288,21 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     history = []
     with log_path.open(mode, encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
-        if mode == "w": writer.writeheader()
+        if mode == "w":
+            writer.writeheader()
         for epoch in range(first_epoch, run_end):
             started = time.perf_counter()
-            model.train(); train_data.epoch = epoch
+            model.train()
+            train_data.epoch = epoch
             loss_total = 0.0
             for images, labels in train_loader:
                 optimizer.zero_grad(set_to_none=True)
-                loss = criterion(model(images), labels); loss.backward(); optimizer.step()
+                loss = criterion(model(images), labels)
+                loss.backward()
+                optimizer.step()
                 loss_total += loss.item() * len(labels)
-            model.eval(); correct = 0
+            model.eval()
+            correct = 0
             province_correct = province_count = alnum_correct = alnum_count = 0
             with torch.inference_mode():
                 for images, labels in val_loader:
@@ -313,7 +325,8 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
                    "val_char_acc": accuracy, "val_province_acc": province_accuracy,
                    "val_alnum_acc": alnum_accuracy, "lr": optimizer.param_groups[0]["lr"],
                    "epoch_seconds": epoch_seconds, "train_seconds": elapsed_total}
-            writer.writerow(row); handle.flush()
+            writer.writerow(row)
+            handle.flush()
             last_accuracy = row["val_char_acc"]
             last_province_accuracy = province_accuracy
             last_alnum_accuracy = alnum_accuracy
@@ -349,7 +362,7 @@ def train(data, out: Path, *, version: str, epochs: int = 15,
     torch.save(best_model, out)
     source_manifest = json.dumps([{"path": str(p), "weight": w,
                                    "class_sample_boosts": {CHARSET[k]: v for k, v in class_boosts.items()}}
-                                  for p, w in zip(sources, weights_by_source)],
+                                  for p, w in zip(sources, weights_by_source, strict=False)],
                                  ensure_ascii=False)
     write_manifest_entry(out, version=version, train_data=source_manifest, val_char_acc=best_accuracy)
     sidecar_path.write_text(
@@ -402,7 +415,7 @@ def main() -> None:
             char, raw_factor = item.rsplit("=", 1)
             label = CHAR_TO_INDEX[char]
             factor = float(raw_factor)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError):
             parser.error(f"invalid --class-boost {item!r}; expected one known character=positive factor")
         if not np.isfinite(factor) or factor <= 0:
             parser.error(f"invalid --class-boost {item!r}; factor must be positive and finite")

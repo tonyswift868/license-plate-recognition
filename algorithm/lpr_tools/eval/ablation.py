@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import argparse
 import csv
-from concurrent.futures import ThreadPoolExecutor
-from collections import deque
 import json
 import math
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import torch
-
 from lpr.charset import CHARSET, PROVINCE_IDX
 from lpr.io_utils import imread
 from lpr.recognize import load_classifier

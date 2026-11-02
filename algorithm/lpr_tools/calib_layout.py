@@ -14,11 +14,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.config import load_config
 from lpr.io_utils import imread
 from lpr.segment import _fallback_binary_from_gray, fallback_binary_plate, segment
 from lpr.types import PlateCandidate, RectifiedPlate
+
 from lpr_tools.data.ccpd import read_index
 
 
@@ -52,7 +52,7 @@ def _measure_slots(binary: np.ndarray, layout: int) -> list[tuple[float, float]]
         if not active[i] and active[i - 1] and active[i + 1]:
             active[i] = True
     edges = np.diff(np.r_[False, active, False].astype(np.int8))
-    runs = list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+    runs = list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1), strict=False))
     # Merge the closest neighboring runs until each remaining span represents one
     # character. The enlarged inter-character gap remains the last gap to preserve.
     while len(runs) > layout:

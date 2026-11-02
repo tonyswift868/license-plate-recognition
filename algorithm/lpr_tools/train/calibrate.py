@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from numbers import Integral
-from typing import Mapping
 
 import numpy as np
 import torch
-
 from lpr.charset import NUM_CLASSES
 
 

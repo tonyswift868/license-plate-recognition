@@ -1,15 +1,18 @@
 import json
+
 import cv2
-import numpy as np
-import pytest
-from lpr.testing import FakeRecognizer
-from lpr.io_utils import imwrite
-from lpr_tools.data.manifest import ManifestRow, write_manifest
-from lpr_tools.eval.common import letterbox, parse_size
-from lpr_tools.eval.bench_latency import benchmark, main as latency_main
-from lpr_tools.eval.bench_video import benchmark_video, main as video_main
 import lpr_tools.eval.bench_latency as bl
 import lpr_tools.eval.bench_video as bv
+import numpy as np
+import pytest
+from lpr.io_utils import imwrite
+from lpr.testing import FakeRecognizer
+from lpr_tools.data.manifest import ManifestRow, write_manifest
+from lpr_tools.eval.bench_latency import benchmark
+from lpr_tools.eval.bench_latency import main as latency_main
+from lpr_tools.eval.bench_video import benchmark_video
+from lpr_tools.eval.bench_video import main as video_main
+from lpr_tools.eval.common import letterbox, parse_size
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +24,8 @@ def isolate_bench_config(tmp_path, monkeypatch):
 
 class CountingFake(FakeRecognizer):
     def __init__(self):
-        super().__init__();self.shapes=[]
+        super().__init__()
+        self.shapes=[]
     def recognize(self,image,**kwargs):
         self.shapes.append(image.shape)
         return super().recognize(image,**kwargs)
@@ -40,7 +44,8 @@ def test_letterbox_and_warmup():
     assert set(report["stage_ms"])==set(bl.STAGES)
     assert parse_size("1280x720")== (1280,720)
     for size in ("a","0x1","1x-2"):
-        with pytest.raises(ValueError):parse_size(size)
+        with pytest.raises(ValueError):
+            parse_size(size)
 
 
 def test_bench_reports_crnn_accuracy_only_with_aligned_ground_truth():
@@ -65,26 +70,31 @@ def test_bench_reports_crnn_accuracy_only_with_aligned_ground_truth():
 def make_video(path):
     writer=cv2.VideoWriter(str(path),cv2.VideoWriter_fourcc(*"mp4v"),20.,(160,120))
     assert writer.isOpened()
-    for i in range(20):writer.write(np.full((120,160,3),i*10,np.uint8))
+    for i in range(20):
+        writer.write(np.full((120,160,3),i*10,np.uint8))
     writer.release()
 
 
 def test_all_frames_decoded_and_sampled(tmp_path):
-    path=tmp_path/"synth.mp4";make_video(path)
+    path=tmp_path/"synth.mp4"
+    make_video(path)
     recognizer=CountingFake()
     report=benchmark_video(recognizer,path,sample_fps=4)
     assert report["decoded_frames"]==20 and report["sampled_frames"]==4
     assert len(recognizer.shapes)==4 and report["end_to_end_fps"]>0
     assert sum(report["vote_frames_used"])==3 and report["vote_outputs"]==1
     assert benchmark_video(FakeRecognizer(),path,sample_fps=30)["sampled_frames"]==20
-    with pytest.raises(ValueError):benchmark_video(FakeRecognizer(),path,sample_fps=0)
-    with pytest.raises(ValueError):benchmark_video(FakeRecognizer(),tmp_path/"missing.mp4")
+    with pytest.raises(ValueError):
+        benchmark_video(FakeRecognizer(),path,sample_fps=0)
+    with pytest.raises(ValueError):
+        benchmark_video(FakeRecognizer(),tmp_path/"missing.mp4")
 
 
 def test_cli_sources(tmp_path,capsys,monkeypatch):
     monkeypatch.setattr(bl,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
     monkeypatch.setattr(bv,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
-    p=tmp_path/"image.png";imwrite(p,np.zeros((120,200,3),np.uint8))
+    p=tmp_path/"image.png"
+    imwrite(p,np.zeros((120,200,3),np.uint8))
     manifest=tmp_path/"m.csv"
     write_manifest(manifest,[ManifestRow(p.name,"陕A12345","blue","clear","test")])
     for source in (["--images",str(p)],["--manifest",str(manifest)],[]):
@@ -95,14 +105,16 @@ def test_cli_sources(tmp_path,capsys,monkeypatch):
             assert (report["requested"],report["decoded"],report["skipped"])==(1,1,0)
         else:
             assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
-    path=tmp_path/"synth.mp4";make_video(path)
+    path=tmp_path/"synth.mp4"
+    make_video(path)
     custom = tmp_path / "video-config.toml"
     custom.write_text('[runtime]\ntorch_threads = 3\nmodel_path = ""\n', encoding="utf-8")
     monkeypatch.setattr(bv, "runtime_info", lambda cfg: {"cpu": "test CPU", "torch_threads": cfg.runtime.torch_threads})
     assert video_main(["--fake","--video",str(path),"--config",str(custom)])==0
     video_report = json.loads(capsys.readouterr().out)
     assert video_report["decoded_frames"] == 20 and video_report["torch_threads"] == 3
-    with pytest.raises(SystemExit):latency_main(["--fake","--n","0"])
+    with pytest.raises(SystemExit):
+        latency_main(["--fake","--n","0"])
     assert latency_main(["--fake","--images",str(tmp_path/"missing")])==0
     report=json.loads(capsys.readouterr().out)
     assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)
@@ -119,8 +131,10 @@ def test_cli_sources(tmp_path,capsys,monkeypatch):
 
 def test_cli_skips_undecodable_and_reports_empty_inputs(tmp_path,capsys,monkeypatch):
     monkeypatch.setattr(bl,"runtime_info",lambda cfg=None:{"cpu":"test CPU","torch_threads":2})
-    good=tmp_path/"good.png";imwrite(good,np.zeros((32,48,3),np.uint8))
-    bad=tmp_path/"bad.jpg";bad.write_bytes(b"not an image")
+    good=tmp_path/"good.png"
+    imwrite(good,np.zeros((32,48,3),np.uint8))
+    bad=tmp_path/"bad.jpg"
+    bad.write_bytes(b"not an image")
     manifest=tmp_path/"mixed.csv"
     write_manifest(manifest,[ManifestRow(good.name,"陕A12345","blue","clear","test"),
                              ManifestRow(bad.name,"陕A12345","blue","clear","test")])
@@ -136,7 +150,8 @@ def test_cli_skips_undecodable_and_reports_empty_inputs(tmp_path,capsys,monkeypa
     assert (report["requested"],report["decoded"],report["skipped"])==(1,0,1)
     assert report["n"]==0 and report["wall_time"] is None
 
-    empty=tmp_path/"empty.csv";write_manifest(empty,[])
+    empty=tmp_path/"empty.csv"
+    write_manifest(empty,[])
     assert latency_main(["--fake","--manifest",str(empty)])==0
     report=json.loads(capsys.readouterr().out)
     assert (report["requested"],report["decoded"],report["skipped"])==(0,0,0)

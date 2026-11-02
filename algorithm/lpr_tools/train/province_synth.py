@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-import random
 from typing import Any
 
-from lpr.charset import PROVINCES
 from lpr.charnorm import normalize_char, unify_polarity
+from lpr.charset import PROVINCES
 
 DEFAULT_FONT = Path(r"C:\Windows\Fonts\simhei.ttf")
 
@@ -90,7 +89,6 @@ def _glyph_mask_cached(character: str, size: int, font_name: str):
 
 def _glyph_mask(character: str, width: int, height: int, font_path: Path):
     import cv2
-    import numpy as np
     source = _glyph_mask_cached(character, max(width, height), str(font_path))
     points = cv2.findNonZero(source)
     if points is None:
@@ -115,7 +113,7 @@ def _masked_row_median(values, valid):
 def _row_background(pixels, clean, side):
     """Estimate left/right row colors, honoring clean-side and fallback rules."""
     import numpy as np
-    height = pixels.shape[0]
+    _height = pixels.shape[0]
     left_valid = clean[:, :side]
     right_valid = clean[:, -side:]
     left = _masked_row_median(pixels[:, :side], left_valid)

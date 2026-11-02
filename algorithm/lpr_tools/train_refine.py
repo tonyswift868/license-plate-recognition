@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import math
 import random
-import shutil
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +19,16 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lpr.corner_net import (  # noqa: E402
-    REFINE_INPUT_SIZE, REFINE_ARCHITECTURE, RefineModel, refine_coordinates,
+from lpr.corner_net import (
+    REFINE_ARCHITECTURE,
+    REFINE_INPUT_SIZE,
+    RefineModel,
     letterbox_image,
+    refine_coordinates,
 )
-from lpr.io_utils import imread  # noqa: E402
-from lpr_tools import train_corner as source  # noqa: E402
+from lpr.io_utils import imread
+
+from lpr_tools import train_corner as source
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "out" / "eighth" / "data"
@@ -240,7 +243,8 @@ def _save_deploy(path: Path, model: RefineModel, data_sha: str, dist_sha: str):
                "data_audit_sha256": data_sha, "proposal_distribution_sha256": dist_sha,
                "source_hashes": _source_hashes(), "seed": SEED}
     temp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, temp); temp.replace(path)
+    torch.save(payload, temp)
+    temp.replace(path)
 
 
 def _save_resume(path: Path, model: RefineModel, optimizer: torch.optim.Optimizer,
@@ -257,7 +261,8 @@ def _save_resume(path: Path, model: RefineModel, optimizer: torch.optim.Optimize
                "torch_rng": torch.get_rng_state(), "python_rng": random.getstate(),
                "numpy_rng": np.random.get_state(), "saved_at": time.time()}
     temp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, temp); temp.replace(path)
+    torch.save(payload, temp)
+    temp.replace(path)
 
 
 def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_number: int,
@@ -266,8 +271,11 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
         raise ValueError("refiner allows only rounds 1/2 and at most 2,000 steps each")
     if (round_number == 1) != (resume is None):
         raise ValueError("round 1 starts fresh and round 2 requires a resume checkpoint")
-    torch.set_num_threads(4); cv2.setNumThreads(1)
-    random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+    torch.set_num_threads(4)
+    cv2.setNumThreads(1)
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
     torch.use_deterministic_algorithms(True, warn_only=True)
     rows, _holdout_metadata_only, pool_audit = _safe_training_rows(data_dir)
     proposal_samples, dist_sha = read_proposal_distribution(distribution_path)
@@ -297,11 +305,13 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
     if not audit_only:
         (out_dir / "data-audit.json").write_text(encoded_audit, encoding="utf-8")
     if audit_only:
-        print(json.dumps(audit, ensure_ascii=False)); return
+        print(json.dumps(audit, ensure_ascii=False))
+        return
     initial_path = out_dir / "initial-random-state.pt"
     model = RefineModel()
     optimizer = torch.optim.AdamW(model.parameters(), lr=.001 if round_number == 1 else .0003)
-    start_step = 0; history = []
+    start_step = 0
+    history = []
     exposures = {"round": 0, "total": 0, "subsets": {}}
     if resume is not None:
         expected_resume = out_dir / "checkpoint-step-2000.pt"
@@ -323,8 +333,10 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
         torch.set_rng_state(checkpoint["torch_rng"])
         random.setstate(checkpoint["python_rng"])
         np.random.set_state(checkpoint["numpy_rng"])
-        for group in optimizer.param_groups: group["lr"] = .0003
-        start_step = checkpoint["step"]; history = list(checkpoint["history"])
+        for group in optimizer.param_groups:
+            group["lr"] = .0003
+        start_step = checkpoint["step"]
+        history = list(checkpoint["history"])
         exposures = checkpoint["exposures"]
         exposures["round"] = 0
     else:
@@ -336,8 +348,11 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
     batch_count = (len(dataset) + BATCH_SIZE - 1) // BATCH_SIZE
     end_step = start_step + steps
     cap = 2000 if round_number == 1 else MAX_STEPS
-    if end_step > cap: raise ValueError("requested steps exceed refiner round/global cap")
-    model.train(); step = start_step; started = time.monotonic()
+    if end_step > cap:
+        raise ValueError("requested steps exceed refiner round/global cap")
+    model.train()
+    step = start_step
+    started = time.monotonic()
     # Global counts carry over from round 1; round counts reset at each phase.
     for epoch in range(start_step // batch_count, (end_step - 1) // batch_count + 1):
         dataset.set_epoch(epoch)
@@ -345,13 +360,20 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
                             generator=torch.Generator().manual_seed(SEED + epoch), drop_last=False)
         skip = start_step % batch_count if epoch == start_step // batch_count else 0
         for images, targets, _before, subsets in loader:
-            if skip: skip -= 1; continue
-            if step >= end_step: break
+            if skip:
+                skip -= 1
+                continue
+            if step >= end_step:
+                break
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)
             loss, parts = refine_loss(logits, targets)
-            if not torch.isfinite(loss): raise FloatingPointError(f"non-finite refiner loss at step {step}")
-            loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 5.); optimizer.step(); step += 1
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"non-finite refiner loss at step {step}")
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.)
+            optimizer.step()
+            step += 1
             exposures["round"] += int(images.shape[0])
             exposures["total"] += int(images.shape[0])
             for subset, count in Counter(subsets).items():
@@ -374,7 +396,8 @@ def train(*, data_dir: Path, distribution_path: Path, out_dir: Path, round_numbe
                              initial_state_sha=initial_state_sha, exposures=exposures, history=history,
                              source_hashes=_source_hashes())
                 _save_deploy(out_dir / f"corner-refine-step-{step}.pt", model, data_sha, dist_sha)
-        if step >= end_step: break
+        if step >= end_step:
+            break
     elapsed = time.monotonic() - started
     summary = {"step": step, "requested_steps_this_round": steps, "round": round_number,
                "elapsed_seconds": elapsed, "data_audit_sha256": data_sha,
@@ -411,4 +434,5 @@ def main():
         parser.error(str(exc))
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()

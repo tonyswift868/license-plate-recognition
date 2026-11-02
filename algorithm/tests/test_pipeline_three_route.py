@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 import lpr.pipeline as pl
+import numpy as np
 from lpr.types import RecogStatus
 
-from .test_pipeline import IMG, _cand, _dec, _recognizer_with, stages
+from .test_pipeline import IMG, _cand, _dec, _recognizer_with
 
 S = RecogStatus
 

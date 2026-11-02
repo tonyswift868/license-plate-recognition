@@ -1,8 +1,12 @@
 import pytest
-
-from lpr_tools.eval.fallback_selection import (apply_rule, compare_record, score, select_reader,
-                                               validate_params, _identity_verified)
-
+from lpr_tools.eval.fallback_selection import (
+    _identity_verified,
+    apply_rule,
+    compare_record,
+    score,
+    select_reader,
+    validate_params,
+)
 
 PARAMS = {"agree_min": 0.9, "solo_seg": 0.9, "solo_reader": 0.9, "prefer": "segment"}
 

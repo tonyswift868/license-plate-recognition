@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import pytest
-
 from lpr.errors import BadInputError
 from lpr.preprocess import preprocess
 

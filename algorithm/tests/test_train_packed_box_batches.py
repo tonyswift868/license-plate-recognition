@@ -6,7 +6,6 @@ import cv2
 import numpy as np
 import pytest
 import torch
-
 from lpr_tools.train.packed_box_batches import PackedBoxBatches
 from lpr_tools.train.train_box_reader import collate
 

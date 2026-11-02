@@ -26,19 +26,29 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-from lpr.corner_net import (  # noqa: E402
-    ARCHITECTURE, INPUT_SIZE, OUTPUT_STRIDE, CornerModel, letterbox_image,
-    KeypointModel, keypoint_coordinates, CornerNet, RoiConfidenceModel, RoiCornerRefiner, pack_corner_roi_checkpoint,
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lpr.config import ALGORITHM_DIR
+from lpr.corner_net import (
+    ARCHITECTURE,
+    INPUT_SIZE,
+    OUTPUT_STRIDE,
+    CornerModel,
+    CornerNet,
+    KeypointModel,
+    RoiConfidenceModel,
+    RoiCornerRefiner,
+    keypoint_coordinates,
+    letterbox_image,
+    pack_corner_roi_checkpoint,
 )
-from lpr.io_utils import imread  # noqa: E402
+from lpr.io_utils import imread
 
+ROOT = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parents[1]
 DATA_DIR = HERE / "out" / "seventh" / "data"
 OUT_DIR = HERE / "out" / "seventh"
-DATA_ROOT = Path("D:/keshe2/algorithm/data")
+DATA_ROOT = ALGORITHM_DIR / "data"
 INDEX_CSV = DATA_ROOT / "index" / "ccpd_index.csv"
 FROZEN_MANIFEST = DATA_ROOT / "index" / "testset_manifest_v1.csv"
 UNDECODABLE_MANIFEST = DATA_ROOT / "index" / "undecodable.csv"
@@ -147,7 +157,7 @@ def _verify_selected_image_bytes(exclusion_manifests: list[Path],
             paths.append((row["path"], path))
         with ThreadPoolExecutor(max_workers=hash_threads) as pool:
             digests = list(pool.map(_file_sha256, [path for _, path in paths]))
-        for (display_path, _path), digest in zip(paths, digests):
+        for (display_path, _path), digest in zip(paths, digests, strict=False):
             if digest in blocked_hashes:
                 raise ValueError(f"selected {label} image is byte-identical to protected image: {display_path}")
             result.add(digest)
@@ -367,7 +377,7 @@ def prepare_corner_data(*, output_dir: Path = DATA_DIR, train_n: int = 30_000,
     if len(by_key) != len(index_rows):
         raise ValueError("duplicate normalized path in ccpd_index")
 
-    eligible = [row for row in index_rows if row["split"] == "train" and row["has_plate"] == "1"
+    _eligible = [row for row in index_rows if row["split"] == "train" and row["has_plate"] == "1"
                 and not row["skip_reason"] and row["subset"] in {"ccpd_base", "ccpd_green"}
                 and _path_key(row["path"]) not in blocked]
     train_rows = _select_training_positives(index_rows, blocked, train_n=train_n)
@@ -1014,10 +1024,10 @@ def validate_negatives(model: CornerModel, rows: list[dict[str, str]], batch_siz
             heat, corners = model(images)
             probabilities = torch.sigmoid(heat[:, 0]).cpu().numpy()
             corner_maps = corners.cpu().numpy()
-            for probability, corner_map in zip(probabilities, corner_maps):
+            for probability, corner_map in zip(probabilities, corner_maps, strict=False):
                 local_max = cv2.dilate(probability, np.ones((3, 3), np.uint8))
                 ys, xs = np.where(probability >= local_max - 1e-7)
-                order = sorted(zip(ys.tolist(), xs.tolist()), key=lambda cell: -float(probability[cell]))
+                order = sorted(zip(ys.tolist(), xs.tolist(), strict=False), key=lambda cell: -float(probability[cell]))
                 valid_scores = [float(probability[y, x]) for y, x in order
                                 if _valid_quad(corner_map[:, y, x].reshape(4, 2))]
                 scores.append(max(valid_scores, default=0.))
@@ -1094,7 +1104,7 @@ def train(args: argparse.Namespace) -> None:
         raise ValueError("specify both --np-train-csv and --np-val-csv")
     audit = audit_sources(train_rows, val_rows, np_train, np_val,
                           Path(args.train_csv), Path(args.val_csv))
-    hard_audit = None
+    _hard_audit = None
     if hard_train:
         audit["hard_pool"] = hard_pool_audit
     np_audit_path = Path(args.np_audit) if args.np_audit else DATA_DIR / "np-split-audit.json"
@@ -1242,7 +1252,7 @@ def train(args: argparse.Namespace) -> None:
             consumed_counts["positive_examples"] += int((labels >= .5).sum())
             consumed_counts["np_negative_examples"] += sum(
                 subset == "ccpd_np" and not is_synth
-                for subset, is_synth in zip(meta["subset"], meta["synthetic_background"])
+                for subset, is_synth in zip(meta["subset"], meta["synthetic_background"], strict=False)
             )
             consumed_counts["synthetic_background_examples"] += int(meta["synthetic_background"].sum())
             segment_hm += float(loss_hm.detach())
@@ -1653,13 +1663,13 @@ def _outside_gt_crop(image: np.ndarray, row: dict[str, str], rng: np.random.Gene
     quad = parse_quad(row)
     bx, by, bw, bh = parse_bbox(row)
     low, high = quad.min(0), quad.max(0)
-    l, t = min(bx, float(low[0])), min(by, float(low[1]))
+    left, t = min(bx, float(low[0])), min(by, float(low[1]))
     r, b = max(bx+bw, float(high[0])), max(by+bh, float(high[1]))
-    margin_x = .12 * (r - l)
+    margin_x = .12 * (r - left)
     margin_y = .12 * (b - t)
-    exclusion = (l - margin_x, t - margin_y, r + margin_x, b + margin_y)
+    exclusion = (left - margin_x, t - margin_y, r + margin_x, b + margin_y)
     scale = float(rng.uniform(1.2, 1.7))
-    cw = min(w, max(16, int((r-l)*scale*rng.uniform(.92, 1.08))))
+    cw = min(w, max(16, int((r-left)*scale*rng.uniform(.92, 1.08))))
     ch = min(h, max(16, int((b-t)*scale*rng.uniform(.92, 1.08))))
     for _ in range(40):
         x = int(rng.integers(0, max(1, w - cw + 1)))
@@ -2293,7 +2303,7 @@ def train_keypoint_model(*, data_dir: Path, run_dir: Path, steps: int = 2000,
                             "np_negative_exposures": 0, "synthetic_background_exposures": 0,
                             "subset_exposures": {}}
             for subset, synthetic, label in zip(meta["subset"], meta["synthetic_background"],
-                                                labels.tolist()):
+                                                labels.tolist(), strict=False):
                 subset = str(subset)
                 synthetic = bool(synthetic)
                 batch_counts["subset_exposures"][subset] = (

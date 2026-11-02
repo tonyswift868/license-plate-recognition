@@ -49,16 +49,16 @@ class DecisionBits:
                 readers.append(r)
             sv = [bool(s) for s in segs]
             rv = [bool(r) for r in readers]
-            equal = [bool(s and r and s["plate"] == r["plate"]) for s, r in zip(segs, readers)]
-            st = [bool(s and s["plate"] == truth) for s, truth in zip(segs, self.truth)]
-            rt = [bool(r and r["plate"] == truth) for r, truth in zip(readers, self.truth)]
+            equal = [bool(s and r and s["plate"] == r["plate"]) for s, r in zip(segs, readers, strict=False)]
+            st = [bool(s and s["plate"] == truth) for s, truth in zip(segs, self.truth, strict=False)]
+            rt = [bool(r and r["plate"] == truth) for r, truth in zip(readers, self.truth, strict=False)]
             self.rects.append({"sv": _pack(sv), "rv": _pack(rv), "equal": _pack(equal),
                                "st": _pack(st), "rt": _pack(rt)})
             self.conf_s.append(np.asarray([float(s["confidence"]) if s else float("-inf")
                                            for s in segs], dtype=np.float64))
             self.conf_r.append(np.asarray([float(r["confidence"]) if r else float("-inf")
                                            for r in readers], dtype=np.float64))
-        self.pair_conf = [np.minimum(s, r) for s, r in zip(self.conf_s, self.conf_r)]
+        self.pair_conf = [np.minimum(s, r) for s, r in zip(self.conf_s, self.conf_r, strict=False)]
         self._mask_cache = {"agree": {}, "solo_seg": {}, "solo_reader": {}}
 
     def _threshold(self, axis: str, threshold: float) -> tuple[int, ...]:

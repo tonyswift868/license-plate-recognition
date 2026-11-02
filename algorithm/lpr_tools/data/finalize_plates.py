@@ -16,6 +16,8 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from lpr.charset import PROVINCES
+from lpr.config import ALGORITHM_DIR
+
 from lpr_tools.data.build_plates import FIELDS
 
 
@@ -81,7 +83,7 @@ def _stats(rows: list[dict[str, str]]) -> dict:
             origins[(name, row["plate_no"][0])].add(row["orig_path"])
     return {"by_split_crops": dict(split), "by_source": dict(source),
             "green_by_split": {f"{s}/{g}": n for (s, g), n in sorted(green.items())},
-            "layout_by_split": {f"{s}/{l}": n for (s, l), n in sorted(layout.items())},
+            "layout_by_split": {f"{s}/{layout_name}": n for (s, layout_name), n in sorted(layout.items())},
             "province_by_split_crops": {f"{s}/{p}": n for (s, p), n in sorted(province.items())},
             "province_by_split_sources": {f"{s}/{p}": len(v) for (s, p), v in sorted(origins.items())},
             "province_by_split_including_zero": {
@@ -211,7 +213,7 @@ def finalize(target: Path, receipt_dir: Path, *, apply: bool = False,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", type=Path, default=Path(r"D:\keshe2\algorithm\data\plates\v1"))
+    parser.add_argument("--target", type=Path, default=ALGORITHM_DIR / "data/plates/v1")
     parser.add_argument("--receipt-dir", type=Path, default=Path("algorithm/out/receipts/第七批/plates"))
     parser.add_argument("--cap", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=42)

@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
 import json
 import math
-import csv
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -208,8 +208,8 @@ def summarize_testset_composition(manifest_path: Path, development_metrics: dict
 
 def time_box_trace_candidates(trace_path: Path, model_path: Path, output_path: Path):
     """Time every traced candidate read with the official CPU reader factory."""
-    import torch
     import cv2
+    import torch
     from lpr.boxcrop import crop_box
     from lpr.io_utils import imread
     from lpr.recognize import load_box_reader

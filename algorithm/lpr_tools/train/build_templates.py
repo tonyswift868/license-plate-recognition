@@ -2,14 +2,14 @@
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 import numpy as np
-
 from lpr.charset import NUM_CLASSES
 from lpr.recognize import write_manifest_entry
 from lpr.recognize.template import TemplateClassifier
+
 from .data import load_split
 
 

@@ -12,9 +12,9 @@ import time
 from collections import Counter
 
 import cv2
-
 from lpr.config import load_config
 from lpr.voting import PlateVoteSession
+
 from .common import add_backend_args, config_for_args, make_recognizer, mode_name, runtime_info
 
 

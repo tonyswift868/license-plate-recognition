@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-
 from lpr.charset import CHARSET
 from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, CrnnReader, _greedy_decode
 

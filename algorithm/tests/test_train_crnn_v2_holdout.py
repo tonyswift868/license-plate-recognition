@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from lpr_tools.train import prepare_crnn_v2_holdout as prep
 
 

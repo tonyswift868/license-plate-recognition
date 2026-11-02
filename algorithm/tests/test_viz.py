@@ -1,8 +1,6 @@
-from pathlib import Path
 
 import numpy as np
 import pytest
-
 from lpr.errors import BadInputError
 from lpr.io_utils import imread, imwrite
 from lpr_tools.synth_scenes import make_scene

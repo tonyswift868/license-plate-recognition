@@ -10,27 +10,33 @@ import csv
 import hashlib
 import json
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-from lpr.config import load_config
+from lpr.config import ALGORITHM_DIR, load_config
 from lpr.locate import locate
-from lpr.pipeline import (_decode_text, _in_roi, _layouts_to_try, _merge_candidates,
-                          _rank, _rectifications)
+from lpr.pipeline import (
+    _decode_text,
+    _in_roi,
+    _layouts_to_try,
+    _merge_candidates,
+    _rank,
+    _rectifications,
+)
 from lpr.postprocess import decode
 from lpr.preprocess import preprocess
 from lpr.segment import segment
-from lpr.types import PlateCandidate, RectifiedPlate, RecogStatus
+from lpr.types import PlateCandidate, RecogStatus, RectifiedPlate
+
 from lpr_tools.data.image_health import decode_image
 from lpr_tools.data.manifest import image_path
-from .common import effective_config_info, model_identity
-from .ceiling import _iou
-from .index_samples import FIXED_HARD_MANIFEST, FIXED_HARD_N, fixed_manifest_samples, path_key
 
-DEFAULT_INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+from .common import effective_config_info, model_identity
+from .index_samples import FIXED_HARD_MANIFEST, fixed_manifest_samples, path_key
+
+DEFAULT_INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 TARGET_SUBSETS = ("ccpd_db", "ccpd_tilt", "ccpd_rotate")
 IOU_THRESHOLD = 0.5
 BUCKET_PRIORITY = ("decode_error", "unsupported", "alternate_candidate", "same_candidate_route_selection",
@@ -192,7 +198,7 @@ def classify_primary_bucket(*, decode_error=False, unsupported=False, other_cand
     """Mutually exclusive priority; independent rescue flags are reported separately."""
     conditions = (decode_error, unsupported, other_candidate, same_candidate_route,
                   expanded, gt_correct)
-    for name, matches in zip(BUCKET_PRIORITY, conditions):
+    for name, matches in zip(BUCKET_PRIORITY, conditions, strict=False):
         if matches:
             return name
     return "reader_or_segment_residual"
@@ -244,7 +250,7 @@ def _summarize(rows):
                                       "share": bucket_counts.get(name, 0)/len(rows) if rows else None}
                          for name in BUCKET_PRIORITY}
     for rescue in ("alternate_candidate", "same_candidate_route_selection", "crop_expansion", "gt_geometry"):
-        rescued = [row for row, item in zip(rows, details)
+        rescued = [row for row, item in zip(rows, details, strict=False)
                    if (item.get("potential_rescues") or {}).get(rescue)]
         result["potential_rescues"][rescue] = {"n": len(rescued),
                                                 "examples": [{"subset": row["subset"], "path": row["path"]}
@@ -426,7 +432,6 @@ def record_to_manifest_row(record, samples,):
 
 def _diagnose_one(image, row, final_result, cfg, recognizer, *, truth_bbox, output_dir,
                   sample_prefix, expected_best_iou=None, candidates=None):
-    from lpr.pipeline import _rectifications
     if candidates is None:
         candidates = _actual_candidates(image, cfg, recognizer)
     observed_best_iou = max((_iou(candidate.bbox, truth_bbox) for candidate in candidates), default=0.)

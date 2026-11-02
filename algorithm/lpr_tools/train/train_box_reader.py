@@ -15,21 +15,20 @@ import mmap
 import os
 import random
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-
 from lpr.boxcrop import crop_box
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize import file_sha256
 from lpr.recognize.box_reader import BOX_PAD, INPUT_SIZE, BoxNet, box_tensor, checkpoint
 from lpr.recognize.crnn import _greedy_decode
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+
 from lpr_tools.train.box_data import bbox_from_quad, iter_rows, jitter_bbox, sample_jitter
 
 
@@ -144,6 +143,7 @@ def row_crop(row: dict, bbox: tuple, pad: tuple = BOX_PAD, *,
             return crop_box(source, (x-int(row["x0"]), y-int(row["y0"]), w, h), *pad)
     if gpu_fallback:
         from torchvision.io import ImageReadMode, decode_jpeg, read_file
+
         from lpr_tools.train.gpu_box_batches import rgb_region_for_box
         rgb = decode_jpeg(read_file(row["path"]), mode=ImageReadMode.RGB, device="cuda")
         source, local = rgb_region_for_box(rgb, bbox, bbox_from_quad(row["quad"]), pad)
@@ -179,7 +179,7 @@ class BoxDataset(Dataset):
             self._map = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         self._map.seek(int(self.offsets[index]))
         values = next(csv.reader([self._map.readline().decode("utf-8").strip()]))
-        return dict(zip(self.header, values))
+        return dict(zip(self.header, values, strict=False))
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -214,7 +214,7 @@ class BoxDataset(Dataset):
 
 
 def collate(rows):
-    images, labels, indices = zip(*rows)
+    images, labels, indices = zip(*rows, strict=False)
     targets = torch.tensor([CHAR_TO_INDEX[c] for label in labels for c in label], dtype=torch.long)
     lengths = torch.tensor([len(label) for label in labels], dtype=torch.long)
     return torch.stack(images), targets, lengths, list(labels), list(indices)

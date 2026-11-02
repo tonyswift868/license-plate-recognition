@@ -1,5 +1,5 @@
-import random
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,10 +7,15 @@ import lpr_tools.eval.agree_threshold as agree_threshold_module
 from lpr import pipeline
 from lpr.pipeline import _Attempt
 from lpr.types import DecodeResult, RecogStatus
-from lpr_tools.eval.agree_threshold import (arbitrate_pair, exact_branch_bound,
-                                            replay_record, threshold_boundaries,
-                                            _compile_records, _fast_counts,
-                                            _validate_e1_model_paths)
+from lpr_tools.eval.agree_threshold import (
+    _compile_records,
+    _fast_counts,
+    _validate_e1_model_paths,
+    arbitrate_pair,
+    exact_branch_bound,
+    replay_record,
+    threshold_boundaries,
+)
 
 
 def _pred(plate, confidence, status="OK", valid=True):
@@ -75,7 +80,7 @@ def test_first_ok_rectification_wins_and_later_rect_is_not_used():
 
 
 def test_pair_replay_matches_runtime_arbitrator_over_threshold_grid():
-    pp_base = SimpleNamespace(topk=3)
+    _pp_base = SimpleNamespace(topk=3)
     values = [
         ("皖A12345", 0.9, RecogStatus.OK),
         ("皖B12345", 0.7, RecogStatus.LOW_CONFIDENCE),
@@ -148,7 +153,7 @@ def test_branch_bound_matches_bruteforce_on_seeded_multirect_traces():
             truth = "皖A12345"
             rects = []
             for _ in range(rng.randint(2, 4)):
-                def route():
+                def route(rng=rng, truth=truth):
                     if rng.random() < .18:
                         return None
                     confidence = rng.choice((.5, .7, .9))

@@ -2,7 +2,6 @@ import itertools
 import random
 
 import pytest
-
 from lpr_tools.eval.agree_bits import DecisionBits
 from lpr_tools.eval.agree_threshold import _score
 
@@ -16,7 +15,7 @@ def _make_records(seed):
         rects = []
         for _ in range(rng.randrange(1, 5)):
             pair = []
-            for side in range(2):
+            for _side in range(2):
                 if rng.random() < .15:
                     pair.append(None)
                     continue

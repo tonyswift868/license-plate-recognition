@@ -13,24 +13,26 @@ import json
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lpr.config import DEFAULT_CONFIG_PATH, load_config
+from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
 from lpr.corner_net import CornerNet, CornerRefiner
-from lpr.locate import locate, box_iou
-from lpr.pipeline import _decode_text, _in_roi, _layouts_to_try, _merge_candidates, _rectifications
+from lpr.locate import box_iou, locate
+from lpr.pipeline import _decode_text, _in_roi, _merge_candidates, _rectifications
 from lpr.preprocess import preprocess
 from lpr.recognize.crnn import CrnnReader
 from lpr.types import PlateCandidate
-from lpr_tools.data.manifest import read_manifest, image_path, FIELDS
-from lpr_tools.eval.index_samples import IndexSample, path_key, read_samples
+
+from lpr_tools.data.manifest import FIELDS, image_path, read_manifest
 from lpr_tools.eval.common import effective_config_info
+from lpr_tools.eval.index_samples import IndexSample, path_key, read_samples
 
 IOU_THRESHOLD = 0.5
 CORNER_THRESHOLD_PX = 8.0
@@ -91,7 +93,7 @@ def _load_samples(manifest_path: Path, index_path: Path) -> tuple[list[IndexSamp
     # are present, verify them against canonical index metadata as the ceiling
     # evaluator does for its fixed manifests.
     if manifest_rows is not None:
-        for entry, sample in zip(manifest_rows, samples):
+        for entry, sample in zip(manifest_rows, samples, strict=False):
             if entry.plate_no != sample.row.plate_no or entry.plate_color != sample.row.plate_color:
                 raise ValueError(f"manifest truth/color differs from shared index: {sample.row.path}")
             if entry.quad is not None and sample.row.quad is not None:
@@ -303,7 +305,7 @@ def evaluate(manifest_path: Path, index_path: Path, reader_path: Path, output_pa
         if sample.subset == "ccpd_db" and brightness is not None and brightness <= 19:
             groups.append("ccpd_db_brightness_le_19")
 
-        refined_candidates: list[PlateCandidate] = []
+        _refined_candidates: list[PlateCandidate] = []
         candidate_records: list[dict[str, Any]] = []
         baseline_rects = []
         refined_rects = []
@@ -457,7 +459,7 @@ def evaluate(manifest_path: Path, index_path: Path, reader_path: Path, output_pa
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--index", type=Path, default=Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv"))
+    parser.add_argument("--index", type=Path, default=ALGORITHM_DIR / "data/index/ccpd_index.csv")
     parser.add_argument("--refiner", type=Path, help="omit for pre-refinement baseline")
     parser.add_argument("--candidate-trace", type=Path, help="reuse an exact manifest-matched pre-refinement trace")
     parser.add_argument("--detector", type=Path, default=Path("algorithm/models/corner_net_v1.pt"))

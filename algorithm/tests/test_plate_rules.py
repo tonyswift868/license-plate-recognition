@@ -1,6 +1,6 @@
 import pytest
 from lpr.charset import CHARSET
-from lpr.plate_rules import PROV, LETTER, ALNUM, DIGIT, DF, match_layout, vehicle_type_hint
+from lpr.plate_rules import ALNUM, DF, DIGIT, LETTER, PROV, match_layout, vehicle_type_hint
 
 
 @pytest.mark.parametrize("plate,expected", [("皖AY339S", "L7"), ("陕AD12345", "L8S"),

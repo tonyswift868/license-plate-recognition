@@ -8,35 +8,34 @@ import cv2
 import numpy as np
 import pytest
 import torch
-
 from lpr.corner_net import INPUT_SIZE, OUTPUT_STRIDE, CornerModel, letterbox_image
 from lpr_tools import train_corner as train_corner_module
 from lpr_tools.train_corner import (
-    _focal_heatmap_loss,
-    _checkpoint,
-    _load_checkpoint,
     _balanced_hard_rows,
-    _verify_selected_source_rows,
-    _verify_selected_image_bytes,
-    _verify_np_decode_lineage,
+    _checkpoint,
+    _focal_heatmap_loss,
+    _input_csv_provenance,
+    _load_checkpoint,
+    _official_val_path_set,
+    _path_key,
+    _run_step_limit_reached,
     _safe_negative_crop,
+    _select_training_positives,
+    _split_np_rows,
+    _valid_quad,
+    _verify_index_split_membership,
+    _verify_np_decode_lineage,
+    _verify_selected_image_bytes,
+    _verify_selected_source_rows,
     calibrate_threshold,
     center_cell,
     encode_relative_target,
     gather_quad_loss,
     make_heatmap,
+    prepare_corner_data,
     quad_cell_targets,
     read_rows,
     relative_prediction,
-    _valid_quad,
-    _official_val_path_set,
-    _select_training_positives,
-    _split_np_rows,
-    _path_key,
-    _input_csv_provenance,
-    _verify_index_split_membership,
-    _run_step_limit_reached,
-    prepare_corner_data,
 )
 
 
@@ -104,7 +103,7 @@ def test_gather_quad_loss_matches_loop_value_and_gradient_with_mixed_labels() ->
 
     loop_map = base.clone().requires_grad_(True)
     losses = []
-    for (batch, x, y), target in zip(entries, targets):
+    for (batch, x, y), target in zip(entries, targets, strict=False):
         prediction = relative_prediction(loop_map[batch:batch+1], x, y, gw, gh)[0]
         target_rel = encode_relative_target(target.reshape(4, 2), x, y, gw, gh)
         losses.append(torch.nn.functional.smooth_l1_loss(prediction, torch.from_numpy(target_rel), beta=.02))

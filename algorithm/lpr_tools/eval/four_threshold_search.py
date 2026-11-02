@@ -8,15 +8,14 @@ and therefore does not participate in automatic threshold selection.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 import bisect
 import itertools
 import math
 import time
-from typing import Callable, Iterable, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping
 
 import numpy as np
-
 
 AXES = ("agree", "box", "segment", "reader")
 CONFIG_KEYS = {
@@ -138,7 +137,7 @@ def _threshold_tuple(thresholds: Mapping) -> tuple[float, float, float, float]:
 
 
 def _replay_events(events: Iterable[Mapping], values: tuple[float, ...]) -> dict | None:
-    limits = dict(zip(AXES, values))
+    limits = dict(zip(AXES, values, strict=False))
     for event in events:
         if event["confidence"] >= limits[event["axis"]]:
             return {"status": "OK", "plate": event["plate"],
@@ -157,7 +156,7 @@ def _score_event_rows(rows: list[Mapping], event_rows: list[list[dict]],
                       values: tuple[float, ...]) -> dict:
     counts = {name: {"n": 0, "accepted": 0, "correct": 0}
               for name in ("val", "devhard")}
-    for row, events in zip(rows, event_rows):
+    for row, events in zip(rows, event_rows, strict=False):
         item = counts[row["split"]]
         item["n"] += 1
         decision = _replay_events(events, values)
@@ -246,7 +245,7 @@ class _FourAxisBits:
         self.confidence = {axis: np.full((self.slots, self.n), -np.inf, dtype=np.float64)
                            for axis in AXES}
         self.correct = [0] * self.slots
-        for row_index, (row, events) in enumerate(zip(rows, self.events)):
+        for row_index, (row, events) in enumerate(zip(rows, self.events, strict=False)):
             for slot, event in enumerate(events):
                 self.confidence[event["axis"]][slot, row_index] = event["confidence"]
                 if event["plate"] == row["truth"]:
@@ -268,7 +267,7 @@ class _FourAxisBits:
         return masks
 
     def counts(self, thresholds: tuple[float, ...]) -> dict:
-        masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, thresholds)]
+        masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, thresholds, strict=False)]
         seen = correct = 0
         for slot in range(self.slots):
             accepted_here = masks[0][slot] | masks[1][slot] | masks[2][slot] | masks[3][slot]
@@ -281,8 +280,8 @@ class _FourAxisBits:
                 for name, group in self.groups.items()}
 
     def bounds(self, low: tuple[float, ...], high: tuple[float, ...]) -> dict:
-        possible_masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, low)]
-        guaranteed_masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, high)]
+        possible_masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, low, strict=False)]
+        guaranteed_masks = [self.masks(axis, threshold) for axis, threshold in zip(AXES, high, strict=False)]
         possible_accept = guaranteed_accept = possible_correct_winner = 0
         for slot in range(self.slots):
             possible_here = 0
@@ -323,7 +322,7 @@ def search_fit(fit_records: Iterable[Mapping], *, progress: Callable[[dict], Non
     event_rows = [_events(row) for row in rows]
     boundaries = _boundaries(rows, event_rows)
     values = [boundaries[axis] for axis in AXES]
-    widths = tuple(len(axis) for axis in values)
+    _widths = tuple(len(axis) for axis in values)
     bits = _FourAxisBits(rows, event_rows)
     seed_axes = [_seed_indices(axis) for axis in values]
     seed_points = math.prod(len(indices) for indices in seed_axes)
@@ -334,8 +333,8 @@ def search_fit(fit_records: Iterable[Mapping], *, progress: Callable[[dict], Non
         if _qualifies(counts):
             accepted = counts["val"]["accepted"] + counts["devhard"]["accepted"]
             if best is None or accepted > best["accepted"]:
-                best = {"accepted": accepted, "thresholds": dict(zip(AXES, thresholds)),
-                        "axis_indices": dict(zip(AXES, indices)), "counts": counts,
+                best = {"accepted": accepted, "thresholds": dict(zip(AXES, thresholds, strict=False)),
+                        "axis_indices": dict(zip(AXES, indices, strict=False)), "counts": counts,
                         "first_seen_at": "seed"}
 
     if progress is not None:
@@ -371,8 +370,8 @@ def search_fit(fit_records: Iterable[Mapping], *, progress: Callable[[dict], Non
                 accepted = high_counts["val"]["accepted"] + high_counts["devhard"]["accepted"]
                 if best is None or accepted > best["accepted"]:
                     best = {"accepted": accepted,
-                            "thresholds": dict(zip(AXES, high_thresholds)),
-                            "axis_indices": dict(zip(AXES, upper)),
+                            "thresholds": dict(zip(AXES, high_thresholds, strict=False)),
+                            "axis_indices": dict(zip(AXES, upper, strict=False)),
                             "counts": high_counts,
                             "first_seen_at": "branch_and_bound"}
             continue
@@ -433,7 +432,7 @@ def tighten_full(full_records: Iterable[Mapping], fit_records: Iterable[Mapping]
     full_events = [_events(row) for row in full]
     indices = {axis: int(best["axis_indices"][axis]) for axis in AXES}
     current = {axis: boundaries[axis][indices[axis]] for axis in AXES}
-    initial = dict(current)
+    _initial = dict(current)
     steps = []
 
     def snapshot():

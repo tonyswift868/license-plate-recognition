@@ -1,7 +1,7 @@
-from types import SimpleNamespace
 import pytest
 from lpr.config import load_config
 from lpr.errors import ConfigError
+
 
 @pytest.mark.parametrize('size',[0,128,256,384,512,1024])
 def test_detector_size_valid(size):
@@ -9,7 +9,8 @@ def test_detector_size_valid(size):
 
 @pytest.mark.parametrize('size',[-32,1,127,129,255,1056,True,False,256.0,'256',None])
 def test_detector_size_invalid(size):
-    with pytest.raises(ConfigError):load_config(runtime__detector_input_size=size)
+    with pytest.raises(ConfigError):
+        load_config(runtime__detector_input_size=size)
 
 @pytest.mark.parametrize('size',[0,384,512])
 def test_factory_preserves_verified_weights_and_passes_size(monkeypatch,size):

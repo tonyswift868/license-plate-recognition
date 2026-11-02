@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import gzip
+import hashlib
 import json
-import re
 import ntpath
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -40,7 +40,7 @@ def _read_index(path, selected_paths=None):
             if selected_paths is not None and key not in selected_paths:
                 continue
             q = [float(v) for v in row["quad"].split()] if row.get("quad") else []
-            quad = list(zip(q[::2], q[1::2])) if len(q) == 8 else None
+            quad = list(zip(q[::2], q[1::2], strict=False)) if len(q) == 8 else None
             bbox = [float(v) for v in row["bbox"].split()] if row.get("bbox") else None
             if key in result:
                 raise ValueError(f"duplicate selected index path: {row['path']}")
@@ -143,7 +143,7 @@ def _category(record, expected, index):
         return "牌位数错"
     if len(truth) == len(predicted) and truth and truth[1:] == predicted[1:] and truth[0] != predicted[0]:
         return "只错省份字"
-    if len(truth) == len(predicted) and truth and truth[0] == predicted[0] and sum(a != b for a,b in zip(truth[1:],predicted[1:])) == 1:
+    if len(truth) == len(predicted) and truth and truth[0] == predicted[0] and sum(a != b for a,b in zip(truth[1:],predicted[1:], strict=False)) == 1:
         return "只错其他一位"
     routes = _route_reads(record)
     if any(_route_has_truth(record, truth).values()):
@@ -212,7 +212,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
         rows.append(row)
 
     def score(selected):
-        n=len(selected); correct=sum(r["correct"] for r in selected)
+        n=len(selected)
+        correct=sum(r["correct"] for r in selected)
         accepted=[r for r in selected if r["auto"]]
         ac=sum(r["plate"] == r["truth"] for r in accepted)
         return {"correct":correct,"n":n,"accuracy":correct/n if n else None,
@@ -246,8 +247,10 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
             "devhard":[r for r in rows if r["partition"]=="devhard"],
             "dark":[r for r in rows if r["subset"]=="ccpd_db" and int(r["record"].get("brightness",999))<=19],
             "tilt_rotate":[r for r in rows if r["subset"] in {"ccpd_tilt","ccpd_rotate"}]}
-    for name, group in groups.items(): report["overall"][name]=score(group)
-    for subset in subsets: report["subsets"][subset]=score([r for r in rows if r["subset"]==subset])
+    for name, group in groups.items():
+        report["overall"][name]=score(group)
+    for subset in subsets:
+        report["subsets"][subset]=score([r for r in rows if r["subset"]==subset])
     for half in ("fit","hold"):
         hrows=[r for r in rows if r["half"]==half]
         report["halves"][half]={name:score([r for r in hrows if name=="all" or
@@ -264,7 +267,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
              "non_皖":[r for r in rows if r["truth"] and r["truth"][0]!="皖"]}.items()}
     # Official test composition: 120 base + 30 green; night=dark, tilt=35+15,
     # dirty=weather. Report component accuracies and weighted clear estimate.
-    clear_base=report["subsets"].get("ccpd_base",{}); clear_green=report["subsets"].get("ccpd_green",{})
+    clear_base=report["subsets"].get("ccpd_base",{})
+    clear_green=report["subsets"].get("ccpd_green",{})
     report["test_composition"]={"clear_base120_green30":{
         "base_accuracy":clear_base.get("accuracy"),"green_accuracy":clear_green.get("accuracy"),
         "estimated_correct":120*(clear_base.get("accuracy") or 0)+30*(clear_green.get("accuracy") or 0),
@@ -279,7 +283,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
       "fn":[r for r in rows if r["subset"]=="ccpd_fn"],
       "challenge":[r for r in rows if r["subset"]=="ccpd_challenge"],
       "non_皖":[r for r in rows if r["truth"] and r["truth"][0]!="皖"]}
-    for name, selected in subgroup.items(): report["auto_subgroups"][name]=score(selected)
+    for name, selected in subgroup.items():
+        report["auto_subgroups"][name]=score(selected)
     provinces=sorted({r["province"] for r in rows if r["truth"]})
     for province in provinces:
         selected=[r for r in rows if r["province"]==province]
@@ -300,16 +305,19 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
         if not gtbox:
             report["iou_summary"]["selected_or_top1_iou_missing"]+=1
             continue
-        boxes=r["record"].get("boxes",{}); top=boxes.get("0")
+        boxes=r["record"].get("boxes",{})
+        top=boxes.get("0")
         if top and top.get("bbox") and _xywh_iou(top["bbox"],gtbox)>=.7:
             report["iou_summary"]["top1_B_iou_ge_0_7"]+=1
-        expected_row=expected[r["path"]]; ci=expected_row.get("candidate_index")
+        expected_row=expected[r["path"]]
+        ci=expected_row.get("candidate_index")
         chosen=boxes.get(str(ci)) if ci is not None else top
         if chosen and chosen.get("bbox") and _xywh_iou(chosen["bbox"],gtbox)>=.7:
             report["iou_summary"]["selected_iou_ge_0_7"]+=1
     bad=[r for r in rows if not r["correct"]]
     buckets=defaultdict(list)
-    for r in bad: buckets[r["category"]].append(r)
+    for r in bad:
+        buckets[r["category"]].append(r)
     report["errors"]={"counts":{k:len(v) for k,v in sorted(buckets.items())},
       "by_subset":{s:{k:sum(r["subset"]==s for r in v) for k,v in buckets.items()} for s in subsets},
       "by_province":{p:{k:sum(r["province"]==p for r in v) for k,v in buckets.items()} for p in provinces},
@@ -319,7 +327,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
     for label, path in (("trace",trace_path),("expected",expected_path),("split",split_path),("index",index_path)):
         digest=hashlib.sha256()
         with Path(path).open("rb") as stream:
-            for chunk in iter(lambda:stream.read(1024*1024),b""): digest.update(chunk)
+            for chunk in iter(lambda:stream.read(1024*1024),b""):
+                digest.update(chunk)
         report["source_sha256"][label]=digest.hexdigest()
     error_path=outdir/"errors.jsonl.gz"
     with gzip.open(error_path,"wt",encoding="utf-8",newline="\n") as stream:
@@ -342,7 +351,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
             thumb_paths=[]
             for r in selected[:8]:
                 image=cv2.imread(r["path"])
-                if image is None: continue
+                if image is None:
+                    continue
                 meta = index[_norm(r["path"])]
                 gt_box = meta.get("bbox") or (_quad_box(meta["quad"]) if meta.get("quad") else None)
                 expected_row = expected[r["path"]]
@@ -350,7 +360,8 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
                 box = r["record"].get("boxes", {}).get(str(chosen_ci) if chosen_ci is not None else "0", {})
                 predicted_box = box.get("bbox") if category == "框偏_IoU<0.7" else None
                 image = _diagnostic_crop(image, gt_box, predicted_box)
-                h,w=image.shape[:2]; scale=min(1.,100/max(h,w))
+                h,w=image.shape[:2]
+                scale=min(1.,100/max(h,w))
                 image=cv2.resize(image,(max(1,round(w*scale)),max(1,round(h*scale))))
                 label=len(thumbs)+1
                 cv2.putText(image,str(label),(3,min(image.shape[0]-3,15)),cv2.FONT_HERSHEY_SIMPLEX,
@@ -360,10 +371,13 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
                 thumbs.append(image)
                 thumb_paths.append(r["path"])
             if thumbs:
-                cellw=max(im.shape[1] for im in thumbs); cellh=max(im.shape[0] for im in thumbs)
+                cellw=max(im.shape[1] for im in thumbs)
+                cellh=max(im.shape[0] for im in thumbs)
                 canvas=np.zeros((cellh*((len(thumbs)+1)//2),cellw*2,3),dtype=np.uint8)
                 for i,im in enumerate(thumbs):
-                    y=(i//2)*cellh;x=(i%2)*cellw;canvas[y:y+im.shape[0],x:x+im.shape[1]]=im
+                    y=(i//2)*cellh
+                    x=(i%2)*cellw
+                    canvas[y:y+im.shape[0],x:x+im.shape[1]]=im
                 slug=re.sub(r'[<>:"/\\|?*\x00-\x1f]',"_",category).rstrip(" .") or "errors"
                 target=outdir/f"errors-{slug}.jpg"
                 _write_mosaic(target, canvas)
@@ -378,12 +392,16 @@ def analyze(trace_path, expected_path, split_path, index_path, output_dir,
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--trace",required=True);p.add_argument("--expected",required=True)
-    p.add_argument("--split-json",required=True);p.add_argument("--index",required=True)
-    p.add_argument("--out-dir",required=True);p.add_argument("--no-mosaics",action="store_true")
+    p.add_argument("--trace",required=True)
+    p.add_argument("--expected",required=True)
+    p.add_argument("--split-json",required=True)
+    p.add_argument("--index",required=True)
+    p.add_argument("--out-dir",required=True)
+    p.add_argument("--no-mosaics",action="store_true")
     a=p.parse_args(argv)
     result=analyze(a.trace,a.expected,a.split_json,a.index,a.out_dir,make_mosaics=not a.no_mosaics)
     print(json.dumps({"rows":result["rows"],"output":str(Path(a.out_dir)/"analysis.json")},ensure_ascii=False))
 
 
-if __name__=="__main__": raise SystemExit(main())
+if __name__=="__main__":
+    raise SystemExit(main())

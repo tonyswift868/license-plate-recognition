@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import unittest
 import csv
 import tempfile
+import unittest
 from pathlib import Path
 
-import cv2
 import numpy as np
-
-from lpr_tools.eval_det import (bbox_iou, camera_canvas_metadata, ranked_box_metrics,
-                                camera_canvas, indexed_dimensions, threshold_curve, width_distribution)
 from lpr_tools.eval.common import letterbox
+from lpr_tools.eval_det import (
+    bbox_iou,
+    camera_canvas,
+    camera_canvas_metadata,
+    indexed_dimensions,
+    ranked_box_metrics,
+    threshold_curve,
+    width_distribution,
+)
 
 
 class Batch12ThresholdMetricsTests(unittest.TestCase):

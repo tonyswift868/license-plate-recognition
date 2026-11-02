@@ -7,7 +7,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from lpr.config import LprConfig, load_config
 from lpr.errors import BadInputError
 from lpr.io_utils import imread, imwrite, list_images

@@ -4,10 +4,14 @@ import json
 from pathlib import Path
 
 import pytest
-
-from lpr_tools.synth_ccpd import (HARD_SUBSETS, _file_facts, _load_hash_cache,
-                                  _normalized_path, _stable_image_sha, prepare_hard_pool)
-
+from lpr_tools.synth_ccpd import (
+    HARD_SUBSETS,
+    _file_facts,
+    _load_hash_cache,
+    _normalized_path,
+    _stable_image_sha,
+    prepare_hard_pool,
+)
 
 FIELDS = ["path", "dataset", "subset", "split", "has_plate", "plate_no", "layout",
           "plate_color", "quad", "bbox", "tilt_h", "tilt_v", "brightness",

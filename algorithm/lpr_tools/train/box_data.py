@@ -12,11 +12,13 @@ import math
 import os
 import random
 from collections import defaultdict
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, Sequence
+
+from lpr.config import ALGORITHM_DIR
 
 ROOT = Path(__file__).resolve().parents[3]
-DATA = Path(r"D:\keshe2\algorithm\data")
+DATA = ALGORITHM_DIR / "data"
 V2 = DATA / "plates" / "v2"
 DEFAULT_INDEX = DATA / "index" / "ccpd_index.csv"
 DEFAULT_OUT = ROOT / "algorithm" / "out" / "data" / "batch10"
@@ -61,7 +63,7 @@ def _protected_manifests() -> tuple[set[str], set[str], list[dict[str, object]]]
         ("devhard", DATA / "index" / "devhard_v1.csv"),
         ("val1000", DATA / "index" / "val1000_v1.csv"),
         ("undecodable", DATA / "index" / "undecodable.csv"),
-        ("worker03_golden", Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden\golden_manifest.csv")),
+        ("worker03_golden", ALGORITHM_DIR / "tests/data/golden/golden_manifest.csv"),
     )
     paths: set[str] = set()
     metadata: list[dict[str, object]] = []

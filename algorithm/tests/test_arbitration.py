@@ -4,7 +4,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from lpr.arbitration import _fallbacks, _valid, arbitrate, try_auto_candidate
 
 

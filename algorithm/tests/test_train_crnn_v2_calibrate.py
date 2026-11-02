@@ -6,7 +6,6 @@ import cv2
 import numpy as np
 import pytest
 import torch
-
 from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
 from lpr.recognize.crnn import CrnnNet, CrnnReader
 from lpr_tools.train.calibrate_crnn_v2 import (
@@ -39,7 +38,7 @@ def test_ctc_temperature_is_bounded_and_improves_fit_nll():
     assert 0.05 <= fitted["temperature"] <= 10.0
     assert fitted["fit_nll_after"] <= fitted["fit_nll_before"]
     assert fitted["n"] == 2
-    for item, temp in zip(logits, [fitted["temperature"]] * len(logits)):
+    for item, temp in zip(logits, [fitted["temperature"]] * len(logits), strict=False):
         assert torch.equal(item.argmax(-1), (item / temp).argmax(-1))
 
 
@@ -49,7 +48,7 @@ def test_batched_ctc_nll_matches_per_sample_sum_mean_and_has_temperature_gradien
     log_temperature = torch.tensor(0.17, dtype=torch.float64, requires_grad=True)
     temperature = float(log_temperature.detach().exp())
     expected = torch.stack([_ctc_loss(item, [label], temperature)
-                            for item, label in zip(logits, labels)]).mean()
+                            for item, label in zip(logits, labels, strict=False)]).mean()
 
     actual = _batched_ctc_loss(logits, labels, log_temperature.exp())
     actual.backward()

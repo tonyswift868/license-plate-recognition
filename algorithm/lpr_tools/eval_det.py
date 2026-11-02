@@ -11,8 +11,11 @@ import json
 import math
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
+
+from lpr.config import ALGORITHM_DIR
 
 IOU_THRESHOLDS = (0.5, 0.7)
 HARD_SUBSETS = ("ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
@@ -104,6 +107,7 @@ def camera_canvas_metadata(width: int, height: int, bbox: Sequence[float],
 def indexed_dimensions(index_path: Path, paths: set[str]) -> dict[str, tuple[int, int]]:
     """Read indexed dimensions or JPEG SOF metadata for selected paths, streaming CSV once."""
     import csv
+
     from lpr_tools.eval.index_samples import path_key
     from lpr_tools.train_det import jpeg_size
     found = {}
@@ -199,8 +203,9 @@ def evaluate_scale_suite(manifest_path: Path, index_path: Path, detector_path: P
     import numpy as np
     import torch
     from lpr.config import load_config
-    from lpr_tools.eval_refine import _load_samples
+
     from lpr_tools.eval.index_samples import path_key
+    from lpr_tools.eval_refine import _load_samples
 
     torch.set_num_threads(threads)
     cv2.setNumThreads(threads)
@@ -438,11 +443,12 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
     import numpy as np
     import torch
     from lpr.config import load_config
+    from lpr.locate import locate
     from lpr.pipeline import _decode_text, _in_roi, _merge_candidates
     from lpr.preprocess import preprocess
-    from lpr.locate import locate
-    from lpr_tools.eval_refine import _load_samples
+
     from lpr_tools.eval.index_samples import path_key
+    from lpr_tools.eval_refine import _load_samples
 
     torch.set_num_threads(threads)
     cv2.setNumThreads(threads)
@@ -484,9 +490,9 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
         if boxes_only and method == "new":
             candidates_by_method = {"plate_det_v1": detect_one(detector, image, "plate_det_v1")}
         elif boxes_only:
+            from lpr.locate import locate
             from lpr.pipeline import _in_roi, _merge_candidates
             from lpr.preprocess import preprocess
-            from lpr.locate import locate
             old = detect_one(v1, image, "corner_net_v1")
             pre = preprocess(image, cfg.preprocess)
             classic = locate(pre, cfg.locate, cfg.runtime.max_candidates)
@@ -494,9 +500,9 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
             candidates_by_method = {"classic_plus_v1": _merge_candidates(
                 old_roi, classic, cfg.runtime.max_candidates)}
         else:
+            from lpr.locate import locate
             from lpr.pipeline import _in_roi, _merge_candidates
             from lpr.preprocess import preprocess
-            from lpr.locate import locate
             new = detect_one(detector, image, "plate_det_v1")
             old = detect_one(v1, image, "corner_net_v1")
             pre = preprocess(image, cfg.preprocess)
@@ -518,8 +524,8 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
                                        "score": float(c.score), "source": c.source})
             result = {"candidate_count": len(candidates), "candidates": candidate_rows}
             if not boxes_only:
-                from lpr.pipeline import _decode_text
                 from lpr.boxcrop import crop_box
+                from lpr.pipeline import _decode_text
                 prediction, status = _read_box_route(image, candidates, reader,
                                                       crop_box, _decode_text,
                                                       cfg.postprocess.min_confidence)
@@ -632,7 +638,7 @@ def _evaluate_np(manifest_path, detector, cfg, cv2, np):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--index", type=Path, default=Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv"))
+    parser.add_argument("--index", type=Path, default=ALGORITHM_DIR / "data/index/ccpd_index.csv")
     parser.add_argument("--detector", type=Path, default=Path("algorithm/models/plate_det_v1.pt"))
     parser.add_argument("--v1", type=Path, default=Path("algorithm/models/corner_net_v1.pt"))
     parser.add_argument("--reader", type=Path)

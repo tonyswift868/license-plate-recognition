@@ -63,12 +63,10 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-              "BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-    os.environ[_name] = "1"
+os.environ.update(dict.fromkeys(('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'BLIS_NUM_THREADS', 'NUMEXPR_NUM_THREADS'), '1'))
 
 import numpy as np
-
+from lpr.config import ALGORITHM_DIR
 
 ROUTE_PAIRS = (("segment", "reader"), ("segment", "box"), ("reader", "box"))
 FALLBACKS = ("agreement_then_reader", "majority", "box", "crnn")
@@ -551,20 +549,27 @@ class _ThreeRouteBits:
         self.agree_conf, self.box_conf, self.agree_correct, self.box_correct = [], [], [], []
         for j in range(self.slots):
             ac, bc, at, bt = [], [], [], []
-            for row, events in zip(self.records, per_row):
+            for _row, events in zip(self.records, per_row, strict=False):
                 event = events[j] if j < len(events) else None
                 if event and event["kind"] == "agree":
-                    ac.append(event["confidence"]); bc.append(float("-inf"))
-                    at.append(event["truth_correct"]); bt.append(False)
+                    ac.append(event["confidence"])
+                    bc.append(float("-inf"))
+                    at.append(event["truth_correct"])
+                    bt.append(False)
                 elif event:
-                    ac.append(float("-inf")); bc.append(event["confidence"])
-                    at.append(False); bt.append(event["truth_correct"])
+                    ac.append(float("-inf"))
+                    bc.append(event["confidence"])
+                    at.append(False)
+                    bt.append(event["truth_correct"])
                 else:
-                    ac.append(float("-inf")); bc.append(float("-inf"))
-                    at.append(False); bt.append(False)
+                    ac.append(float("-inf"))
+                    bc.append(float("-inf"))
+                    at.append(False)
+                    bt.append(False)
             self.agree_conf.append(np.asarray(ac, dtype=np.float64))
             self.box_conf.append(np.asarray(bc, dtype=np.float64))
-            self.agree_correct.append(_pack(at)); self.box_correct.append(_pack(bt))
+            self.agree_correct.append(_pack(at))
+            self.box_correct.append(_pack(bt))
         self._cache_a, self._cache_b = {}, {}
 
     def _masks(self, axis, threshold):
@@ -780,6 +785,7 @@ def _as_route_attempt(decision):
 def _read_box_result(reader, crop, color, min_confidence, is_crnn, torch):
     from lpr.pipeline import _decode_text
     from lpr.recognize.crnn import CrnnReader
+
     from lpr_tools.eval.box_direct import _read_crnn_native
 
     if crop is None or getattr(crop, "size", 0) == 0:
@@ -814,6 +820,7 @@ def _live_record(image, sample, cfg, classifier, detector, reader, box_reader,
     from lpr.pipeline import _rank
     from lpr.segment import segment
     from lpr.types import RecogStatus as Status
+
     from lpr_tools.eval.box_direct import _actual_candidates
 
     row = sample.row
@@ -908,7 +915,7 @@ def _compare_live_record(expected, actual):
     expected_rects, actual_rects = expected.get("rects", []), actual.get("rects", [])
     if len(expected_rects) != len(actual_rects):
         diffs.append({"field": "rect_count", "expected": len(expected_rects), "actual": len(actual_rects)})
-    for index, (left, right) in enumerate(zip(expected_rects, actual_rects)):
+    for index, (left, right) in enumerate(zip(expected_rects, actual_rects, strict=False)):
         for field in ("candidate_index", "rect_index", "candidate_source", "color"):
             if left.get(field) != right.get(field):
                 diffs.append({"field": f"rects[{index}].{field}",
@@ -964,13 +971,13 @@ def run_live(*, config, index, val_manifest, devhard_manifest, pad_x, pad_y,
     import cv2
     import torch
     from lpr.config import load_config
-    from lpr.recognize import load_corner_detector, load_plate_reader
-    from lpr.recognize import load_classifier
+    from lpr.recognize import load_classifier, load_corner_detector, load_plate_reader
+
     from lpr_tools.data.image_health import decode_image
     from lpr_tools.data.manifest import image_path
+    from lpr_tools.eval.box_direct import RSS_LIMIT_BYTES, _read_brightness, _rss_bytes
     from lpr_tools.eval.common import effective_config_info
     from lpr_tools.eval.index_samples import fixed_manifest_samples, path_key
-    from lpr_tools.eval.box_direct import RSS_LIMIT_BYTES, _read_brightness, _rss_bytes
 
     cfg = load_config(config, runtime__torch_threads=2)
     if cfg.runtime.classifier != "cnn":
@@ -1220,9 +1227,9 @@ def main(argv=None):
     parser.add_argument("--policy-fallback", choices=FALLBACKS, default="agreement_then_reader")
     parser.add_argument("--live-output", help="fresh trace path for --fresh or --live-verify")
     parser.add_argument("--config")
-    parser.add_argument("--index", default=r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
-    parser.add_argument("--val-manifest", default=r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
-    parser.add_argument("--devhard-manifest", default=r"D:\keshe2\algorithm\data\index\devhard_v1.csv")
+    parser.add_argument("--index", default=str(ALGORITHM_DIR / "data/index/ccpd_index.csv"))
+    parser.add_argument("--val-manifest", default=str(ALGORITHM_DIR / "data/index/val1000_v1.csv"))
+    parser.add_argument("--devhard-manifest", default=str(ALGORITHM_DIR / "data/index/devhard_v1.csv"))
     parser.add_argument("--detector-model")
     parser.add_argument("--box-model")
     parser.add_argument("--detector-loader", help="optional module:factory implementing detect(image,max_candidates)")

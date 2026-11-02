@@ -5,8 +5,21 @@ batch11 nine-group multiset, then adds bounded real non-Anhui exposure. Syntheti
 copies are additional forwards, never a replacement for a real source visit.
 """
 from __future__ import annotations
+
+import argparse
+import csv
+import gc
+import json
+import math
 import os
+import random
+import subprocess
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
 _RUNTIME = Path(__file__).resolve().parents[3] / 'algorithm/out/tmp/batch12-runtime'
 _RUNTIME.mkdir(parents=True, exist_ok=True)
 os.environ['TEMP'] = os.environ['TMP'] = str(_RUNTIME)
@@ -15,34 +28,31 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 for _key in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS'):
     os.environ[_key] = '2'
 
-import argparse
-from collections import Counter
-import csv
-import gc
-import json
-import math
-import random
-import subprocess
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-import cv2
-import numpy as np
-import torch
-from torch import nn
-from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES, PROVINCES, PROVINCE_IDX
-from lpr.recognize import file_sha256
-from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint, model_from_checkpoint
-from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2
-from lpr.recognize.crnn import CrnnNet, plate_tensor
-from lpr.recognize.cnn_model import CharCNN
-from lpr_tools.train.box_data import bbox_from_quad, parse_quad
-from lpr_tools.train.box_data_v2 import build_balanced_multiplicity
-from lpr_tools.train.train_box_reader import BoxDataset, cache_contains, free_ram_bytes, process_ram_bytes, row_crop
-from lpr_tools.train.train_box_reader_v2 import affine_target
-from lpr_tools.train.province_data import province_repeat_additions
-from lpr_tools.train.province_synth import replace_province
-from lpr_tools.train.province_char_input import normalized_first_char
+
+import cv2  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+import numpy as np  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+import torch  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES, PROVINCES  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.recognize import file_sha256  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint, model_from_checkpoint  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.recognize.cnn_model import CharCNN  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr.recognize.crnn import CrnnNet, plate_tensor  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from torch import nn  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+
+from lpr_tools.train.box_data import bbox_from_quad, parse_quad  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr_tools.train.box_data_v2 import build_balanced_multiplicity  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr_tools.train.province_char_input import normalized_first_char  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr_tools.train.province_data import province_repeat_additions  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr_tools.train.province_synth import replace_province  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+from lpr_tools.train.train_box_reader import (  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+    BoxDataset,
+    cache_contains,
+    free_ram_bytes,
+    process_ram_bytes,
+    row_crop,
+)
+from lpr_tools.train.train_box_reader_v2 import affine_target  # noqa: E402 - temporary directory and thread limits must precede dependency imports
 
 FORMAT='province-reader-training-v1'
 render_lock=threading.Lock()
@@ -71,7 +81,8 @@ def rectified(image, quad, length):
 
 def frozen_batch_statistics(model):
     for layer in model.modules():
-        if isinstance(layer,nn.modules.batchnorm._BatchNorm): layer.eval()
+        if isinstance(layer,nn.modules.batchnorm._BatchNorm):
+            layer.eval()
 
 
 def real_plan(labels, subsets, seed, epoch):
@@ -83,15 +94,19 @@ def real_plan(labels, subsets, seed, epoch):
 
 def synthetic_targets(labels, *, seed, epoch, probability):
     """Equal target counts with distinct source/target province whenever feasible."""
-    if not 0 < probability < 1:raise ValueError('invalid synthesis probability')
+    if not 0 < probability < 1:
+        raise ValueError('invalid synthesis probability')
     rng=np.random.default_rng([seed,epoch,83])
     selected=rng.permutation(len(labels))[:int(len(labels)*probability)]
-    assigned=np.resize(np.arange(len(PROVINCES)),len(selected));rng.shuffle(assigned)
+    assigned=np.resize(np.arange(len(PROVINCES)),len(selected))
+    rng.shuffle(assigned)
     cursor=0
     for position,index in enumerate(selected):
-        if PROVINCES[int(assigned[position])]!=labels[int(index)][0]:continue
+        if PROVINCES[int(assigned[position])]!=labels[int(index)][0]:
+            continue
         for _ in range(len(selected)):
-            other=cursor%len(selected);cursor+=1
+            other=cursor%len(selected)
+            cursor+=1
             if (PROVINCES[int(assigned[other])]!=labels[int(index)][0] and
                     PROVINCES[int(assigned[position])]!=labels[int(selected[other])][0]):
                 assigned[position],assigned[other]=assigned[other],assigned[position]
@@ -106,11 +121,14 @@ def synthetic_targets(labels, *, seed, epoch, probability):
 class ProvinceDataset(BoxDataset):
     def __init__(self,*args,kind='box',synth_probability=.35,**kwargs):
         super().__init__(*args,**kwargs)
-        self.kind=kind;self.synth_probability=synth_probability;self.synthetic_gt_fallbacks=0
+        self.kind=kind
+        self.synth_probability=synth_probability
+        self.synthetic_gt_fallbacks=0
 
     def specification(self,index):
         row,rng,bbox=super().specification(index)
-        if self.kind!='box':bbox=bbox_from_quad(row['quad'])
+        if self.kind!='box':
+            bbox=bbox_from_quad(row['quad'])
         return row,rng,bbox
 
     def finish(self,image,row,index,rng,*,bbox,defer_gt_fallback=False):
@@ -121,12 +139,14 @@ class ProvinceDataset(BoxDataset):
         # return to independent repeat augmentation if future quality needs it.
         if self.synthetic_targets[index]>=0:
             target=PROVINCES[int(self.synthetic_targets[index])]
-            synth_quad=quad;synth_theta=theta
+            synth_quad=quad
+            synth_theta=theta
             try:
                 generated,label,_=_replace_province_locked(image,quad,row['label'],target,
                     np.random.default_rng([self.seed,self.epoch,index]))
             except ValueError as error:
-                if str(error)!='province glyph slot falls outside source image':raise
+                if str(error)!='province glyph slot falls outside source image':
+                    raise
                 if defer_gt_fallback:
                     # Do not let the CPU prefetch thread trigger torchvision
                     # CUDA decode or consume the Python photo RNG.
@@ -179,7 +199,8 @@ class _PackedStream:
             raise ValueError('packed JPEG TAR changed within an epoch')
         offsets=[int(row['pack_offset']) for row in rows if row.get('cache_pack')]
         ends=[int(row['pack_offset'])+int(row['pack_length']) for row in rows if row.get('cache_pack')]
-        start_pos=min(offsets);end_pos=max(ends)
+        start_pos=min(offsets)
+        end_pos=max(ends)
         if (start_pos<0 or end_pos>self.total_size or end_pos-start_pos>40_000_000
                 or any(int(row['pack_length'])<=0 for row in rows if row.get('cache_pack'))):
             raise ValueError('cache block span exceeds bounded IO or has invalid offsets')
@@ -195,16 +216,22 @@ class _PackedStream:
 class PackedEpoch:
     """One bounded CPU-prepared block; optional single-thread prefetch overlaps GPU work."""
     def __init__(self,ds,labels,subsets,*,batch_size=128,block_size=128,prefetch=True):
-        self.ds=ds;self.labels=labels;self.subsets=subsets
-        self.batch_size=batch_size;self.block_size=block_size;self.raw_fallbacks=0
-        self.prefetch=bool(prefetch);self.prepare_seconds=0.
+        self.ds=ds
+        self.labels=labels
+        self.subsets=subsets
+        self.batch_size=batch_size
+        self.block_size=block_size
+        self.raw_fallbacks=0
+        self.prefetch=bool(prefetch)
+        self.prepare_seconds=0.
 
     def __iter__(self):
         ds=self.ds
         ds.synthetic_targets=synthetic_targets(self.labels,seed=ds.seed,epoch=ds.epoch,probability=ds.synth_probability)
         self.weights,self.base_groups,self.extra_provinces=real_plan(self.labels,self.subsets,ds.seed,ds.epoch)
         rng=np.random.default_rng([ds.seed,ds.epoch])
-        batch=[];weights=[]
+        batch=[]
+        weights=[]
         stream=_PackedStream()
         try:
             blocks=list(rng.permutation(math.ceil(len(ds)/self.block_size)))
@@ -215,7 +242,8 @@ class PackedEpoch:
                     yield from self._consume_jobs(jobs,executor,stream,rng,batch,weights)
             else:
                 yield from self._consume_jobs(jobs,None,stream,rng,batch,weights)
-            if batch:yield collate(batch,weights)
+            if batch:
+                yield collate(batch,weights)
         finally:
             # Executor context exits and joins its sole worker before the TAR
             # and dataset mmap are closed by the training loop.
@@ -254,7 +282,8 @@ class PackedEpoch:
                                    (1/(1-self.ds.synth_probability) if value[-1] else 1.))
                     if len(batch)==self.batch_size:
                         yield collate(batch,weights)
-                        batch.clear();weights.clear()
+                        batch.clear()
+                        weights.clear()
             job=next_job
 
     def _prepare(self,stream,begin,end):
@@ -270,7 +299,8 @@ class PackedEpoch:
                 encoded=np.frombuffer(data,np.uint8,count=int(row['pack_length']),
                                       offset=int(row['pack_offset'])-start_pos)
                 cached=cv2.imdecode(encoded,cv2.IMREAD_COLOR)
-                if cached is None:raise ValueError('invalid immutable cache JPEG')
+                if cached is None:
+                    raise ValueError('invalid immutable cache JPEG')
             if cached is not None and cache_contains(row,bbox,BOX_PAD,cached.shape):
                 image=row_crop(row,bbox,cached_image=cached,gpu_fallback=False)
             elif self.ds.gpu_fallback:
@@ -289,7 +319,7 @@ class PackedEpoch:
 
 
 def collate(items,weights):
-    images,labels,indices,thetas,groups,synthetic=zip(*items)
+    images,labels,indices,thetas,groups,synthetic=zip(*items, strict=False)
     lengths=torch.tensor([len(s) for s in labels],dtype=torch.long)
     targets=torch.tensor([CHAR_TO_INDEX[c] for label in labels for c in label],dtype=torch.long)
     return (torch.stack(images),targets,lengths,list(labels),list(indices),torch.stack(thetas),
@@ -302,50 +332,66 @@ def inference_state(model,kind):
 
 def atomic_save(payload,path):
     temporary=path.with_suffix('.writing')
-    torch.save(payload,temporary);os.replace(temporary,path)
+    torch.save(payload,temporary)
+    os.replace(temporary,path)
 
 
 def restore_model(path,kind):
     saved=torch.load(path,map_location='cpu',weights_only=True)
     state=saved['model_state'] if saved.get('format')==FORMAT else saved
-    if kind=='box':return model_from_checkpoint(state)
-    state=dict(state);state.pop('ctc_temperature',None)
+    if kind=='box':
+        return model_from_checkpoint(state)
+    state=dict(state)
+    state.pop('ctc_temperature',None)
     model=CrnnNet() if kind=='crnn' else CharCNN()
     model.load_state_dict(state,strict=True)
     return model
 
 
 def run(args):
-    if args.kind not in ('box','crnn','char'):raise ValueError('unknown model kind')
+    if args.kind not in ('box','crnn','char'):
+        raise ValueError('unknown model kind')
     minimum={'box':20,'crnn':15,'char':10}[args.kind]
-    if args.epochs<minimum and not (args.smoke or args.profile_batches):raise ValueError('full epoch minimum not met')
-    if not 0<args.synth_probability<1:raise ValueError('invalid synthesis share')
+    if args.epochs<minimum and not (args.smoke or args.profile_batches):
+        raise ValueError('full epoch minimum not met')
+    if not 0<args.synth_probability<1:
+        raise ValueError('invalid synthesis share')
     if args.device=='cuda' and free_ram_bytes()<3_500_000_000:
         raise RuntimeError('GPU startup needs 3.5GB free RAM; no training started')
-    torch.set_num_threads(2);cv2.setNumThreads(1)
-    random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
+    torch.set_num_threads(2)
+    cv2.setNumThreads(1)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device=torch.device(args.device)
     if device.type=='cuda':
         total=torch.cuda.get_device_properties(0).total_memory
         torch.cuda.set_per_process_memory_fraction(min(.48,5_500_000_000/total))
-        torch.backends.cuda.matmul.allow_tf32=True;torch.backends.cudnn.allow_tf32=True
-        torch.backends.cudnn.benchmark=False;torch.set_float32_matmul_precision('high')
+        torch.backends.cuda.matmul.allow_tf32=True
+        torch.backends.cudnn.allow_tf32=True
+        torch.backends.cudnn.benchmark=False
+        torch.set_float32_matmul_precision('high')
     args.out.mkdir(parents=True,exist_ok=True)
     audit=json.loads((args.data_dir/'province_audit.json').read_text(encoding='utf-8'))
     if not args.smoke:
         if json.loads((args.data_dir/'independent_audit.json').read_text(encoding='utf-8')).get('passed') is not True:
             raise ValueError('independent province isolation checks failed')
-        if audit.get('schema')!='province-coverage-data-v1':raise ValueError('unsupported province audit')
+        if audit.get('schema')!='province-coverage-data-v1':
+            raise ValueError('unsupported province audit')
         for name,identity in audit['outputs'].items():
-            if file_sha256(args.data_dir/name)!=identity['sha256']:raise ValueError('audited metadata changed: '+name)
+            if file_sha256(args.data_dir/name)!=identity['sha256']:
+                raise ValueError('audited metadata changed: '+name)
         if file_sha256(args.index)!=audit['outputs']['combined_train.csv']['sha256']:
             raise ValueError('training index differs from the audited full pool')
         if file_sha256(Path('algorithm/out/data/batch11/tune.csv'))!=audit['source_hashes']['batch11_tune_sha256']:
             raise ValueError('safe tune identity changed')
     index=args.index
     with index.open(encoding='utf-8-sig',newline='') as f:
-        labels=[];subsets=[]
-        for row in csv.DictReader(f):labels.append(row['label']);subsets.append(row['subset'])
+        labels=[]
+        subsets=[]
+        for row in csv.DictReader(f):
+            labels.append(row['label'])
+            subsets.append(row['subset'])
     samples=json.loads(args.sampler.read_text(encoding='utf-8-sig'))
     samples=samples.get('samples_by_subset',samples.get('subsets',samples))
     ds=ProvinceDataset(index,samples,training=True,seed=args.seed,gpu_fallback=device.type=='cuda',
@@ -356,13 +402,16 @@ def run(args):
     # Frozen running statistics permit exact repeated-tensor weighting. CNN
     # dropout is disabled; none of the other model architectures has dropout.
     for layer in model.modules():
-        if isinstance(layer,nn.Dropout):layer.p=0.
+        if isinstance(layer,nn.Dropout):
+            layer.p=0.
     if args.kind=='char':
         # Keep the feature extractor and every alphanumeric output logit exactly
         # unchanged. Only province rows of the final own-v2 classifier adapt.
-        for parameter in model.parameters():parameter.requires_grad_(False)
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
         head=model.classifier[-1]
-        head.weight.requires_grad_(True);head.bias.requires_grad_(True)
+        head.weight.requires_grad_(True)
+        head.bias.requires_grad_(True)
         head.weight.register_hook(lambda gradient: torch.cat((gradient[:31],torch.zeros_like(gradient[31:]))))
         head.bias.register_hook(lambda gradient: torch.cat((gradient[:31],torch.zeros_like(gradient[31:]))))
     parameters=[p for p in model.parameters() if p.requires_grad]
@@ -381,36 +430,62 @@ def run(args):
                 'sampler_sha256':file_sha256(args.sampler),
                 'augmentation_source_sha256':file_sha256(Path(__file__).with_name('province_synth.py')),
                 'font_sha256':file_sha256(Path(r'C:\Windows\Fonts\simhei.ttf'))}
-    if args.kind=='char':provenance['char_input_source_sha256']=file_sha256(Path(__file__).with_name('province_char_input.py'))
-    history=[];best=-1.;best_epoch=0;elapsed=0.;start_epoch=0;skip=0
+    if args.kind=='char':
+        provenance['char_input_source_sha256']=file_sha256(Path(__file__).with_name('province_char_input.py'))
+    history=[]
+    best=-1.
+    best_epoch=0
+    elapsed=0.
+    start_epoch=0
+    skip=0
     if args.resume:
         saved=torch.load(args.out/'last.pt',map_location='cpu',weights_only=True)
-        if saved['provenance']!=provenance or saved['kind']!=args.kind:raise ValueError('resume provenance differs')
+        if saved['provenance']!=provenance or saved['kind']!=args.kind:
+            raise ValueError('resume provenance differs')
         model.load_state_dict(saved['model_state']['state_dict'] if args.kind=='box' else saved['model_state'])
-        optimizer.load_state_dict(saved['optimizer']);scheduler.load_state_dict(saved['scheduler'])
-        history=saved['history'];best=saved['best_score'];best_epoch=saved['best_epoch']
-        start_epoch=saved['epoch'];skip=saved['cursor'];elapsed=saved['elapsed_seconds']
+        optimizer.load_state_dict(saved['optimizer'])
+        scheduler.load_state_dict(saved['scheduler'])
+        history=saved['history']
+        best=saved['best_score']
+        best_epoch=saved['best_epoch']
+        start_epoch=saved['epoch']
+        skip=saved['cursor']
+        elapsed=saved['elapsed_seconds']
     run_started=time.perf_counter()
     for epoch in range(start_epoch,args.epochs):
-        ds.epoch=epoch;model.train();frozen_batch_statistics(model)
-        epoch_started=time.perf_counter();real_seen=np.zeros(len(ds),dtype=np.uint8)
-        synthetic_provinces=Counter();synthetic_province_weights=Counter()
-        real_draws=synthetic_draws=real_physical=synthetic_physical=0;loss_total=0.;steps=0;epoch_prior_seconds=0.
+        ds.epoch=epoch
+        model.train()
+        frozen_batch_statistics(model)
+        epoch_started=time.perf_counter()
+        real_seen=np.zeros(len(ds),dtype=np.uint8)
+        synthetic_provinces=Counter()
+        synthetic_province_weights=Counter()
+        real_draws=synthetic_draws=real_physical=synthetic_physical=0
+        loss_total=0.
+        steps=0
+        epoch_prior_seconds=0.
         if args.resume and epoch==start_epoch and skip:
-            state=saved['epoch_counts'];real_seen=np.asarray(state['real_seen'],dtype=np.uint8)
-            real_draws=state['real_draws'];synthetic_draws=state['synthetic_draws']
-            real_physical=state['real_physical'];synthetic_physical=state['synthetic_physical'];loss_total=state['loss_total']
-            steps=state.get('steps',skip);epoch_prior_seconds=state.get('active_seconds',0.)
-            synthetic_provinces.update(state.get('synthetic_provinces',{}));synthetic_province_weights.update(state.get('synthetic_province_weights',{}))
+            state=saved['epoch_counts']
+            real_seen=np.asarray(state['real_seen'],dtype=np.uint8)
+            real_draws=state['real_draws']
+            synthetic_draws=state['synthetic_draws']
+            real_physical=state['real_physical']
+            synthetic_physical=state['synthetic_physical']
+            loss_total=state['loss_total']
+            steps=state.get('steps',skip)
+            epoch_prior_seconds=state.get('active_seconds',0.)
+            synthetic_provinces.update(state.get('synthetic_provinces',{}))
+            synthetic_province_weights.update(state.get('synthetic_province_weights',{}))
         def payload(cursor,counts):
             return {'format':FORMAT,'kind':args.kind,'model_state':inference_state(model,args.kind),
                     'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
-                    'epoch':epoch,'cursor':cursor,'epoch_counts':counts,'history':history,
-                    'best_score':best,'best_epoch':best_epoch,'provenance':provenance,
+                    'epoch':epoch,'cursor':cursor,'epoch_counts':counts,'history':history,  # noqa: B023 - checkpoint reads the current epoch synchronously
+                    'best_score':best,'best_epoch':best_epoch,'provenance':provenance,  # noqa: B023 - checkpoint must observe best values updated within this epoch
                     'elapsed_seconds':elapsed+time.perf_counter()-run_started,
                     'recipe':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}}
         for step,batch in enumerate(loader):
-            if step<skip:continue
+            if step<skip:
+                continue
             images,targets,lengths,texts,indices,thetas,groups,synthetic,weights=batch
             optimizer.zero_grad(set_to_none=True)
             outputs=model(images.to(device),return_theta=True) if args.kind=='box' else model(images.to(device))
@@ -421,19 +496,30 @@ def run(args):
             else:
                 per_example=ctc(logits.float().log_softmax(-1),targets.to(device),
                     torch.full((len(texts),),logits.shape[0],dtype=torch.long),lengths)/lengths.to(device)
-                if pred_theta is not None:per_example+=(pred_theta-thetas.to(device)).square().mean((1,2))
+                if pred_theta is not None:
+                    per_example+=(pred_theta-thetas.to(device)).square().mean((1,2))
             gpu_weights=weights.to(device)
             loss=(per_example*gpu_weights).sum()/gpu_weights.sum()
-            if not torch.isfinite(loss):raise RuntimeError('nonfinite training loss')
-            loss.backward();nn.utils.clip_grad_norm_(model.parameters(),5.,error_if_nonfinite=True);optimizer.step()
-            for i,is_synth,weight,label in zip(indices,synthetic,weights.tolist(),texts):
+            if not torch.isfinite(loss):
+                raise RuntimeError('nonfinite training loss')
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(),5.,error_if_nonfinite=True)
+            optimizer.step()
+            for i,is_synth,weight,label in zip(indices,synthetic,weights.tolist(),texts, strict=False):
                 if is_synth:
-                    synthetic_physical+=1;synthetic_draws+=weight
-                    synthetic_provinces[label[0]]+=1;synthetic_province_weights[label[0]]+=weight
-                else:real_physical+=1;real_draws+=weight;real_seen[i]+=1
-            loss_total+=float(loss.detach());steps=step+1
+                    synthetic_physical+=1
+                    synthetic_draws+=weight
+                    synthetic_provinces[label[0]]+=1
+                    synthetic_province_weights[label[0]]+=weight
+                else:
+                    real_physical+=1
+                    real_draws+=weight
+                    real_seen[i]+=1
+            loss_total+=float(loss.detach())
+            steps=step+1
             if step%100==0 or (args.out/'stop-request.json').exists():
-                rss=process_ram_bytes();free=free_ram_bytes()
+                rss=process_ram_bytes()
+                free=free_ram_bytes()
                 print(json.dumps({'epoch':epoch+1,'step':steps,'loss':float(loss.detach()),'rss':rss,
                                  'free_ram':free,'real_physical':real_physical,'synthetic_physical':synthetic_physical}),flush=True)
                 if (rss>2_500_000_000 or (args.out/'stop-request.json').exists() or (device.type=='cuda' and free<2_000_000_000)) and not args.smoke:
@@ -451,27 +537,38 @@ def run(args):
                 result={'kind':args.kind,'steps':steps,'seconds':time.perf_counter()-epoch_started,
                         'real_physical':real_physical,'synthetic_physical':synthetic_physical,
                         'rss_peak':process_ram_bytes(peak=True),'probe_updates_discarded':True}
-                (args.out/'profile.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)
+                (args.out/'profile.json').write_text(json.dumps(result,indent=2))
+                print(json.dumps(result),flush=True)
                 return result
-        if real_physical!=len(ds) or not np.all(real_seen==1):raise RuntimeError('full epoch unique coverage failed')
-        if abs(real_draws-float(loader.weights.sum()))>1:raise RuntimeError('real balanced exposure mismatch')
+        if real_physical!=len(ds) or not np.all(real_seen==1):
+            raise RuntimeError('full epoch unique coverage failed')
+        if abs(real_draws-float(loader.weights.sum()))>1:
+            raise RuntimeError('real balanced exposure mismatch')
         optimizer.zero_grad(set_to_none=True)
-        if 'images' in locals():del images,outputs,logits,loss,per_example
-        if ds._map is not None:ds._map.close();ds._map=None
-        if ds._file is not None:ds._file.close();ds._file=None
+        if 'images' in locals():
+            del images,outputs,logits,loss,per_example
+        if ds._map is not None:
+            ds._map.close()
+            ds._map=None
+        if ds._file is not None:
+            ds._file.close()
+            ds._file=None
         gc.collect()
-        if device.type=='cuda':torch.cuda.empty_cache()
+        if device.type=='cuda':
+            torch.cuda.empty_cache()
         counts={'real_seen':real_seen.tolist(),'real_draws':real_draws,'synthetic_draws':synthetic_draws,
                 'real_physical':real_physical,'synthetic_physical':synthetic_physical,'loss_total':loss_total,
                 'steps':steps,'active_seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
                             'synthetic_provinces':dict(synthetic_provinces),'synthetic_province_weights':dict(synthetic_province_weights)}
         atomic_save(payload(steps,counts),args.out/'last.pt')
-        if args.smoke:score={'selection_score':0.,'province_accuracy':0.,'plate_accuracy':0.}
+        if args.smoke:
+            score={'selection_score':0.,'province_accuracy':0.,'plate_accuracy':0.}
         else:
             scored=subprocess.run([str(args.cpu_python),'-B','-m','lpr_tools.train.score_province_readers',
                 '--kind',args.kind,'--model',str(args.out/'last.pt'),'--data-dir',str(args.data_dir),
                 '--out',str(args.out/'selection-latest.json')],capture_output=True,text=True,encoding='utf-8')
-            if scored.returncode:raise RuntimeError('CPU selection failed: '+scored.stderr[-4000:])
+            if scored.returncode:
+                raise RuntimeError('CPU selection failed: '+scored.stderr[-4000:])
             score=json.loads(scored.stdout)
         record={'epoch':epoch+1,'real_unique':len(ds),'real_physical':real_physical,
                 'synthetic_physical':synthetic_physical,'synthetic_provinces':dict(synthetic_provinces),
@@ -480,12 +577,18 @@ def run(args):
                 'base_group_logical':loader.base_groups,'extra_province_logical':loader.extra_provinces,
                 'loss':loss_total/max(1,steps),'seconds':epoch_prior_seconds+time.perf_counter()-epoch_started,
                 'selection':{k:v for k,v in score.items() if k not in ('records',)},'rss_peak':process_ram_bytes(peak=True)}
-        history.append(record);scheduler.step();skip=0
+        history.append(record)
+        scheduler.step()
+        skip=0
         improved=score['selection_score']>best
-        if improved:best=score['selection_score'];best_epoch=epoch+1
-        saved_out=payload(0,{});saved_out['epoch']=epoch+1
+        if improved:
+            best=score['selection_score']
+            best_epoch=epoch+1
+        saved_out=payload(0,{})
+        saved_out['epoch']=epoch+1
         atomic_save(saved_out,args.out/'last.pt')
-        if improved:atomic_save(saved_out,args.out/'best.pt')
+        if improved:
+            atomic_save(saved_out,args.out/'best.pt')
         report={'kind':args.kind,'epochs_completed':len(history),'best_epoch':best_epoch,'best_score':best,
                 'history':history,'provenance':provenance,'raw_gpu_fallbacks':loader.raw_fallbacks,'synthetic_gt_fallbacks':ds.synthetic_gt_fallbacks,
                 'effective_seconds':elapsed+time.perf_counter()-run_started}
@@ -506,15 +609,22 @@ def main():
     p.add_argument('--index',type=Path,default=Path('algorithm/out/data/batch12/combined_train.csv'))
     p.add_argument('--data-dir',type=Path,default=Path('algorithm/out/data/batch12'))
     p.add_argument('--sampler',type=Path,default=Path('algorithm/out/data/batch11/sampler.json'))
-    p.add_argument('--init',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
-    p.add_argument('--device',choices=('cpu','cuda'),default='cpu');p.add_argument('--epochs',type=int,required=True)
-    p.add_argument('--batch-size',type=int,default=128);p.add_argument('--block-size',type=int,default=128)
-    p.add_argument('--synth-probability',type=float,default=.35);p.add_argument('--lr',type=float,default=.00008)
-    p.add_argument('--seed',type=int,default=12042);p.add_argument('--resume',action='store_true')
-    p.add_argument('--smoke',action='store_true');p.add_argument('--profile-batches',type=int,default=0)
+    p.add_argument('--init',type=Path,required=True)
+    p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--device',choices=('cpu','cuda'),default='cpu')
+    p.add_argument('--epochs',type=int,required=True)
+    p.add_argument('--batch-size',type=int,default=128)
+    p.add_argument('--block-size',type=int,default=128)
+    p.add_argument('--synth-probability',type=float,default=.35)
+    p.add_argument('--lr',type=float,default=.00008)
+    p.add_argument('--seed',type=int,default=12042)
+    p.add_argument('--resume',action='store_true')
+    p.add_argument('--smoke',action='store_true')
+    p.add_argument('--profile-batches',type=int,default=0)
     p.add_argument('--no-cpu-prefetch',action='store_true',
                    help='disable the single bounded CPU prefetch thread for serial comparisons')
     p.add_argument('--cpu-python',type=Path,default=Path('.venv/Scripts/python.exe').resolve())
     print(json.dumps(run(p.parse_args()),default=str),flush=True)
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    main()

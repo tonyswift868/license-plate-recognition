@@ -2,11 +2,15 @@
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
-from lpr.corner_net import (CornerNet, KeypointModel, KeypointNet, INPUT_SIZE,
-                            keypoint_coordinates, letterbox_image)
+from lpr.corner_net import (
+    INPUT_SIZE,
+    CornerNet,
+    KeypointModel,
+    KeypointNet,
+    letterbox_image,
+)
 from lpr.errors import ModelLoadError
+from torch import nn
 
 
 class FixedHeatmaps(nn.Module):
@@ -100,7 +104,7 @@ def test_keypoint_rejects_invalid_metadata_threshold(tmp_path, threshold):
 
 
 def test_keypoint_targets_exact_grid_and_negative_loss():
-    from lpr_tools.train_corner import make_keypoint_targets, keypoint_loss
+    from lpr_tools.train_corner import keypoint_loss, make_keypoint_targets
     quads = torch.tensor([[[.2, .3], [.8, .3], [.8, .7], [.2, .7]], [[0., 0.]]*4])
     labels = torch.tensor([1., 0.])
     target = make_keypoint_targets(quads, labels)
@@ -119,7 +123,6 @@ def test_keypoint_targets_exact_grid_and_negative_loss():
 
 
 def test_keypoint_training_one_step_records_negatives_and_safe_deploy(tmp_path, monkeypatch):
-    import json
     from lpr_tools import train_corner as trainer
 
     class TinyDataset:
@@ -163,6 +166,7 @@ def test_keypoint_training_rejects_unbounded_or_invalid_round_before_data(tmp_pa
 
 def test_keypoint_cli_requires_data_directory(monkeypatch):
     import sys
+
     from lpr_tools.train_corner import main
     monkeypatch.setattr(sys, "argv", ["train_corner", "--stage", "keypoint"])
     with pytest.raises(SystemExit) as error:

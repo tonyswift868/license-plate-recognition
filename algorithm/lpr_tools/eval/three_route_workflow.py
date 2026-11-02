@@ -24,6 +24,8 @@ import json
 import os
 from pathlib import Path
 
+from lpr.config import ALGORITHM_DIR
+
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
               "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS"):
     os.environ[_name] = "1"
@@ -56,8 +58,8 @@ def _auto_review(trace, base_report, target, split_path=None):
 
 def _fit_threshold_report(trace, split_path, original_report, target):
     """Run the fixed exact threshold search on fit rows only, without opening hold labels."""
-    from .three_route import exact_search, read_jsonl_gz, sha256, validate_records
     from .route_split import path_key
+    from .three_route import exact_search, read_jsonl_gz, sha256, validate_records
 
     records, metadata = read_jsonl_gz(trace)
     assignments_doc = json.loads(Path(split_path).read_text(encoding="utf-8"))
@@ -73,7 +75,7 @@ def _fit_threshold_report(trace, split_path, original_report, target):
         json.dumps({"fit_threshold_progress": event}, separators=(",", ":")), flush=True))
     if not scan.get("complete") or not scan.get("best"):
         raise ValueError("fit-only exact threshold search has no feasible rule")
-    original = json.loads(Path(original_report).read_text(encoding="utf-8"))
+    _original = json.loads(Path(original_report).read_text(encoding="utf-8"))
     payload = {"status": "complete", "selection_scope": "fit-only",
         "trace": str(Path(trace).resolve()), "trace_sha256": sha256(trace),
         "trace_metadata": metadata, "trace_metadata_sha256": hashlib.sha256(json.dumps(
@@ -101,6 +103,7 @@ def _features(trace, target, options):
 
 def _split(trace, features, target):
     import gzip
+
     from .route_split import write_split
     from .three_route import read_jsonl_gz, sha256
 
@@ -142,9 +145,9 @@ def run_workflow(output_dir, *, mode="all", fresh=False, trace=None, base_report
                  features=None, config="algorithm/config/default.toml",
                  box_model=None, detector_model=None, box_loader=None, detector_loader=None,
                  pad_x=None, pad_y=None,
-                 index=r"D:\keshe2\algorithm\data\index\ccpd_index.csv",
-                 val_manifest=r"D:\keshe2\algorithm\data\index\val1000_v1.csv",
-                 devhard_manifest=r"D:\keshe2\algorithm\data\index\devhard_v1.csv"):
+                 index=str(ALGORITHM_DIR / "data/index/ccpd_index.csv"),
+                 val_manifest=str(ALGORITHM_DIR / "data/index/val1000_v1.csv"),
+                 devhard_manifest=str(ALGORITHM_DIR / "data/index/devhard_v1.csv")):
     if mode not in {"trace", "auto", "fallback", "all"}:
         raise ValueError("mode must be trace, auto, fallback, or all")
     directory = Path(output_dir).resolve()

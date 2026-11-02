@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from lpr_tools.data import build_plates_v2 as builder
 from lpr_tools.data.ccpd import INDEX_FIELDS
 

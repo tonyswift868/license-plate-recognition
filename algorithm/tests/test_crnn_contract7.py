@@ -4,11 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
 from lpr.charset import CHARSET
 from lpr.recognize.base import PlateReader
 from lpr.recognize.crnn import BLANK, CrnnNet, CrnnReader
+from torch import nn
 
 
 class FixedSequence(nn.Module):

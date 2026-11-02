@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import pytest
-
 from lpr.errors import BadInputError
 from lpr.rectify import deskew_vertical
 from lpr.types import PlateCandidate, RectifiedPlate

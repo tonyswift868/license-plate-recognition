@@ -16,10 +16,13 @@ from pathlib import Path
 
 from lpr_tools.eval.route_split import assert_content_separation, path_key, split_assignments
 from lpr_tools.eval.three_route import (
-    _fallback, _reference_fallback, _valid, read_jsonl_gz, sha256,
+    _fallback,
+    _reference_fallback,
+    _valid,
+    read_jsonl_gz,
+    sha256,
 )
-from lpr_tools.eval.three_route_auto import reference_decision, _policy
-
+from lpr_tools.eval.three_route_auto import _policy, reference_decision
 
 PREREG_PATH = Path(__file__).with_name("fallback_rules_v1.json")
 SPLIT_AMENDMENT_PATH = Path(__file__).with_name("fallback_split_v1.json")
@@ -116,7 +119,7 @@ def _legacy_sr(record, thresholds):
 
     if any(record.get(key) for key in ("input_error", "decode_error", "box_decode_error", "live_error")):
         return None
-    boxes = record.get("boxes", {})
+    _boxes = record.get("boxes", {})
     grouped = defaultdict(list)
     for rect in record.get("rects", []):
         grouped[int(rect["candidate_index"])].append(rect)
@@ -304,7 +307,7 @@ def _groups(record):
 def _score_rows(rows, decisions):
     stats = defaultdict(lambda: {"n": 0, "correct": 0, "auto_accepted": 0,
                                  "auto_correct": 0, "whole_plate_correct": 0})
-    for record, decision in zip(rows, decisions):
+    for record, decision in zip(rows, decisions, strict=False):
         correct = decision.get("plate") == record["truth"]
         accepted = decision.get("status") == "OK"
         for group in _groups(record):
@@ -578,7 +581,7 @@ def run_refine(trace_path, features_path, auto_policy_path, output_dir=None,
     # Audit the already-frozen automatic policy only after fallback fit selection.
     # These full counts cannot affect either rule choice or eligibility.
     auto_counts = defaultdict(lambda: {"n": 0, "accepted": 0, "correct": 0})
-    for record, auto in zip(records, auto_rows):
+    for record, auto in zip(records, auto_rows, strict=False):
         row = auto_counts[record["split"]]
         row["n"] += 1
         if auto["status"] == "OK":
@@ -606,7 +609,7 @@ def run_refine(trace_path, features_path, auto_policy_path, output_dir=None,
         for rule_id in (selected_id, *BASELINES):
             decisions = [_decision(record, auto, fallback, view, rules_by_id[rule_id])
                          for record, auto, fallback, view in
-                         zip(records, auto_rows, fallback_rows, feature_views)]
+                         zip(records, auto_rows, fallback_rows, feature_views, strict=False)]
             full_decisions[rule_id] = decisions
             full_result[rule_id] = _score_rows(records, decisions)
         production_default_hold = _score_rows(

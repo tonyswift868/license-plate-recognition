@@ -4,7 +4,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-
 from lpr.recognize.crnn import CrnnNet
 from lpr_tools.train.eval_crnn_v2 import evaluate
 
@@ -51,7 +50,7 @@ def test_v2_eval_uses_real_reader_and_reports_required_groups(tmp_path):
 
 
 def test_index_fold_filter_and_gt_source_suffix(tmp_path):
-    from lpr_tools.train.eval_crnn_v2 import load_index, _is_gt
+    from lpr_tools.train.eval_crnn_v2 import _is_gt, load_index
 
     index = tmp_path / "index.csv"
     _write_index(index)

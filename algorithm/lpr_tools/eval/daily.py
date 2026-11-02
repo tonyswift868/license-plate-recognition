@@ -7,19 +7,20 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
+
 from lpr_tools.data.manifest import read_manifest, write_manifest
+
 from .common import effective_config_info, model_identity
 from .index_samples import FIXED_HARD_MANIFEST, FIXED_VAL_MANIFEST
 
 ROOT = ALGORITHM_DIR.parent
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
-INDEX = Path(r"D:\keshe2\algorithm\data\index\ccpd_index.csv")
+INDEX = ALGORITHM_DIR / "data/index/ccpd_index.csv"
 SCOREBOARD_HEADER = ("日期", "commit", "分类器", "清晰", "夜间", "倾斜", "污损", "字符准确率",
                      "Top-3 定位召回", "自动通过精度", "P95 ms", "备注")
 

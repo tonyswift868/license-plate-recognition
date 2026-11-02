@@ -6,11 +6,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from lpr.charnorm import normalize_char, unify_polarity
+from lpr.charset import CHAR_TO_INDEX, CHARSET, PROVINCES
+from lpr.io_utils import imwrite
 from PIL import Image, ImageDraw, ImageFont
 
-from lpr.charset import CHARSET, CHAR_TO_INDEX, PROVINCES
-from lpr.charnorm import normalize_char, unify_polarity
-from lpr.io_utils import imwrite
 from .augment import augment_char
 
 DEFAULT_FONT = Path("C:/Windows/Fonts/simhei.ttf")
@@ -64,7 +64,7 @@ def generate_dataset(out: Path, *, per_class: int = 200, seed: int = 42,
     split_seeds = np.random.SeedSequence(seed).spawn(2)
     rows = []
     splits = ("train",) if train_only else ("train", "val")
-    split_seed_by_name = dict(zip(("train", "val"), split_seeds))
+    split_seed_by_name = dict(zip(("train", "val"), split_seeds, strict=False))
     for split in splits:
         split_seed = split_seed_by_name[split]
         rng = np.random.default_rng(split_seed)
@@ -93,7 +93,9 @@ def generate_dataset(out: Path, *, per_class: int = 200, seed: int = 42,
         total = counts_by_label.get(label, per_class)
         val_count = 0 if train_only else max(1, min(total - 1, round(total * val_fraction)))
         train_count = total if train_only else total - val_count
-        total_train += train_count; total_val += val_count; total_all += total
+        total_train += train_count
+        total_val += val_count
+        total_all += total
         print(f"{label:2d} {char} {train_count:5d} {val_count:3d} {total:5d}")
     print(f"TOTAL train={total_train} val={total_val} total={total_all}")
     return rows

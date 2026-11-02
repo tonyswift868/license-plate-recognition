@@ -7,9 +7,9 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+
 import cv2
 import numpy as np
-
 from lpr.config import ALGORITHM_DIR, load_config
 from lpr.pipeline import PlateRecognizer
 from lpr.testing import FakeRecognizer, UniformClassifier
@@ -152,7 +152,7 @@ def make_recognizer(args, *, samples_dir=None, cfg=None):
     cfg = cfg or config_for_args(args)
     recognizer = (PlateRecognizer(cfg, UniformClassifier()) if getattr(args, "uniform", False)
                   else PlateRecognizer.from_config(getattr(args, "config", None),
-                       **({"runtime__classifier": getattr(args, "classifier")} if getattr(args, "classifier", None) else {})))
+                       **({"runtime__classifier": args.classifier} if getattr(args, "classifier", None) else {})))
     return AttributedPlateRecognizer(recognizer)
 
 

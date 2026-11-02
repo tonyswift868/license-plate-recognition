@@ -1,12 +1,23 @@
 from pathlib import Path
+
 import pytest
-from lpr_tools.data.ccpd import (parse_ccpd_name, build_index, read_index, PROVINCES_CCPD, ALPHABETS, ADS, main)
+from lpr_tools.data.ccpd import (
+    ADS,
+    ALPHABETS,
+    PROVINCES_CCPD,
+    build_index,
+    main,
+    parse_ccpd_name,
+    read_index,
+)
 
 EXAMPLE="025-95_113-154&383_386&473-386&473_177&454_154&383_363&402-0_0_22_27_27_33_16-37-15.jpg"
 
 
 def named(labels):
-    fields=EXAMPLE.split("-");fields[4]="_".join(map(str,labels));return "-".join(fields)
+    fields=EXAMPLE.split("-")
+    fields[4]="_".join(map(str,labels))
+    return "-".join(fields)
 
 
 def test_appendix():
@@ -33,11 +44,15 @@ def test_green_and_skips():
     EXAMPLE.replace("95_113","95"),EXAMPLE.replace("386&473_177&454_154&383_363&402","386&473"),
     EXAMPLE.replace("154&383_386&473","154&383_154&383"),named([0,0,0])])
 def test_malformed(name):
-    with pytest.raises(ValueError):parse_ccpd_name(name)
+    with pytest.raises(ValueError):
+        parse_ccpd_name(name)
 
 
 def touch(root,path):
-    p=root/path;p.parent.mkdir(parents=True,exist_ok=True);p.touch();return p
+    p=root/path
+    p.parent.mkdir(parents=True,exist_ok=True)
+    p.touch()
+    return p
 
 
 def test_build_two_datasets(tmp_path,capsys):
@@ -48,7 +63,8 @@ def test_build_two_datasets(tmp_path,capsys):
     for split in ("train","val","test"):
         p=touch(raw,f"ccpd2020/ccpd_green/{split}/{named([26,0,3,25,26,27,28,29])}")
     for file,subset in (("train","ccpd_base"),("val","ccpd_db"),("test","ccpd_tilt"),("ccpd_blur","ccpd_blur")):
-        p=touch(raw,f"ccpd2019/splits/{file}.txt");p.write_text(f"{subset}/{EXAMPLE}\n",encoding="utf-8")
+        p=touch(raw,f"ccpd2019/splits/{file}.txt")
+        p.write_text(f"{subset}/{EXAMPLE}\n",encoding="utf-8")
     target=tmp_path/"index.csv"
     rows=build_index(raw,target)
     assert len(rows)==9 and read_index(target)==rows
@@ -63,7 +79,9 @@ def test_build_two_datasets(tmp_path,capsys):
 
 
 def test_split_conflict(tmp_path):
-    raw=tmp_path/"raw";touch(raw,f"ccpd2019/ccpd_base/{EXAMPLE}")
+    raw=tmp_path/"raw"
+    touch(raw,f"ccpd2019/ccpd_base/{EXAMPLE}")
     for split in ("train","val"):
         touch(raw,f"ccpd2019/splits/{split}.txt").write_text(EXAMPLE,encoding="utf-8")
-    with pytest.raises(ValueError,match="conflicting"):build_index(raw,tmp_path/"i.csv")
+    with pytest.raises(ValueError,match="conflicting"):
+        build_index(raw,tmp_path/"i.csv")

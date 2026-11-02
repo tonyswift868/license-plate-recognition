@@ -133,11 +133,11 @@ def _model_identity(recognizer, config_path: Path) -> dict:
 
 def _run_panel(recognizer, panel: str, rows: list[dict], records_stream,
                source_hashes: dict[str, str], progress) -> list[dict]:
+    import numpy as np
     from lpr.errors import failure_result
     from lpr.io_utils import imread
     from lpr.types import RecogStatus
 
-    import numpy as np
     from lpr_tools.train.province_synth import replace_province
 
     records = []
@@ -211,9 +211,10 @@ def run(*, config_path: Path | None, holdout_path: Path, synthetic_path: Path,
     import cv2
     import torch
     from loguru import logger
+    from lpr.charset import PROVINCES
     from lpr.config import DEFAULT_CONFIG_PATH
     from lpr.pipeline import PlateRecognizer
-    from lpr.charset import PROVINCES
+
     from lpr_tools.train.province_synth import DEFAULT_FONT
 
     config_path = Path(config_path or DEFAULT_CONFIG_PATH).resolve()

@@ -1,12 +1,16 @@
-import numpy as np
 import json
-from types import SimpleNamespace
 
+import numpy as np
 from lpr.config import load_config
-from lpr_tools.eval.crop_gap import (_bbox_crop, _route_correct, _summarize,
-                                     _make_thumbnail,
-                                     _same_candidate_alt_rect_rescue,
-                                     _load_ceiling_cache, classify_primary_bucket)
+from lpr_tools.eval.crop_gap import (
+    _bbox_crop,
+    _load_ceiling_cache,
+    _make_thumbnail,
+    _route_correct,
+    _same_candidate_alt_rect_rescue,
+    _summarize,
+    classify_primary_bucket,
+)
 
 
 def test_primary_bucket_has_fixed_priority_and_keeps_unsupported_separate():

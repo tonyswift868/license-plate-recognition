@@ -1,16 +1,18 @@
 """Validated index records and balanced, reproducible validation sampling."""
 from __future__ import annotations
 
+import csv
+import hashlib
 import math
 import os
 import random
-import csv
-import hashlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from lpr.config import ALGORITHM_DIR
 from lpr.plate_rules import match_layout
+
 from lpr_tools.data.ccpd import INDEX_FIELDS, read_index
 from lpr_tools.data.manifest import COLORS, ManifestRow, image_path, parse_quad, read_manifest
 
@@ -24,15 +26,15 @@ SUBSET_CATEGORIES = {
 }
 HARD_SUBSETS = ("ccpd_db", "ccpd_blur", "ccpd_tilt", "ccpd_rotate",
                 "ccpd_fn", "ccpd_challenge", "ccpd_weather")
-FIXED_VAL_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\val1000_v1.csv")
-FIXED_HARD_MANIFEST = Path(r"D:\keshe2\algorithm\data\index\devhard_v1.csv")
+FIXED_VAL_MANIFEST = ALGORITHM_DIR / "data/index/val1000_v1.csv"
+FIXED_HARD_MANIFEST = ALGORITHM_DIR / "data/index/devhard_v1.csv"
 FIXED_VAL_N = 1000
 FIXED_HARD_N = 2100
 FIXED_HARD_PER_SUBSET = 300
 FROZEN_DAILY_MANIFESTS = (
-    Path(r"D:\keshe2\algorithm\data\index\testset_manifest_v1.csv"),
-    Path(r"D:\keshe2\workers\03\algorithm\tests\data\golden\golden_manifest.csv"),
-    Path(r"D:\keshe2\algorithm\data\index\undecodable.csv"),
+    ALGORITHM_DIR / "data/index/testset_manifest_v1.csv",
+    ALGORITHM_DIR / "tests/data/golden/golden_manifest.csv",
+    ALGORITHM_DIR / "data/index/undecodable.csv",
 )
 
 

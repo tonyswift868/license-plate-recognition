@@ -7,7 +7,6 @@ import json
 from lpr_tools.train.calibrate_box_reader import validate_v2_training_history
 from lpr_tools.train.eval_box_reader import _groups, _read_csv, legal_prediction
 
-
 TUNE_FIELDS = ("path", "label", "subset", "brightness", "quad", "sha256", "calibration_fold")
 HARD = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
 
@@ -83,7 +82,8 @@ def test_v2_calibration_accepts_only_full_balanced_60_epoch_history(tmp_path):
     train.write_text("path,label\na.jpg,皖A12345\n", encoding="utf-8")
     tune.write_text("path,label\nb.jpg,皖A12345\n", encoding="utf-8")
     best.write_bytes(b"selected checkpoint")
-    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    def sha(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
     names = (*HARD, "green", "base")
     counts = {name: 100 for name in names}
     groups = {name: 100 for name in names}

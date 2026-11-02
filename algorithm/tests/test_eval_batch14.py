@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from lpr.types import RecogStatus
 from lpr_tools.eval.bench_latency import benchmark_paths
 from lpr_tools.eval.common import AttributedPlateRecognizer
@@ -75,6 +74,7 @@ def test_frozen_once_marker_is_stable_for_same_manifest(tmp_path):
 
 def test_frozen_preparation_resolves_config_and_never_builds_a_model(tmp_path, monkeypatch, capsys):
     import json
+
     from lpr_tools.eval import frozen_once as tool
     manifest=tmp_path/'empty.csv'
     manifest.write_text('path,plate_no,plate_color,category,source,quad,note\n',encoding='utf-8')

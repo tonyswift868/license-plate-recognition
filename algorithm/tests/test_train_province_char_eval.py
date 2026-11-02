@@ -4,9 +4,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-
 from lpr_tools.train.eval_province_char import (
-    _alnum_analysis, _position_top1, _segment_decode, _segment_record, _summarize,
+    _alnum_analysis,
+    _position_top1,
+    _segment_decode,
+    _segment_record,
+    _summarize,
 )
 
 

@@ -3,7 +3,6 @@ import tomllib
 
 import cv2
 import numpy as np
-
 from lpr.io_utils import imwrite
 from lpr_tools.calib_layout import calibrate
 from lpr_tools.data.ccpd import INDEX_FIELDS
