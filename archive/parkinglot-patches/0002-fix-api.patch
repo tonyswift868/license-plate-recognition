@@ -1,0 +1,184 @@
+From edfc6782bbee887718ac9ebb21f339ceb066b9c5 Mon Sep 17 00:00:00 2001
+From: tonyswift868
+ <205869700+tonyswift868@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 05:38:48 +0900
+Subject: [PATCH 2/6] =?UTF-8?q?fix(api):=20=E4=BC=A0=E9=80=92=E6=8A=93?=
+ =?UTF-8?q?=E6=8B=8D=E5=9B=BE=E5=B9=B6=E5=9C=A8=E7=BA=BF=E7=A8=8B=E6=B1=A0?=
+ =?UTF-8?q?=E8=B0=83=E7=94=A8=E7=9C=9F=E5=AE=9E=E8=AF=86=E5=88=AB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ backend/app/api/entry.py                   |  9 ++++---
+ backend/app/api/exit.py                    |  9 ++++---
+ backend/app/services/recognition/client.py | 28 +++++++++++-----------
+ backend/app/services/storage/images.py     | 15 ++++++++----
+ 4 files changed, 37 insertions(+), 24 deletions(-)
+
+diff --git a/backend/app/api/entry.py b/backend/app/api/entry.py
+index 2708d18..39a8c30 100644
+--- a/backend/app/api/entry.py
++++ b/backend/app/api/entry.py
+@@ -4,6 +4,8 @@
+ """
+ from __future__ import annotations
+ 
++import asyncio
++
+ from fastapi import APIRouter
+ 
+ from app.core.deps import DbSession
+@@ -12,7 +14,7 @@ from app.schemas.entry import EntryCaptureRequest
+ from app.services.gate import service as gate_service
+ from app.services.gate.lane_state import registry
+ from app.services.recognition.client import recognize
+-from app.services.storage.images import save_capture
++from app.services.storage.images import decode_capture, save_capture
+ from app.ws.lane import manager
+ 
+ router = APIRouter(prefix="/entry", tags=["entry"])
+@@ -20,9 +22,10 @@ router = APIRouter(prefix="/entry", tags=["entry"])
+ 
+ @router.post("/capture")
+ async def capture(payload: EntryCaptureRequest, db: DbSession) -> dict:
+-    result = recognize(None, hint_plate=payload.plate_no, lane_hint=str(payload.lane_id))
++    result = await asyncio.to_thread(recognize, decode_capture(payload.image_base64),
++                                     hint_plate=payload.plate_no, lane_hint=str(payload.lane_id))
+     if not result.success or not result.plate_no:
+-        raise ApiError(3001)
++        raise ApiError(3001, result.message)
+ 
+     image_path = save_capture(payload.image_base64, lane_id=payload.lane_id,
+                               plate_no=result.plate_no)
+diff --git a/backend/app/api/exit.py b/backend/app/api/exit.py
+index 7c4726f..c9f85f7 100644
+--- a/backend/app/api/exit.py
++++ b/backend/app/api/exit.py
+@@ -4,6 +4,8 @@
+ """
+ from __future__ import annotations
+ 
++import asyncio
++
+ from fastapi import APIRouter
+ 
+ from app.core.deps import DbSession
+@@ -12,7 +14,7 @@ from app.schemas.exit import ExitCaptureRequest
+ from app.services.gate import service as gate_service
+ from app.services.gate.lane_state import registry
+ from app.services.recognition.client import recognize
+-from app.services.storage.images import save_capture
++from app.services.storage.images import decode_capture, save_capture
+ from app.ws.lane import manager
+ 
+ router = APIRouter(prefix="/exit", tags=["exit"])
+@@ -20,9 +22,10 @@ router = APIRouter(prefix="/exit", tags=["exit"])
+ 
+ @router.post("/capture")
+ async def capture(payload: ExitCaptureRequest, db: DbSession) -> dict:
+-    result = recognize(None, hint_plate=payload.plate_no, lane_hint=str(payload.lane_id))
++    result = await asyncio.to_thread(recognize, decode_capture(payload.image_base64),
++                                     hint_plate=payload.plate_no, lane_hint=str(payload.lane_id))
+     if not result.success or not result.plate_no:
+-        raise ApiError(3001)
++        raise ApiError(3001, result.message)
+ 
+     image_path = save_capture(payload.image_base64, lane_id=payload.lane_id,
+                               plate_no=result.plate_no)
+diff --git a/backend/app/services/recognition/client.py b/backend/app/services/recognition/client.py
+index 1d83752..86982fd 100644
+--- a/backend/app/services/recognition/client.py
++++ b/backend/app/services/recognition/client.py
+@@ -1,44 +1,44 @@
+ """识别服务客户端：业务层唯一入口（M2 ↔ M3 的边界）。
+ 
+ - 优先调用 algorithm/lpr/pipeline.recognize()
+-- 算法未实现（NotImplementedError）或未安装依赖时，退回占位识别，保证联调与演示不卡住
++- 给了车牌直接使用；无图才占位；有图识别失败必须转人工
+ 
+ Owner: tonyswift868（算法）/ 刘一凡（调用方）｜任务: F3-T06
+ """
+ from __future__ import annotations
+ 
+ import logging
++import sys
+ import time
+-from typing import Optional
+ 
++from app.core.config import REPO_DIR
+ from app.schemas.recognition import RecognitionResult
+ 
++if str(REPO_DIR) not in sys.path:
++    sys.path.append(str(REPO_DIR))
++
+ logger = logging.getLogger("parking.recognition")
+ 
+ MOCK_PLATE = "鲁B12345"
+ 
+ 
+-def recognize(image_bytes: Optional[bytes] = None, *, hint_plate: Optional[str] = None,
++def recognize(image_bytes: bytes | None = None, *, hint_plate: str | None = None,
+               lane_hint: str = "") -> RecognitionResult:
+     """识别一张抓拍图，返回统一结构（见 schemas/recognition.py）。"""
+     started = time.perf_counter()
++    if hint_plate or image_bytes is None:
++        elapsed = int((time.perf_counter() - started) * 1000)
++        plate = (hint_plate or MOCK_PLATE).upper()
++        return RecognitionResult(plate_no=plate, confidence=0.99, success=True,
++                                 message=f"手动车牌（lane={lane_hint}）" if hint_plate else f"占位识别（lane={lane_hint}）",
++                                 stage_ms={"manual" if hint_plate else "mock": elapsed})
+     try:
+         from algorithm.lpr.pipeline import recognize as real_recognize  # type: ignore
+ 
+-        result = real_recognize(image_bytes)
++        result = real_recognize(image_bytes, lane_id=int(lane_hint) if lane_hint else None)
+         if isinstance(result, dict):
+             result = RecognitionResult(**result)
+         return result
+-    except NotImplementedError:
+-        logger.warning("算法流水线尚未实现，使用占位识别结果（F3-T02—F3-T04）")
+-    except ImportError:
+-        logger.warning("未找到 algorithm 包，使用占位识别结果")
+     except Exception as exc:  # noqa: BLE001 - 算法异常不应击穿业务
+         logger.exception("识别失败：%s", exc)
+         return RecognitionResult(plate_no="", success=False, message="识别失败")
+-
+-    elapsed = int((time.perf_counter() - started) * 1000)
+-    plate = (hint_plate or MOCK_PLATE).upper()
+-    return RecognitionResult(plate_no=plate, confidence=0.99, success=True,
+-                             message=f"占位识别（lane={lane_hint}）",
+-                             stage_ms={"mock": elapsed})
+diff --git a/backend/app/services/storage/images.py b/backend/app/services/storage/images.py
+index 3ede953..0f325b9 100644
+--- a/backend/app/services/storage/images.py
++++ b/backend/app/services/storage/images.py
+@@ -14,14 +14,21 @@ from app.core.config import IMAGE_DIR
+ logger = logging.getLogger("parking.storage")
+ 
+ 
+-def save_capture(image_base64: str | None, *, lane_id: int, plate_no: str) -> str | None:
+-    """保存 base64 抓拍图，返回相对路径（入库用）；无图返回 None。"""
++def decode_capture(image_base64: str | None) -> bytes | None:
++    """无图返回 None；有图但解码失败返回空字节，供识别返回 3001。"""
+     if not image_base64:
+         return None
+     try:
+-        raw = base64.b64decode(image_base64.split(",")[-1])
++        return base64.b64decode(image_base64.split(",")[-1])
+     except Exception:  # noqa: BLE001
+-        logger.warning("抓拍图解码失败，忽略")
++        logger.warning("抓拍图解码失败")
++        return b""
++
++
++def save_capture(image_base64: str | None, *, lane_id: int, plate_no: str) -> str | None:
++    """保存 base64 抓拍图，返回相对路径（入库用）；无有效字节返回 None。"""
++    raw = decode_capture(image_base64)
++    if not raw:
+         return None
+ 
+     day = datetime.now().strftime("%Y%m%d")
+-- 
+2.55.0.windows.3
+

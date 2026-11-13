@@ -1,0 +1,173 @@
+From 0e16f9c789c833c1711187e1772cd625cc46eed9 Mon Sep 17 00:00:00 2001
+From: tonyswift868
+ <205869700+tonyswift868@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 05:38:48 +0900
+Subject: [PATCH 3/6] =?UTF-8?q?test(lpr):=20=E8=A6=86=E7=9B=96=E8=AF=86?=
+ =?UTF-8?q?=E5=88=AB=E5=88=86=E6=B5=81=E4=B8=8E=E7=9C=9F=E5=AE=9E=E5=9B=BE?=
+ =?UTF-8?q?=E7=89=87=E5=85=A5=E5=9C=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ tests/test_recognition_client.py | 115 +++++++++++++++++++++++++++++++
+ tests/test_recognition_real.py   |  25 +++++++
+ 2 files changed, 140 insertions(+)
+ create mode 100644 tests/test_recognition_client.py
+ create mode 100644 tests/test_recognition_real.py
+
+diff --git a/tests/test_recognition_client.py b/tests/test_recognition_client.py
+new file mode 100644
+index 0000000..56df3c8
+--- /dev/null
++++ b/tests/test_recognition_client.py
+@@ -0,0 +1,115 @@
++"""识别边界与异步接线；假算法模块不依赖 torch。"""
++from __future__ import annotations
++
++import asyncio
++import base64
++import importlib
++import sys
++from types import ModuleType
++
++import pytest
++from app.schemas.recognition import RecognitionResult
++from app.services.recognition.client import MOCK_PLATE, recognize
++from app.services.storage.images import decode_capture, save_capture
++
++
++@pytest.fixture
++def fake_algorithm(monkeypatch):
++    module = ModuleType("algorithm.lpr.pipeline")
++    calls = []
++
++    def run(image_bytes, *, lane_id=None):
++        calls.append((image_bytes, lane_id))
++        return {"plate_no": "皖A12345", "confidence": 0.98, "image_path": None,
++                "stage_ms": {"recognize": 12}, "success": True, "message": None}
++
++    module.recognize = run
++    monkeypatch.setitem(sys.modules, "algorithm.lpr.pipeline", module)
++    return module, calls
++
++
++@pytest.mark.parametrize("image", [None, b"", b"bad", b"image"])
++def test_supplied_plate_bypasses_algorithm(fake_algorithm, image):
++    _, calls = fake_algorithm
++    result = recognize(image, hint_plate="皖a12345", lane_hint="1")
++    assert result.success and result.plate_no == "皖A12345"
++    assert calls == []
++
++
++def test_no_image_keeps_demo_placeholder(fake_algorithm):
++    _, calls = fake_algorithm
++    result = recognize(None)
++    assert result.success and result.plate_no == MOCK_PLATE
++    assert calls == []
++
++
++@pytest.mark.parametrize("success", [True, False])
++def test_image_uses_algorithm_result(fake_algorithm, success):
++    module, calls = fake_algorithm
++    original = module.recognize
++
++    def run(*args, **kwargs):
++        result = original(*args, **kwargs)
++        result.update(success=success, message=None if success else "置信度不足，请人工确认")
++        return result
++
++    module.recognize = run
++    result = recognize(b"image", lane_hint="2")
++    assert result.success is success and result.plate_no == "皖A12345"
++    assert calls == [(b"image", 2)]
++    assert result.stage_ms == {"recognize": 12}
++    assert result.message == (None if success else "置信度不足，请人工确认")
++
++
++@pytest.mark.parametrize("error", [ImportError("torch"), RuntimeError("manifest"), NotImplementedError("stub"), ValueError("decode")])
++def test_algorithm_errors_never_use_placeholder(fake_algorithm, caplog, error):
++    module, _ = fake_algorithm
++
++    def fail(*args, **kwargs):
++        raise error
++
++    module.recognize = fail
++    result = recognize(b"bad")
++    assert not result.success and result.plate_no == "" and result.message == "识别失败"
++    assert any(r.exc_info and r.exc_info[1] is error for r in caplog.records)
++
++
++def test_missing_algorithm_import_is_failure(monkeypatch, caplog):
++    monkeypatch.setitem(sys.modules, "algorithm.lpr.pipeline", None)
++    result = recognize(b"image")
++    assert not result.success and result.plate_no == "" and result.message == "识别失败"
++    assert any(r.exc_info for r in caplog.records)
++
++
++@pytest.mark.parametrize("value,expected", [(None, None), ("", None), ("a", b""), ("%%%", b""),
++                                           ("aGVsbG8=", b"hello"), ("data:image/png;base64,aGVsbG8=", b"hello")])
++def test_decode_distinguishes_absent_and_invalid(value, expected):
++    assert decode_capture(value) == expected
++
++
++def test_save_capture_uses_decoded_bytes(monkeypatch, tmp_path):
++    from app.services.storage import images
++
++    monkeypatch.setattr(images, "IMAGE_DIR", tmp_path)
++    assert save_capture("a", lane_id=1, plate_no="皖A12345") is None
++    path = save_capture(base64.b64encode(b"image bytes").decode(), lane_id=1, plate_no="皖A12345")
++    assert (tmp_path / path).read_bytes() == b"image bytes"
++
++
++@pytest.mark.parametrize("route,lane", [("entry", 1), ("exit", 2)])
++def test_capture_runs_recognition_off_event_loop_and_propagates_failure(client, monkeypatch, route, lane):
++    api = importlib.import_module(f"app.api.{route}")
++    calls = []
++
++    def fail(image_bytes, **kwargs):
++        # Running here on the event loop would raise the assertion instead.
++        with pytest.raises(RuntimeError, match="no running event loop"):
++            asyncio.get_running_loop()
++        calls.append((image_bytes, kwargs))
++        return RecognitionResult(plate_no="皖A12345", success=False, message="置信度不足，请人工确认")
++
++    monkeypatch.setattr(api, "recognize", fail)
++    response = client.post(f"/api/v1/{route}/capture", json={"lane_id": lane, "image_base64": "a"})
++    assert response.status_code == 422 and response.json()["code"] == 3001
++    assert response.json()["message"] == "置信度不足，请人工确认"
++    assert calls == [(b"", {"hint_plate": None, "lane_hint": str(lane)})]
+diff --git a/tests/test_recognition_real.py b/tests/test_recognition_real.py
+new file mode 100644
+index 0000000..ad7aaf6
+--- /dev/null
++++ b/tests/test_recognition_real.py
+@@ -0,0 +1,25 @@
++"""默认模型的客户端与入场 HTTP 集成；金样例随仓库分发。"""
++from __future__ import annotations
++
++import base64
++from pathlib import Path
++
++import pytest
++
++pytest.importorskip("torch")
++
++from app.services.recognition.client import recognize  # noqa: E402
++
++GOLDEN_NAME = "ccpd2019_ccpd_base_0110201149425-92_87-285&529_479&589-485&598_279&587_277&524_483&535-0_0_5_24_17_33_33-105-19.jpg"
++GOLDEN_PLATE = "皖AF0T99"
++
++
++def test_real_client_and_entry_capture(client):
++    image = (Path(__file__).resolve().parents[1] / "algorithm/tests/data/golden" / GOLDEN_NAME).read_bytes()
++    result = recognize(image, lane_hint="1")
++    assert result.success and result.plate_no == GOLDEN_PLATE
++    response = client.post("/api/v1/entry/capture", json={"lane_id": 1, "image_base64": base64.b64encode(image).decode()})
++    assert response.status_code == 200, response.text
++    assert response.json()["code"] == 0 and response.json()["data"]["plate_no"] == GOLDEN_PLATE
++    bad = client.post("/api/v1/entry/capture", json={"lane_id": 1, "image_base64": "a"})
++    assert bad.status_code == 422 and bad.json()["code"] == 3001
+-- 
+2.55.0.windows.3
+

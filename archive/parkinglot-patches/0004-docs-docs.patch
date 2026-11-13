@@ -1,0 +1,200 @@
+From 22fb31e6e0c6bc89ac14647307f688dc3976c2cb Mon Sep 17 00:00:00 2001
+From: tonyswift868
+ <205869700+tonyswift868@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 05:38:48 +0900
+Subject: [PATCH 4/6] =?UTF-8?q?docs(docs):=20=E5=90=8C=E6=AD=A5=E7=AE=97?=
+ =?UTF-8?q?=E6=B3=95=E5=AE=89=E8=A3=85=E5=A5=91=E7=BA=A6=E4=B8=8E=E5=86=BB?=
+ =?UTF-8?q?=E7=BB=93=E8=AF=84=E6=B5=8B=E5=8F=A3=E5=BE=84?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md           |   4 +-
+ algorithm/README.md | 100 +++++++++++++++++++++++++++++++++-----------
+ docs/TASKS.md       |  12 +++---
+ docs/api.md         |   2 +-
+ 4 files changed, 85 insertions(+), 33 deletions(-)
+
+diff --git a/README.md b/README.md
+index 415f944..423d82b 100644
+--- a/README.md
++++ b/README.md
+@@ -9,7 +9,7 @@
+ | --- | --- | --- |
+ | 出入场控制、计费引擎、道闸状态机（M3/M4） | 刘一凡 | 已完成 |
+ | 数据库 DDL / ORM / 种子数据、统计与 PDF 报表（M5/M6） | 宫浩澄 | 已完成（本分支） |
+-| 车牌识别算法（M2b） | tonyswift868 | 待交付，后端暂用占位识别 |
++| 车牌识别算法（M2b） | tonyswift868 | 已完成（本分支）；版本 lpr-1.0.0+char_cnn_v2+plate_det_v1+crnn_v4+box_reader_v3；冻结测试仅一次：清晰 148/150 = 98.67%、夜间 48/50 = 96.00%、倾斜 49/50 = 98.00%、污损 48/50 = 96.00%，自动通过精度 282/283 = 99.65%；单帧 P95 105.3 ms（CPU、1280×720、2 线程），lpr 覆盖率 94.54%；G3 视频端到端待真实视频 |
+ | 图像采集与去重（M2a） | 贺锦晗 | 待交付 |
+ | 管理台 / 岗亭界面 / Three.js 动画（M7） | 张博岩 | 进行中 |
+ | 测试与联调（M8） | 贺锦晗 / 刘一凡 | 进行中 |
+@@ -27,7 +27,7 @@
+ ```powershell
+ # 0 一次性：建虚拟环境并安装依赖
+ python -m venv .venv
+-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
++.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -r requirements-algo.txt
+ # 国内网络慢可加镜像：
+ #   .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -i https://mirrors.aliyun.com/pypi/simple/
+ 
+diff --git a/algorithm/README.md b/algorithm/README.md
+index 88f9c47..62a71c0 100644
+--- a/algorithm/README.md
++++ b/algorithm/README.md
+@@ -1,40 +1,92 @@
+ # algorithm —— 车牌识别（Owner: tonyswift868）
+ 
+-只依赖 OpenCV / NumPy / PyTorch / scikit-learn，**不调用现成车牌识别 API**。
++M2 默认版本：`lpr-1.0.0+char_cnn_v2+plate_det_v1+crnn_v4+box_reader_v3`。
++图像处理与推理在本地 CPU 执行，不调用现成车牌识别 API。
+ 
+-## 目录
++## 安装与运行
+ 
++在仓库根目录使用 Python 3.12（本批实测）：
++
++```powershell
++python -m venv .venv
++.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -r requirements-algo.txt
++.\.venv\Scripts\python.exe scripts\init_db.py
++cd backend
++..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+ ```
+-lpr/           识别流水线（六个阶段，每阶段一个文件）
+-  preprocess.py  1 预处理：灰度、去噪、CLAHE
+-  locate.py      2 车牌定位：颜色分割 + 边缘 + 形态学
+-  rectify.py     3 倾斜校正：最小外接矩形 / Hough + 透视变换
+-  segment.py     4 字符分割：二值化 + 垂直投影 + 连通域
+-  recognize.py   5 字符识别：CNN（含 HOG+SVM 与模板匹配基线）
+-  postprocess.py 6 后处理：格式校验、易混字符纠错、多帧投票
+-  pipeline.py    串联六阶段，对外唯一入口 recognize()
+-train/         训练与评估脚本
+-datasets/      数据（不入库，只放生成脚本说明）
++
++不需要设置 `PYTHONPATH`。实测 CPU 依赖为 torch 2.14.1、torchvision 0.29.1+cpu、
++opencv-python 4.14.0.94、loguru 0.7.3。Windows 上 PyPI 默认即 CPU 版。
++若需复现 torchvision 的 `+cpu` wheel，可用官方 CPU 索引安装：
++`python -m pip install torchvision==0.29.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu`。
++Linux 部署应先按 PyTorch 官方说明选择 CPU wheel，再安装上述依赖。
++
++直接调用（仓库根目录）：
++
++```python
++from pathlib import Path
++from algorithm.lpr.pipeline import recognize
++result = recognize(Path("capture.jpg").read_bytes(), lane_id=1)
++print(result)
+ ```
+ 
+ ## 对外契约（与后端唯一接口）
+ 
+-`lpr.pipeline.recognize(image_bytes) -> dict`，字段与 `backend/app/schemas/recognition.py` 一致：
++`algorithm.lpr.pipeline.recognize(image_bytes: bytes | None, *, lane_id: int | None = None) -> dict`，
++返回恰好六个字段，与 `backend/app/schemas/recognition.py` 一致：
+ 
+ ```python
+-{"plate_no": "鲁B12345", "confidence": 0.97, "image_path": None,
+- "stage_ms": {"preprocess": 8, "locate": 42, "rectify": 11,
+-              "segment": 6, "recognize": 15, "postprocess": 2},
++{"plate_no": "皖AF0T99", "confidence": 0.97, "image_path": None,
++ "stage_ms": {"decode": 2, "preprocess": 8, "locate": 42},
+  "success": True, "message": None}
+ ```
+ 
+-未实现阶段直接 `raise NotImplementedError("F3-xx ...")`：后端会退回占位识别，联调不阻塞。
++`stage_ms` 各阶段耗时四舍五入为整数毫秒，具体阶段键随执行路线变化。
++仅算法状态 `OK` 对应 `success=True`；其他状态返回中文失败说明，并保留最佳猜测车牌（无结果为 `""`），由后端返回 HTTP 422 / 3001 转人工。
++空输入或坏图片返回失败结果。模型初始化异常抛带原因和安装命令的 `RuntimeError`；后端记录异常并返回“识别失败”，不会给假车牌。
++
++后端提供 `plate_no` 时直接使用给定车牌，不调用算法；不提供车牌且没有图片时才保留演示占位车牌 `鲁B12345`。
++有图片时走真实识别，坏 base64 也返回 3001。入场和出场均在线程池中调用识别，避免阻塞事件循环。
++
++实例在首次有效图片调用时加锁加载，进程内复用，加载失败可在下一次调用重试。
++识别实例支持并发调用；直接接入其他异步服务时也应使用 `asyncio.to_thread`。
++`PlateRecognizer.warmup()` 可用于应用启动时预热；每个进程都需独立加载模型。
++
++## 模型与配置
++
++默认配置为 `config/default.toml`。仅分发默认流程所需的四个权重及 `models/manifest.json`：
+ 
+-## 要做的事（对应 docs/TASKS.md）
++- `char_cnn_v2.pt`：分割字符 CNN。
++- `plate_det_v1.pt`：车牌检测，默认检测输入 384。
++- `crnn_v4.pt`：校正图整牌识别。
++- `box_reader_v3.pt`：原框整牌识别。
++
++加载时校验文件 SHA256 与字符表。对比实验用的旧模型不随团队仓库分发，
++manifest 中的历史登记和历史配置仅保留用于追溯；调用这些实验可能需要另行提供对应权重和本地数据。
++在进程启动、首次加载前设置 `LPR_CONFIG` 可以选择其他配置，例如：
++
++```powershell
++$env:LPR_CONFIG = (Resolve-Path algorithm/config/default.toml).Path
++```
++
++配置中的相对模型路径按算法目录解析，与启动目录无关。默认流程参数保持冻结，不通过本次集成调参。
++
++## 目录与测试
++
++`lpr/` 提供预处理、定位、校正、分割、字符/整牌识别、格式约束解码及 `voting.py` 多帧投票。
++`lpr_tools/` 提供训练、评测和导出工具；`tests/data/golden/` 提供金样例。
++数据集与历史实验输出不随仓库导出。
++
++```powershell
++# 仓库根目录：后端单元测试、契约与真实图片入场测试
++.\.venv\Scripts\python.exe -m pytest
++# 算法测试：先激活 venv，随后使用算法自己的 pytest 配置
++.\.venv\Scripts\Activate.ps1
++cd algorithm
++python -m pytest
++```
+ 
+-| 任务 | 内容 | 验收 |
+-| --- | --- | --- |
+-| F3-T02 | 定位与校正 | 中间结果可视化，定位召回 ≥95% |
+-| F3-T03 | 分割与识别 | 模型文件可复现训练，单帧 ≤300ms |
+-| F3-T04 | 后处理 | 统一为 `recognize()` 契约 |
+-| F3-T05 | 评测 | 分场景准确率表 + 三方法对比 |
++算法完整测试包含依赖历史模型/本地数据的实验用例；缺失资源的结果在本次集成回执中逐项列出。
++Windows 上临时目录应使用 ASCII 路径，旧测试中的 OpenCV 文件读写不支持中文临时路径。
++冻结测试集已正式运行一次，本次集成只使用金样例与单元测试，不重跑冻结测试集。
++评测数字与限制见 `reports/scoreboard.md`；G3 视频端到端待真实视频。
+diff --git a/docs/TASKS.md b/docs/TASKS.md
+index 835ed62..105c77a 100644
+--- a/docs/TASKS.md
++++ b/docs/TASKS.md
+@@ -22,12 +22,12 @@
+ 
+ | 编号 | 任务 | 优先级 | 验收 | 状态 |
+ | --- | --- | --- | --- | --- |
+-| F3-T01 | 数据采集与标注（配合贺锦晗） | P0 | ≥500 张已标注 + 分布表 | 待做 |
+-| F3-T02 | 定位与校正 | P0 | 中间结果可视化，召回 ≥95% | 待做 |
+-| F3-T03 | 字符分割 + CNN 训练 | P0 | 模型可复现，单帧 ≤300ms | 待做 |
+-| F3-T04 | 后处理与多帧投票 | P0 | `refine()` 实现，格式校验生效 | 待做 |
+-| F3-T05 | 评测与三方法对比 | P1 | 分场景准确率表 + 混淆矩阵 | 待做 |
+-| F3-T06 | 与后端联调（`/recognize` 契约） | P0 | `pipeline.recognize` 返回结构一致 | 待做 |
++| F3-T01 | CCPD2019/2020 公开标注数据整理（非自采） | P0 | 开发集 val1000（1000 张）、devhard（2100 张）；冻结测试集 300 张（清晰 150，夜间、倾斜、污损各 50） | 已完成 |
++| F3-T02 | 定位与校正 | P0 | 默认 plate_det_v1 定位与透视校正已接入；积分板默认流程的 Top-3 定位召回列未提供数值，暂不报告该指标 | 已完成 |
++| F3-T03 | 字符分割 + CNN / 整牌识别 | P0 | lpr-1.0.0+char_cnn_v2+plate_det_v1+crnn_v4+box_reader_v3；单帧 P95 105.3 ms（CPU、1280×720、2 线程） | 已完成 |
++| F3-T04 | 后处理与多帧投票 | P0 | 格式与位置约束解码、置信度门槛、Top-k 候选；lpr/voting.py 按字符置信度加权投票及按车道维护会话 | 已完成 |
++| F3-T05 | 评测与三方法对比 | P1 | 冻结测试仅一次：清晰 148/150 = 98.67%、夜间 48/50 = 96.00%、倾斜 49/50 = 98.00%、污损 48/50 = 96.00%；自动通过精度 282/283 = 99.65%；三方法对比与混淆矩阵随 11-10 算法评测报告交付；G3 视频端到端待真实视频 | 进行中 |
++| F3-T06 | 与后端联调（recognize 六字段契约） | P0 | 真实图片入场、客户端调用、失败 3001 转人工与线程池接线；lpr 覆盖率 94.54% | 已完成（本分支） |
+ 
+ ## 宫浩澄（M5/M6）
+ 
+diff --git a/docs/api.md b/docs/api.md
+index d1f2dc6..0e62344 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -67,7 +67,7 @@
+ { "lane_id": 1, "plate_no": "鲁B12345", "image_base64": null }
+ ```
+ 
+-`plate_no` 为空时由识别服务给出（当前为占位识别，见 `services/recognition/client.py`）。
++提供 `plate_no` 时直接使用给定车牌，不调用算法。`plate_no` 为空且提供 `image_base64` 时走真实识别；非 OK 一律返回 HTTP 422、错误码 3001 及识别失败说明，转人工确认（包含低置信度、坏图片和模型加载异常）。不给图也不给车牌时仍保留占位识别 `鲁B12345`，供留空演示使用。入场、出场均通过线程池调用算法；见 `services/recognition/client.py`。
+ 
+ 校验顺序（失败即返回对应错误码）：
+ 车道存在 → 车道在线（2011）→ 黑名单/冻结（2008）→ 重复入场（2003）→ 欠费拦截（2009）。
+-- 
+2.55.0.windows.3
+

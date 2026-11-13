@@ -1,0 +1,794 @@
+From dec804eee9d38da940e5f5ccbfad5ed3d410c3dc Mon Sep 17 00:00:00 2001
+From: tonyswift868
+ <205869700+tonyswift868@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 08:04:44 +0900
+Subject: [PATCH 6/6] =?UTF-8?q?chore(lpr):=20=E5=AF=BC=E5=85=A5=E9=A1=BA?=
+ =?UTF-8?q?=E5=BA=8F=E6=8C=89=E5=9B=A2=E9=98=9F=E4=BB=93=E5=BA=93=E5=B8=83?=
+ =?UTF-8?q?=E5=B1=80=E9=87=8D=E6=8E=92?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+同步 M2 本地仓库 develop：本地补齐 algorithm/__init__.py 后，ruff 在两边对 lpr/lpr_tools 的分组判定一致，本提交只重排导入块内顺序。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ algorithm/lpr_tools/calib_layout.py                     | 1 -
+ algorithm/lpr_tools/data/build_plates.py                | 1 -
+ algorithm/lpr_tools/data/build_plates_v2.py             | 1 -
+ algorithm/lpr_tools/data/finalize_plates.py             | 1 -
+ algorithm/lpr_tools/data/pick_golden.py                 | 1 -
+ algorithm/lpr_tools/eval/agree_threshold.py             | 1 -
+ algorithm/lpr_tools/eval/arbitration.py                 | 1 -
+ algorithm/lpr_tools/eval/bench_latency.py               | 1 -
+ algorithm/lpr_tools/eval/box_direct.py                  | 1 -
+ algorithm/lpr_tools/eval/ceiling.py                     | 1 -
+ algorithm/lpr_tools/eval/crop_gap.py                    | 1 -
+ algorithm/lpr_tools/eval/daily.py                       | 1 -
+ algorithm/lpr_tools/eval/detector_size_study.py         | 1 -
+ algorithm/lpr_tools/eval/e1_threshold.py                | 1 -
+ algorithm/lpr_tools/eval/eval_accuracy.py               | 1 -
+ algorithm/lpr_tools/eval/fallback_selection.py          | 1 -
+ algorithm/lpr_tools/eval/frozen_once.py                 | 1 -
+ algorithm/lpr_tools/eval/index_samples.py               | 1 -
+ algorithm/lpr_tools/eval/province_pipeline.py           | 2 --
+ algorithm/lpr_tools/eval/route_features.py              | 1 -
+ algorithm/lpr_tools/eval/runtime_acceptance.py          | 1 -
+ algorithm/lpr_tools/eval/seventeen_camera.py            | 1 -
+ algorithm/lpr_tools/eval/three_route.py                 | 3 ---
+ algorithm/lpr_tools/eval/three_route_auto.py            | 1 -
+ algorithm/lpr_tools/eval_det.py                         | 2 --
+ algorithm/lpr_tools/eval_refine.py                      | 1 -
+ algorithm/lpr_tools/synth_ccpd.py                       | 3 +--
+ algorithm/lpr_tools/train/box_data_v2.py                | 1 -
+ algorithm/lpr_tools/train/build_chars.py                | 1 -
+ algorithm/lpr_tools/train/cache_box_crops.py            | 1 -
+ algorithm/lpr_tools/train/calibrate_box_reader.py       | 3 ---
+ algorithm/lpr_tools/train/calibrate_crnn_v2.py          | 1 -
+ algorithm/lpr_tools/train/calibrate_province_readers.py | 3 ---
+ algorithm/lpr_tools/train/eval_box_reader.py            | 1 -
+ algorithm/lpr_tools/train/eval_province_actual.py       | 1 -
+ algorithm/lpr_tools/train/eval_province_char.py         | 1 -
+ algorithm/lpr_tools/train/gpu_box_batches.py            | 3 +--
+ algorithm/lpr_tools/train/measure_crop_errors.py        | 1 -
+ algorithm/lpr_tools/train/profile_box_reader.py         | 1 -
+ algorithm/lpr_tools/train/profile_province_score.py     | 1 -
+ algorithm/lpr_tools/train/province_data.py              | 1 -
+ algorithm/lpr_tools/train/score_box_reader.py           | 3 +--
+ algorithm/lpr_tools/train/score_box_reader_v2.py        | 3 +--
+ algorithm/lpr_tools/train/score_province_readers.py     | 1 -
+ algorithm/lpr_tools/train/train_box_reader.py           | 6 ++----
+ algorithm/lpr_tools/train/train_box_reader_v2.py        | 3 +--
+ algorithm/lpr_tools/train/train_crnn_v2.py              | 3 +--
+ algorithm/lpr_tools/train/train_crnn_v3.py              | 5 ++---
+ algorithm/lpr_tools/train/train_province_readers.py     | 3 +--
+ algorithm/lpr_tools/train_refine.py                     | 1 -
+ 50 files changed, 11 insertions(+), 70 deletions(-)
+
+diff --git a/algorithm/lpr_tools/calib_layout.py b/algorithm/lpr_tools/calib_layout.py
+index 88e4419..eaae1e6 100644
+--- a/algorithm/lpr_tools/calib_layout.py
++++ b/algorithm/lpr_tools/calib_layout.py
+@@ -18,7 +18,6 @@ from lpr.config import load_config
+ from lpr.io_utils import imread
+ from lpr.segment import _fallback_binary_from_gray, fallback_binary_plate, segment
+ from lpr.types import PlateCandidate, RectifiedPlate
+-
+ from lpr_tools.data.ccpd import read_index
+ 
+ 
+diff --git a/algorithm/lpr_tools/data/build_plates.py b/algorithm/lpr_tools/data/build_plates.py
+index 0f45e7f..ebcba6c 100644
+--- a/algorithm/lpr_tools/data/build_plates.py
++++ b/algorithm/lpr_tools/data/build_plates.py
+@@ -25,7 +25,6 @@ from lpr.locate import box_iou, locate
+ from lpr.plate_rules import match_layout
+ from lpr.preprocess import preprocess
+ from lpr.rectify import rectify_candidates
+-
+ from lpr_tools.data.ccpd import read_index
+ from lpr_tools.data.manifest import image_path, read_manifest
+ 
+diff --git a/algorithm/lpr_tools/data/build_plates_v2.py b/algorithm/lpr_tools/data/build_plates_v2.py
+index 1fd4d6a..b626ae5 100644
+--- a/algorithm/lpr_tools/data/build_plates_v2.py
++++ b/algorithm/lpr_tools/data/build_plates_v2.py
+@@ -25,7 +25,6 @@ from lpr.pipeline import _in_roi, _merge_candidates
+ from lpr.preprocess import preprocess
+ from lpr.recognize import load_corner_detector
+ from lpr.rectify import rectify_candidates
+-
+ from lpr_tools.data.build_plates import FIELDS, _warp_gt
+ from lpr_tools.data.ccpd import read_index
+ from lpr_tools.data.manifest import image_path, read_manifest
+diff --git a/algorithm/lpr_tools/data/finalize_plates.py b/algorithm/lpr_tools/data/finalize_plates.py
+index 75a7631..63ea5ba 100644
+--- a/algorithm/lpr_tools/data/finalize_plates.py
++++ b/algorithm/lpr_tools/data/finalize_plates.py
+@@ -17,7 +17,6 @@ from pathlib import Path
+ 
+ from lpr.charset import PROVINCES
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.data.build_plates import FIELDS
+ 
+ 
+diff --git a/algorithm/lpr_tools/data/pick_golden.py b/algorithm/lpr_tools/data/pick_golden.py
+index e4f867c..734de09 100644
+--- a/algorithm/lpr_tools/data/pick_golden.py
++++ b/algorithm/lpr_tools/data/pick_golden.py
+@@ -9,7 +9,6 @@ import tempfile
+ from pathlib import Path
+ 
+ from lpr.plate_rules import match_layout
+-
+ from lpr_tools.data.ccpd import read_index
+ from lpr_tools.data.manifest import ManifestRow, parse_quad, read_manifest, write_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/agree_threshold.py b/algorithm/lpr_tools/eval/agree_threshold.py
+index d6b4e7c..6b7c4cb 100644
+--- a/algorithm/lpr_tools/eval/agree_threshold.py
++++ b/algorithm/lpr_tools/eval/agree_threshold.py
+@@ -23,7 +23,6 @@ from lpr.locate import locate
+ from lpr.preprocess import preprocess
+ from lpr.segment import segment
+ from lpr.types import RecogStatus as S
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path, read_manifest
+ from lpr_tools.eval.agree_bits import DecisionBits
+diff --git a/algorithm/lpr_tools/eval/arbitration.py b/algorithm/lpr_tools/eval/arbitration.py
+index 9d027f6..be6c679 100644
+--- a/algorithm/lpr_tools/eval/arbitration.py
++++ b/algorithm/lpr_tools/eval/arbitration.py
+@@ -19,7 +19,6 @@ from lpr.locate import locate
+ from lpr.preprocess import preprocess
+ from lpr.segment import segment
+ from lpr.types import RecogStatus as S
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path, read_manifest, write_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/bench_latency.py b/algorithm/lpr_tools/eval/bench_latency.py
+index 4d18bb3..21a3961 100644
+--- a/algorithm/lpr_tools/eval/bench_latency.py
++++ b/algorithm/lpr_tools/eval/bench_latency.py
+@@ -10,7 +10,6 @@ from pathlib import Path
+ 
+ import numpy as np
+ from lpr.io_utils import list_images
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path, read_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/box_direct.py b/algorithm/lpr_tools/eval/box_direct.py
+index 27f525d..de116f8 100644
+--- a/algorithm/lpr_tools/eval/box_direct.py
++++ b/algorithm/lpr_tools/eval/box_direct.py
+@@ -26,7 +26,6 @@ from lpr.locate import locate
+ from lpr.pipeline import _in_roi, _merge_candidates
+ from lpr.preprocess import preprocess
+ from lpr.recognize import load_corner_detector, load_plate_reader
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path
+ 
+diff --git a/algorithm/lpr_tools/eval/ceiling.py b/algorithm/lpr_tools/eval/ceiling.py
+index a59a074..db456d8 100644
+--- a/algorithm/lpr_tools/eval/ceiling.py
++++ b/algorithm/lpr_tools/eval/ceiling.py
+@@ -22,7 +22,6 @@ from lpr.preprocess import preprocess
+ from lpr.rectify import RectifiedPlate
+ from lpr.segment import segment
+ from lpr.types import PlateCandidate
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path
+ 
+diff --git a/algorithm/lpr_tools/eval/crop_gap.py b/algorithm/lpr_tools/eval/crop_gap.py
+index bcd1036..8687e14 100644
+--- a/algorithm/lpr_tools/eval/crop_gap.py
++++ b/algorithm/lpr_tools/eval/crop_gap.py
+@@ -29,7 +29,6 @@ from lpr.postprocess import decode
+ from lpr.preprocess import preprocess
+ from lpr.segment import segment
+ from lpr.types import PlateCandidate, RecogStatus, RectifiedPlate
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path
+ 
+diff --git a/algorithm/lpr_tools/eval/daily.py b/algorithm/lpr_tools/eval/daily.py
+index 54e6ed7..3a1c988 100644
+--- a/algorithm/lpr_tools/eval/daily.py
++++ b/algorithm/lpr_tools/eval/daily.py
+@@ -12,7 +12,6 @@ from datetime import datetime
+ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR, DEFAULT_CONFIG_PATH, load_config
+-
+ from lpr_tools.data.manifest import read_manifest, write_manifest
+ 
+ from .common import effective_config_info, model_identity
+diff --git a/algorithm/lpr_tools/eval/detector_size_study.py b/algorithm/lpr_tools/eval/detector_size_study.py
+index 45f7433..b46eef7 100644
+--- a/algorithm/lpr_tools/eval/detector_size_study.py
++++ b/algorithm/lpr_tools/eval/detector_size_study.py
+@@ -141,7 +141,6 @@ def evaluate(args):
+     from loguru import logger
+     from lpr.io_utils import imread
+     from lpr.pipeline import PlateRecognizer
+-
+     from lpr_tools.eval_det import camera_canvas
+ 
+     from .common import effective_config_info
+diff --git a/algorithm/lpr_tools/eval/e1_threshold.py b/algorithm/lpr_tools/eval/e1_threshold.py
+index 98fc5cf..a0e949c 100644
+--- a/algorithm/lpr_tools/eval/e1_threshold.py
++++ b/algorithm/lpr_tools/eval/e1_threshold.py
+@@ -16,7 +16,6 @@ from pathlib import Path
+ 
+ from lpr import PlateRecognizer
+ from lpr.config import ALGORITHM_DIR, load_config
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path, read_manifest
+ from lpr_tools.eval.arbitration import replay_attempts
+diff --git a/algorithm/lpr_tools/eval/eval_accuracy.py b/algorithm/lpr_tools/eval/eval_accuracy.py
+index 9f2e0a4..cedfe7f 100644
+--- a/algorithm/lpr_tools/eval/eval_accuracy.py
++++ b/algorithm/lpr_tools/eval/eval_accuracy.py
+@@ -24,7 +24,6 @@ from lpr.postprocess import decode
+ from lpr.segment import segment
+ from lpr.types import PlateCandidate, RecognitionResult, RectifiedPlate
+ from lpr.types import RecogStatus as S
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import CATEGORIES, image_path, read_manifest, write_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/fallback_selection.py b/algorithm/lpr_tools/eval/fallback_selection.py
+index b9a45d4..e13049d 100644
+--- a/algorithm/lpr_tools/eval/fallback_selection.py
++++ b/algorithm/lpr_tools/eval/fallback_selection.py
+@@ -8,7 +8,6 @@ import math
+ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR, load_config
+-
+ from lpr_tools.eval import agree_threshold
+ from lpr_tools.eval.common import effective_config_info
+ from lpr_tools.eval.index_samples import (
+diff --git a/algorithm/lpr_tools/eval/frozen_once.py b/algorithm/lpr_tools/eval/frozen_once.py
+index 6ad2dfd..3fabd8f 100644
+--- a/algorithm/lpr_tools/eval/frozen_once.py
++++ b/algorithm/lpr_tools/eval/frozen_once.py
+@@ -18,7 +18,6 @@ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR
+ from lpr.types import RecogStatus
+-
+ from lpr_tools.data.image_health import decode_image
+ from lpr_tools.data.manifest import image_path, read_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/index_samples.py b/algorithm/lpr_tools/eval/index_samples.py
+index 20d2bd2..2cb963e 100644
+--- a/algorithm/lpr_tools/eval/index_samples.py
++++ b/algorithm/lpr_tools/eval/index_samples.py
+@@ -12,7 +12,6 @@ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR
+ from lpr.plate_rules import match_layout
+-
+ from lpr_tools.data.ccpd import INDEX_FIELDS, read_index
+ from lpr_tools.data.manifest import COLORS, ManifestRow, image_path, parse_quad, read_manifest
+ 
+diff --git a/algorithm/lpr_tools/eval/province_pipeline.py b/algorithm/lpr_tools/eval/province_pipeline.py
+index d3b1158..1acfc85 100644
+--- a/algorithm/lpr_tools/eval/province_pipeline.py
++++ b/algorithm/lpr_tools/eval/province_pipeline.py
+@@ -137,7 +137,6 @@ def _run_panel(recognizer, panel: str, rows: list[dict], records_stream,
+     from lpr.errors import failure_result
+     from lpr.io_utils import imread
+     from lpr.types import RecogStatus
+-
+     from lpr_tools.train.province_synth import replace_province
+ 
+     records = []
+@@ -214,7 +213,6 @@ def run(*, config_path: Path | None, holdout_path: Path, synthetic_path: Path,
+     from lpr.charset import PROVINCES
+     from lpr.config import DEFAULT_CONFIG_PATH
+     from lpr.pipeline import PlateRecognizer
+-
+     from lpr_tools.train.province_synth import DEFAULT_FONT
+ 
+     config_path = Path(config_path or DEFAULT_CONFIG_PATH).resolve()
+diff --git a/algorithm/lpr_tools/eval/route_features.py b/algorithm/lpr_tools/eval/route_features.py
+index b10ef03..7a986a0 100644
+--- a/algorithm/lpr_tools/eval/route_features.py
++++ b/algorithm/lpr_tools/eval/route_features.py
+@@ -142,7 +142,6 @@ def enrich_trace(*, trace_path, config_path, output_path, detector_model=None,
+     import torch
+     from lpr.config import load_config
+     from lpr.recognize import load_corner_detector
+-
+     from lpr_tools.eval.box_direct import _actual_candidates
+ 
+     source = Path(trace_path).resolve()
+diff --git a/algorithm/lpr_tools/eval/runtime_acceptance.py b/algorithm/lpr_tools/eval/runtime_acceptance.py
+index 23a2b42..13bc64d 100644
+--- a/algorithm/lpr_tools/eval/runtime_acceptance.py
++++ b/algorithm/lpr_tools/eval/runtime_acceptance.py
+@@ -30,7 +30,6 @@ def run(config, manifests, expected_path, output, *, tolerance=1e-7):
+     from loguru import logger
+     from lpr.io_utils import imread
+     from lpr.pipeline import PlateRecognizer
+-
+     from lpr_tools.data.manifest import image_path, read_manifest
+ 
+     from .common import effective_config_info
+diff --git a/algorithm/lpr_tools/eval/seventeen_camera.py b/algorithm/lpr_tools/eval/seventeen_camera.py
+index 804863f..f3139c6 100644
+--- a/algorithm/lpr_tools/eval/seventeen_camera.py
++++ b/algorithm/lpr_tools/eval/seventeen_camera.py
+@@ -20,7 +20,6 @@ def run(input_path: Path, out_dir: Path) -> dict:
+     from lpr.config import DEFAULT_CONFIG_PATH
+     from lpr.io_utils import imread
+     from lpr.pipeline import PlateRecognizer
+-
+     from lpr_tools.eval_det import camera_canvas
+ 
+     from .common import effective_config_info
+diff --git a/algorithm/lpr_tools/eval/three_route.py b/algorithm/lpr_tools/eval/three_route.py
+index 390d887..59095f8 100644
+--- a/algorithm/lpr_tools/eval/three_route.py
++++ b/algorithm/lpr_tools/eval/three_route.py
+@@ -785,7 +785,6 @@ def _as_route_attempt(decision):
+ def _read_box_result(reader, crop, color, min_confidence, is_crnn, torch):
+     from lpr.pipeline import _decode_text
+     from lpr.recognize.crnn import CrnnReader
+-
+     from lpr_tools.eval.box_direct import _read_crnn_native
+ 
+     if crop is None or getattr(crop, "size", 0) == 0:
+@@ -820,7 +819,6 @@ def _live_record(image, sample, cfg, classifier, detector, reader, box_reader,
+     from lpr.pipeline import _rank
+     from lpr.segment import segment
+     from lpr.types import RecogStatus as Status
+-
+     from lpr_tools.eval.box_direct import _actual_candidates
+ 
+     row = sample.row
+@@ -972,7 +970,6 @@ def run_live(*, config, index, val_manifest, devhard_manifest, pad_x, pad_y,
+     import torch
+     from lpr.config import load_config
+     from lpr.recognize import load_classifier, load_corner_detector, load_plate_reader
+-
+     from lpr_tools.data.image_health import decode_image
+     from lpr_tools.data.manifest import image_path
+     from lpr_tools.eval.box_direct import RSS_LIMIT_BYTES, _read_brightness, _rss_bytes
+diff --git a/algorithm/lpr_tools/eval/three_route_auto.py b/algorithm/lpr_tools/eval/three_route_auto.py
+index 5d667ba..5add147 100644
+--- a/algorithm/lpr_tools/eval/three_route_auto.py
++++ b/algorithm/lpr_tools/eval/three_route_auto.py
+@@ -15,7 +15,6 @@ from collections import defaultdict
+ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.eval.route_split import path_key, split_assignments
+ from lpr_tools.eval.three_route import ROUTE_PAIRS, _fallback, _valid, validate_records
+ 
+diff --git a/algorithm/lpr_tools/eval_det.py b/algorithm/lpr_tools/eval_det.py
+index 7604154..dc4e147 100644
+--- a/algorithm/lpr_tools/eval_det.py
++++ b/algorithm/lpr_tools/eval_det.py
+@@ -203,7 +203,6 @@ def evaluate_scale_suite(manifest_path: Path, index_path: Path, detector_path: P
+     import numpy as np
+     import torch
+     from lpr.config import load_config
+-
+     from lpr_tools.eval.index_samples import path_key
+     from lpr_tools.eval_refine import _load_samples
+ 
+@@ -446,7 +445,6 @@ def evaluate(manifest_path: Path, index_path: Path, detector_path: Path,
+     from lpr.locate import locate
+     from lpr.pipeline import _decode_text, _in_roi, _merge_candidates
+     from lpr.preprocess import preprocess
+-
+     from lpr_tools.eval.index_samples import path_key
+     from lpr_tools.eval_refine import _load_samples
+ 
+diff --git a/algorithm/lpr_tools/eval_refine.py b/algorithm/lpr_tools/eval_refine.py
+index 9994e29..deda142 100644
+--- a/algorithm/lpr_tools/eval_refine.py
++++ b/algorithm/lpr_tools/eval_refine.py
+@@ -29,7 +29,6 @@ from lpr.pipeline import _decode_text, _in_roi, _merge_candidates, _rectificatio
+ from lpr.preprocess import preprocess
+ from lpr.recognize.crnn import CrnnReader
+ from lpr.types import PlateCandidate
+-
+ from lpr_tools.data.manifest import FIELDS, image_path, read_manifest
+ from lpr_tools.eval.common import effective_config_info
+ from lpr_tools.eval.index_samples import IndexSample, path_key, read_samples
+diff --git a/algorithm/lpr_tools/synth_ccpd.py b/algorithm/lpr_tools/synth_ccpd.py
+index d913273..cb39540 100644
+--- a/algorithm/lpr_tools/synth_ccpd.py
++++ b/algorithm/lpr_tools/synth_ccpd.py
+@@ -22,10 +22,9 @@ import numpy as np
+ from lpr.charset import LETTERS, PROVINCES
+ from lpr.config import ALGORITHM_DIR
+ from lpr.io_utils import imwrite
+-from PIL import Image, ImageDraw, ImageFont
+-
+ from lpr_tools.data.ccpd import ADS, ALPHABETS, PROVINCES_CCPD
+ from lpr_tools.synth_scenes import CENTERS7, CENTERS8, draw_plate
++from PIL import Image, ImageDraw, ImageFont
+ 
+ IMAGE_SIZE = (720, 1160)  # width, height: portrait CCPD frame
+ SUBSETS_2019 = ("ccpd_base", "ccpd_db", "ccpd_tilt", "ccpd_blur", "ccpd_np")
+diff --git a/algorithm/lpr_tools/train/box_data_v2.py b/algorithm/lpr_tools/train/box_data_v2.py
+index 821481f..972e48e 100644
+--- a/algorithm/lpr_tools/train/box_data_v2.py
++++ b/algorithm/lpr_tools/train/box_data_v2.py
+@@ -17,7 +17,6 @@ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.train import box_data
+ 
+ ROOT = Path(__file__).resolve().parents[3]
+diff --git a/algorithm/lpr_tools/train/build_chars.py b/algorithm/lpr_tools/train/build_chars.py
+index bc54c64..6a739fc 100644
+--- a/algorithm/lpr_tools/train/build_chars.py
++++ b/algorithm/lpr_tools/train/build_chars.py
+@@ -25,7 +25,6 @@ from lpr.pipeline import _layouts_to_try, _rectifications
+ from lpr.preprocess import preprocess
+ from lpr.segment import segment as segment_plate
+ from lpr.types import PlateCandidate, RectifiedPlate
+-
+ from lpr_tools.data.ccpd import INDEX_FIELDS as CCPD_INDEX_FIELDS
+ from lpr_tools.data.manifest import image_path as manifest_image_path
+ from lpr_tools.data.manifest import read_manifest
+diff --git a/algorithm/lpr_tools/train/cache_box_crops.py b/algorithm/lpr_tools/train/cache_box_crops.py
+index f70e2b2..f84ec58 100644
+--- a/algorithm/lpr_tools/train/cache_box_crops.py
++++ b/algorithm/lpr_tools/train/cache_box_crops.py
+@@ -21,7 +21,6 @@ import cv2
+ import numpy as np
+ from lpr.boxcrop import crop_box
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.train.box_data import bbox_from_quad, iter_rows, sha256_file
+ 
+ CACHE_FIELDS = ("path", "label", "subset", "brightness", "sha256", "quad", "cache_file",
+diff --git a/algorithm/lpr_tools/train/calibrate_box_reader.py b/algorithm/lpr_tools/train/calibrate_box_reader.py
+index 79c0408..d74a2bb 100644
+--- a/algorithm/lpr_tools/train/calibrate_box_reader.py
++++ b/algorithm/lpr_tools/train/calibrate_box_reader.py
+@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
+ from lpr.charset import CHAR_TO_INDEX
+ from lpr.config import ALGORITHM_DIR
+ from lpr.plate_rules import match_layout
+-
+ from lpr_tools.train.box_data import bbox_from_quad
+ 
+ if TYPE_CHECKING:
+@@ -353,7 +352,6 @@ def _report_fold(rows: list[dict[str, str]], logits_list: list[torch.Tensor],
+                  temperature: float) -> dict[str, Any]:
+     import torch
+     from lpr.recognize.crnn import _greedy_decode
+-
+     from lpr_tools.train.calibrate_crnn_v2 import _ctc_loss, _ece_summary
+ 
+     before_nll = after_nll = 0.0
+@@ -401,7 +399,6 @@ def calibrate(index_path: Path = DEFAULT_INDEX, best_path: Path = DEFAULT_BEST,
+     import torch
+     from lpr.recognize import read_manifest, write_manifest_entry
+     from lpr.recognize.box_reader import checkpoint, model_from_checkpoint
+-
+     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
+ 
+     if model_path.exists():
+diff --git a/algorithm/lpr_tools/train/calibrate_crnn_v2.py b/algorithm/lpr_tools/train/calibrate_crnn_v2.py
+index ef1780a..8604369 100644
+--- a/algorithm/lpr_tools/train/calibrate_crnn_v2.py
++++ b/algorithm/lpr_tools/train/calibrate_crnn_v2.py
+@@ -17,7 +17,6 @@ import torch.nn.functional as F
+ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
+ from lpr.recognize import write_manifest_entry
+ from lpr.recognize.crnn import CrnnNet, _greedy_decode, plate_tensor
+-
+ from lpr_tools.train.eval_crnn_v2 import CONFIDENCE_EDGES, _confidence_bin, _resolve_crop
+ 
+ BOUNDS = (0.05, 10.0)
+diff --git a/algorithm/lpr_tools/train/calibrate_province_readers.py b/algorithm/lpr_tools/train/calibrate_province_readers.py
+index 4566117..4845220 100644
+--- a/algorithm/lpr_tools/train/calibrate_province_readers.py
++++ b/algorithm/lpr_tools/train/calibrate_province_readers.py
+@@ -140,7 +140,6 @@ def _collect_logits(kind: str, model, rows, tune_path: Path, box_pad, input_size
+     from lpr.boxcrop import crop_box
+     from lpr.recognize.box_reader import box_tensor
+     from lpr.recognize.crnn import plate_tensor
+-
+     from lpr_tools.train.box_data import bbox_from_quad
+ 
+     logits_list = []
+@@ -176,7 +175,6 @@ def _fit_and_report(kind: str, state: dict[str, Any], rows_fit, rows_report,
+     import torch
+     from lpr.recognize.box_reader import model_from_checkpoint
+     from lpr.recognize.crnn import CrnnNet
+-
+     from lpr_tools.train.calibrate_box_reader import _report_fold
+     from lpr_tools.train.calibrate_crnn_v2 import BOUNDS, fit_temperature
+ 
+@@ -205,7 +203,6 @@ def calibrate(kind: str, model_path: Path, tune_path: Path, *,
+               data_dir: Path = _ROOT / "algorithm" / "out" / "data" / "batch12") -> dict[str, Any]:
+     import torch
+     from lpr.recognize import read_manifest, verify_model, write_manifest_entry
+-
+     from lpr_tools.train.calibrate_box_reader import read_calibration_rows
+ 
+     if kind not in {"box", "crnn", "char"}:
+diff --git a/algorithm/lpr_tools/train/eval_box_reader.py b/algorithm/lpr_tools/train/eval_box_reader.py
+index 6f32b2d..d5da69a 100644
+--- a/algorithm/lpr_tools/train/eval_box_reader.py
++++ b/algorithm/lpr_tools/train/eval_box_reader.py
+@@ -22,7 +22,6 @@ from pathlib import Path
+ from typing import Any
+ 
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.train.box_data import bbox_from_quad, sample_jitter
+ from lpr_tools.train.box_data import jitter_bbox as apply_box_jitter
+ from lpr_tools.train.box_data import read_jitter_samples as measured_box_deltas
+diff --git a/algorithm/lpr_tools/train/eval_province_actual.py b/algorithm/lpr_tools/train/eval_province_actual.py
+index 4f9f3c2..a068ca4 100644
+--- a/algorithm/lpr_tools/train/eval_province_actual.py
++++ b/algorithm/lpr_tools/train/eval_province_actual.py
+@@ -77,7 +77,6 @@ def main(argv=None):
+     )
+     from lpr.segment import segment
+     from lpr.types import RecogStatus
+-
+     from lpr_tools.data.image_health import decode_image
+     from lpr_tools.eval.box_direct import _actual_candidates, _read_brightness
+     from lpr_tools.eval.common import effective_config_info
+diff --git a/algorithm/lpr_tools/train/eval_province_char.py b/algorithm/lpr_tools/train/eval_province_char.py
+index f8649cf..da90ca9 100644
+--- a/algorithm/lpr_tools/train/eval_province_char.py
++++ b/algorithm/lpr_tools/train/eval_province_char.py
+@@ -240,7 +240,6 @@ def evaluate(model_path: Path, data_dir: Path, config_path: Path, output: Path |
+     from lpr.recognize import load_classifier
+     from lpr.recognize.cnn import CnnClassifier
+     from lpr.recognize.cnn_model import CharCNN
+-
+     from lpr_tools.train.province_char_input import normalized_first_char
+     from lpr_tools.train.province_inference_timing import instrument_method, summarize
+     from lpr_tools.train.province_synth import replace_province
+diff --git a/algorithm/lpr_tools/train/gpu_box_batches.py b/algorithm/lpr_tools/train/gpu_box_batches.py
+index fb91a23..d7e02c5 100644
+--- a/algorithm/lpr_tools/train/gpu_box_batches.py
++++ b/algorithm/lpr_tools/train/gpu_box_batches.py
+@@ -10,9 +10,8 @@ import numpy as np
+ import torch
+ from lpr.boxcrop import crop_box
+ from lpr.recognize.box_reader import BOX_PAD, box_tensor
+-from torchvision.io import ImageReadMode, decode_jpeg, read_file
+-
+ from lpr_tools.train.box_data import bbox_from_quad, jitter_bbox, sample_jitter
++from torchvision.io import ImageReadMode, decode_jpeg, read_file
+ 
+ 
+ def rgb_region_for_box(rgb: torch.Tensor, bbox: tuple, gt_bbox: tuple,
+diff --git a/algorithm/lpr_tools/train/measure_crop_errors.py b/algorithm/lpr_tools/train/measure_crop_errors.py
+index 636a283..e80eef5 100644
+--- a/algorithm/lpr_tools/train/measure_crop_errors.py
++++ b/algorithm/lpr_tools/train/measure_crop_errors.py
+@@ -26,7 +26,6 @@ from lpr.locate import locate
+ from lpr.pipeline import _in_roi, _merge_candidates, _rectifications
+ from lpr.preprocess import preprocess
+ from lpr.recognize import load_corner_detector
+-
+ from lpr_tools.data.image_health import decode_image
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+diff --git a/algorithm/lpr_tools/train/profile_box_reader.py b/algorithm/lpr_tools/train/profile_box_reader.py
+index 6556945..ebfdd45 100644
+--- a/algorithm/lpr_tools/train/profile_box_reader.py
++++ b/algorithm/lpr_tools/train/profile_box_reader.py
+@@ -11,7 +11,6 @@ import numpy as np
+ import torch
+ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
+ from lpr.recognize.box_reader import INPUT_SIZE, BoxNet, BoxPlateReader
+-
+ from lpr_tools.train.train_box_reader import free_ram_bytes, process_ram_bytes
+ 
+ 
+diff --git a/algorithm/lpr_tools/train/profile_province_score.py b/algorithm/lpr_tools/train/profile_province_score.py
+index 5b87ef4..7a4e710 100644
+--- a/algorithm/lpr_tools/train/profile_province_score.py
++++ b/algorithm/lpr_tools/train/profile_province_score.py
+@@ -20,7 +20,6 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+ 
+ def profile(model_path: Path, data_dir: Path, output: Path):
+     from lpr import recognize
+-
+     from lpr_tools.train.province_inference_timing import instrument_method, summarize
+     from lpr_tools.train.score_province_readers import score
+ 
+diff --git a/algorithm/lpr_tools/train/province_data.py b/algorithm/lpr_tools/train/province_data.py
+index 6a5fa88..68fe300 100644
+--- a/algorithm/lpr_tools/train/province_data.py
++++ b/algorithm/lpr_tools/train/province_data.py
+@@ -12,7 +12,6 @@ from pathlib import Path
+ 
+ from lpr.charset import PROVINCES
+ from lpr.config import ALGORITHM_DIR
+-
+ from lpr_tools.train import box_data
+ 
+ ROOT = Path(__file__).resolve().parents[3]
+diff --git a/algorithm/lpr_tools/train/score_box_reader.py b/algorithm/lpr_tools/train/score_box_reader.py
+index bb25071..2864a7f 100644
+--- a/algorithm/lpr_tools/train/score_box_reader.py
++++ b/algorithm/lpr_tools/train/score_box_reader.py
+@@ -8,9 +8,8 @@ from pathlib import Path
+ import cv2
+ import torch
+ from lpr.recognize.box_reader import BoxPlateReader
+-from torch.utils.data import DataLoader
+-
+ from lpr_tools.train.train_box_reader import BoxDataset, collate, evaluate, process_ram_bytes
++from torch.utils.data import DataLoader
+ 
+ 
+ def main():
+diff --git a/algorithm/lpr_tools/train/score_box_reader_v2.py b/algorithm/lpr_tools/train/score_box_reader_v2.py
+index 20e5d3e..a1ca0d5 100644
+--- a/algorithm/lpr_tools/train/score_box_reader_v2.py
++++ b/algorithm/lpr_tools/train/score_box_reader_v2.py
+@@ -16,10 +16,9 @@ import cv2  # noqa: E402 - temporary directory must be configured before depende
+ import torch  # noqa: E402 - temporary directory must be configured before dependency imports
+ from lpr.recognize.box_reader import BoxPlateReader  # noqa: E402 - temporary directory must be configured before dependency imports
+ from lpr.recognize.crnn import _greedy_decode  # noqa: E402 - temporary directory must be configured before dependency imports
+-from torch.utils.data import DataLoader  # noqa: E402 - temporary directory must be configured before dependency imports
+-
+ from lpr_tools.train.train_box_reader import process_ram_bytes  # noqa: E402 - temporary directory must be configured before dependency imports
+ from lpr_tools.train.train_box_reader_v2 import BoxDatasetV2, collate_v2  # noqa: E402 - temporary directory must be configured before dependency imports
++from torch.utils.data import DataLoader  # noqa: E402 - temporary directory must be configured before dependency imports
+ 
+ 
+ def score(model_path, tune_path):
+diff --git a/algorithm/lpr_tools/train/score_province_readers.py b/algorithm/lpr_tools/train/score_province_readers.py
+index 40f2886..b479ec0 100644
+--- a/algorithm/lpr_tools/train/score_province_readers.py
++++ b/algorithm/lpr_tools/train/score_province_readers.py
+@@ -86,7 +86,6 @@ def score(kind: str, model_path: Path, data_dir: Path, output: Path | None = Non
+     from lpr.recognize.box_reader import BoxPlateReader, model_from_checkpoint
+     from lpr.recognize.cnn_model import CharCNN
+     from lpr.recognize.crnn import CrnnNet, CrnnReader
+-
+     from lpr_tools.train.province_char_input import normalized_first_char
+     from lpr_tools.train.province_synth import replace_province
+ 
+diff --git a/algorithm/lpr_tools/train/train_box_reader.py b/algorithm/lpr_tools/train/train_box_reader.py
+index 6735043..8592773 100644
+--- a/algorithm/lpr_tools/train/train_box_reader.py
++++ b/algorithm/lpr_tools/train/train_box_reader.py
+@@ -26,11 +26,10 @@ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
+ from lpr.recognize import file_sha256
+ from lpr.recognize.box_reader import BOX_PAD, INPUT_SIZE, BoxNet, box_tensor, checkpoint
+ from lpr.recognize.crnn import _greedy_decode
++from lpr_tools.train.box_data import bbox_from_quad, iter_rows, jitter_bbox, sample_jitter
+ from torch import nn
+ from torch.utils.data import DataLoader, Dataset
+ 
+-from lpr_tools.train.box_data import bbox_from_quad, iter_rows, jitter_bbox, sample_jitter
+-
+ 
+ def free_ram_bytes() -> int:
+     if os.name != "nt":
+@@ -142,9 +141,8 @@ def row_crop(row: dict, bbox: tuple, pad: tuple = BOX_PAD, *,
+             x, y, w, h = bbox
+             return crop_box(source, (x-int(row["x0"]), y-int(row["y0"]), w, h), *pad)
+     if gpu_fallback:
+-        from torchvision.io import ImageReadMode, decode_jpeg, read_file
+-
+         from lpr_tools.train.gpu_box_batches import rgb_region_for_box
++        from torchvision.io import ImageReadMode, decode_jpeg, read_file
+         rgb = decode_jpeg(read_file(row["path"]), mode=ImageReadMode.RGB, device="cuda")
+         source, local = rgb_region_for_box(rgb, bbox, bbox_from_quad(row["quad"]), pad)
+         return crop_box(source, local, *pad)
+diff --git a/algorithm/lpr_tools/train/train_box_reader_v2.py b/algorithm/lpr_tools/train/train_box_reader_v2.py
+index e150b82..f36018b 100644
+--- a/algorithm/lpr_tools/train/train_box_reader_v2.py
++++ b/algorithm/lpr_tools/train/train_box_reader_v2.py
+@@ -23,8 +23,6 @@ from lpr.charset import CHAR_TO_INDEX, NUM_CLASSES
+ from lpr.recognize import file_sha256
+ from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint
+ from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2, BoxNetV2
+-from torch import nn
+-
+ from lpr_tools.train.box_data import parse_quad
+ from lpr_tools.train.box_data_v2 import GROUPS, build_balanced_multiplicity
+ from lpr_tools.train.train_box_reader import (
+@@ -34,6 +32,7 @@ from lpr_tools.train.train_box_reader import (
+     process_ram_bytes,
+     row_crop,
+ )
++from torch import nn
+ 
+ 
+ def affine_target(quad, bbox, crop_shape, pad=BOX_PAD) -> torch.Tensor:
+diff --git a/algorithm/lpr_tools/train/train_crnn_v2.py b/algorithm/lpr_tools/train/train_crnn_v2.py
+index fc1fe7f..58439b4 100644
+--- a/algorithm/lpr_tools/train/train_crnn_v2.py
++++ b/algorithm/lpr_tools/train/train_crnn_v2.py
+@@ -17,11 +17,10 @@ import torch
+ from lpr.charset import CHAR_TO_INDEX, CHARSET
+ from lpr.recognize import file_sha256, write_manifest_entry
+ from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
++from lpr_tools.train.train_crnn import _collate, _worker_init
+ from torch import nn
+ from torch.utils.data import DataLoader, Dataset
+ 
+-from lpr_tools.train.train_crnn import _collate, _worker_init
+-
+ SUBSETS = ("db", "blur", "tilt", "rotate", "fn", "challenge", "weather")
+ MIXTURE = {**{key: .10 for key in SUBSETS}, "base7": .12, "real8": .10, "font": .08}
+ 
+diff --git a/algorithm/lpr_tools/train/train_crnn_v3.py b/algorithm/lpr_tools/train/train_crnn_v3.py
+index dbc750a..5626028 100644
+--- a/algorithm/lpr_tools/train/train_crnn_v3.py
++++ b/algorithm/lpr_tools/train/train_crnn_v3.py
+@@ -15,12 +15,11 @@ import torch
+ from lpr.charset import CHAR_TO_INDEX
+ from lpr.recognize import file_sha256, write_manifest_entry
+ from lpr.recognize.crnn import BLANK, INPUT_SIZE, CrnnNet, plate_tensor
+-from torch import nn
+-from torch.utils.data import DataLoader, Dataset
+-
+ from lpr_tools.data.ccpd import parse_ccpd_name
+ from lpr_tools.train import train_crnn_v2 as v2
+ from lpr_tools.train.train_crnn import _collate, _worker_init
++from torch import nn
++from torch.utils.data import DataLoader, Dataset
+ 
+ SUBSETS = v2.SUBSETS
+ MIXTURE = {**{s: .62 / 7 for s in SUBSETS}, 'base7': .12, 'real8': .18, 'font': .08}
+diff --git a/algorithm/lpr_tools/train/train_province_readers.py b/algorithm/lpr_tools/train/train_province_readers.py
+index feb304c..0851678 100644
+--- a/algorithm/lpr_tools/train/train_province_readers.py
++++ b/algorithm/lpr_tools/train/train_province_readers.py
+@@ -38,8 +38,6 @@ from lpr.recognize.box_reader import BOX_PAD, box_tensor, checkpoint, model_from
+ from lpr.recognize.box_reader_v2 import INPUT_SIZE_V2  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+ from lpr.recognize.cnn_model import CharCNN  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+ from lpr.recognize.crnn import CrnnNet, plate_tensor  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+-from torch import nn  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+-
+ from lpr_tools.train.box_data import bbox_from_quad, parse_quad  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+ from lpr_tools.train.box_data_v2 import build_balanced_multiplicity  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+ from lpr_tools.train.province_char_input import normalized_first_char  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+@@ -53,6 +51,7 @@ from lpr_tools.train.train_box_reader import (  # noqa: E402 - temporary directo
+     row_crop,
+ )
+ from lpr_tools.train.train_box_reader_v2 import affine_target  # noqa: E402 - temporary directory and thread limits must precede dependency imports
++from torch import nn  # noqa: E402 - temporary directory and thread limits must precede dependency imports
+ 
+ FORMAT='province-reader-training-v1'
+ render_lock=threading.Lock()
+diff --git a/algorithm/lpr_tools/train_refine.py b/algorithm/lpr_tools/train_refine.py
+index 2742485..08fdc04 100644
+--- a/algorithm/lpr_tools/train_refine.py
++++ b/algorithm/lpr_tools/train_refine.py
+@@ -27,7 +27,6 @@ from lpr.corner_net import (
+     refine_coordinates,
+ )
+ from lpr.io_utils import imread
+-
+ from lpr_tools import train_corner as source
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+-- 
+2.55.0.windows.3
+
